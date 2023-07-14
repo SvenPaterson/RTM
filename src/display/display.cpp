@@ -35,14 +35,16 @@ elapsedMillis debugTimer; // DELETE WHEN COMPLETE
 #define MAX_CHARS_PER_LINE 20
 #define WHITE_RGB 255, 255, 255
 #define RED_RGB 255, 255, 0
+#define REFRESH_INTERVAL 2000 // interval, in millis, between screen refreshes
 SerLCD lcd;
 bool isScreenUpdate = true;
 bool isBacklightOn = true;
 String status_msg;
+String msg;
 String test_status;
 
 // PRESSURE SENSORS
-#define PRESS_AVG_TIME 1500
+#define PRESS_AVG_TIME 10000 // duration over which sensor will be averaged in millis
 SparkFun_MicroPressure mpr; // use default values with reset and EOC pins unused
 double press_cal = 0.0;
 int sample_count = 0;
@@ -65,9 +67,10 @@ void printRowPair(const int& col, const int& row, const int& width,
 void printFourColumnRow(const int& row,
                         const String& str1, const String& str2,
                         const String& str3, const String& str4);
-String padBetweenChars(const int& num_chars, const String& str1, const String& str2);              
+String padBetweenChars(const int& num_chars, const String& str1, const String& str2);
+String rightJustifiedString(const String& str);            
 void showError(const String& errorMessage);
-void initScreen(const String& init_msg, const String status_msg = "");
+void initScreen(const String& init_msg, const bool& cls = true, const String& status_msg = "");
 
 
 /* ----------------------------- INTIAL SETUP ----------------------------- */
@@ -91,35 +94,32 @@ void setup() {
   Serial.println(" - lcd screen initialized");
 
   // Initialize the pressure sensor and set zero offset
-  initScreen("Connecting to MicroPressure Sensor...");
-  delay(2000);
   if (!mpr.begin()) {
     showError("Cannot connect to MicroPressure Sensor!");
   }
   delay(5);
   avgPressTimer = 0;
   sampleTimer = 0;
-  String zero_offset_msg = "Averaging ambient pressure in lab:";
+  String zero_offset_msg = "Determining zero offset for pressure sensor:";
+  initScreen(zero_offset_msg);
   while (avgPressTimer <= PRESS_AVG_TIME) {
     if (sampleTimer > 1000) {
-      initScreen(zero_offset_msg);
       press_cal += mpr.readPressure();
       sample_count++;  
       sampleTimer = 0;
-      lcd.setCursor(3, 3);
-      lcd.print(sample_count);
-      lcd.setCursor(String(sample_count).length()+4, 3);
-      lcd.print("secs");
+      msg = "please wait... " + String(sample_count) + "s";
+      initScreen(zero_offset_msg, false, msg);
     }
   }
   press_cal /= sample_count;
   press_cal = 14.7;
-  initScreen(zero_offset_msg);
+/*   initScreen(zero_offset_msg, false);
   delay(1000);
-  initScreen(zero_offset_msg, "done!");
-  delay(2000);
+  initScreen(zero_offset_msg, false);
+  delay(2000); */
   Serial.println(" - pressure sensor initialized");
-  initScreen("Sensor offset by", String(press_cal)+" psi");
+  msg = "offset: " + String(press_cal) + " psi"; 
+  initScreen(zero_offset_msg, false, msg);
   delay(3000);
 
   // Initialize the thermocouple sensor
@@ -137,7 +137,7 @@ void setup() {
   test_status = "TESTING";
 }
 
-// MAIN LOOP
+/* -------------------------------- MAIN LOOP -------------------------------- */
 void loop() {
   // DEBUGGING LOOP
   // add simulated actions here
@@ -154,8 +154,8 @@ void loop() {
 void updateLCD(double& press_cal, int& loop_count, String& test_status, double& setpoint) {
   // I think this function could be passed a struct instead of each and 
   // every argument
-
-  // Read all sensors
+  
+  // Read all sensors and construct strings
   String degF = String((char)223) + "F";
   String loops = String(loop_count);
   String seal_temp = String(sealTempSensor.getThermocoupleTemp(false), 0) + degF;
@@ -163,19 +163,16 @@ void updateLCD(double& press_cal, int& loop_count, String& test_status, double& 
   String sump_temp = String(sumpTempSensor.getThermocoupleTemp(false), 0) + degF;
   delay(5);
   String pressure = String((mpr.readPressure() - press_cal));
-  
-  pressure = "12.3";                                // DEBUGGING ONLY, DELETE ON RELEASE !!!!
-  double CW_torque = 1.26;
-  double CCW_torque = -0.98;
+  pressure = "12.3";         // DEBUGGING ONLY, DELETE ON RELEASE !!!!
+  double CW_torque = 1.26;   // DEBUGGING ONLY, DELETE ON RELEASE !!!!
+  double CCW_torque = -0.98; // DEBUGGING ONLY, DELETE ON RELEASE !!!!
   String torques = String(CW_torque) + " / " + String(CCW_torque);
-  
   String set_point = String(setpoint, 0) + degF;
-
-  if (LCDTimer > 2000) {
+  
+  if (LCDTimer > REFRESH_INTERVAL) {
     LCDTimer = 0;
     printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status);
   
-
     if (isScreenUpdate) {
       isScreenUpdate = !isScreenUpdate;
       printRowPair(0, 1, MAX_CHARS_PER_LINE, "Setpoint:", set_point);
@@ -249,8 +246,10 @@ void showError(const String& errorMessage) {
   }
 }
 
-void initScreen(const String& init_msg, const String status_msg) {
-  lcd.clear();
+void initScreen(const String& init_msg, const bool& cls, const String& status_msg) {
+  if (cls) {
+    lcd.clear();
+  }
   // Print the message with line wrapping
   int startPos = 0;
   int endPos = 0;
@@ -289,9 +288,18 @@ void initScreen(const String& init_msg, const String status_msg) {
   }
   
 
-  lcd.setCursor(3, 7);
+  lcd.setCursor(0, 3);
 
   if (status_msg != "") {
-    lcd.print(status_msg);
+    lcd.print(rightJustifiedString(status_msg));
   }
+}
+
+String rightJustifiedString(const String& str) {
+  String paddedStr = str;
+  while (paddedStr.length() < MAX_CHARS_PER_LINE) {
+    paddedStr = " " + paddedStr;
+  }
+  Serial.println(paddedStr);
+  return paddedStr;
 }
