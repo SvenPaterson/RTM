@@ -1,7 +1,9 @@
 #include <Arduino.h>
+#include <string.h>
 #include <Wire.h>
 #include <SerLCD.h>
 #include <SparkFun_MicroPressure.h>
+#include <SparkFun_MCP9600.h>
 
 // define the board I/O pin numbers
 #define SD_DETECT_PIN 0
@@ -25,8 +27,9 @@
 elapsedMillis SysTimer;
 elapsedMillis LCDTimer;
 elapsedMillis errorTimer;
-elapsedMillis avgTimer; // for initial pressure sensor calibration
+elapsedMillis avgPressTimer;
 elapsedMillis sampleTimer;
+elapsedMillis debugTimer; // DELETE WHEN COMPLETE
 
 // LCD SCREEN
 #define MAX_CHARS_PER_LINE 20
@@ -36,16 +39,36 @@ SerLCD lcd;
 bool isScreenUpdate = true;
 bool isBacklightOn = true;
 String status_msg;
+String test_status;
 
 // PRESSURE SENSORS
+#define PRESS_AVG_TIME 1500
 SparkFun_MicroPressure mpr; // use default values with reset and EOC pins unused
 double press_cal = 0.0;
 int sample_count = 0;
 
+// TEMPERATURE SENSORS
+MCP9600 sealTempSensor;
+MCP9600 sumpTempSensor;
+
+// PID LOOP
+double setpoint = 160.0;
+
+// TEST CONTROL
+int loop_count = 1234;
+
 // FUNCTION DECLARATIONS
-void updateLCD(double press_cal);
+void updateLCD(double& press_cal, int& loop_count, String& test_status, double& setpoint);
+void printLCDRow(int row, const String& text1, const String& text2);
+void printRowPair(const int& col, const int& row, const int& width,
+                  const String& str1, const String& str2);
+void printFourColumnRow(const int& row,
+                        const String& str1, const String& str2,
+                        const String& str3, const String& str4);
+String padBetweenChars(const int& num_chars, const String& str1, const String& str2);              
 void showError(const String& errorMessage);
 void initScreen(const String& init_msg, const String status_msg = "");
+
 
 /* ----------------------------- INTIAL SETUP ----------------------------- */
 void setup() {
@@ -68,16 +91,16 @@ void setup() {
   Serial.println(" - lcd screen initialized");
 
   // Initialize the pressure sensor and set zero offset
-  initScreen("Connecting to MicroPressor Sensor");
+  initScreen("Connecting to MicroPressure Sensor...");
   delay(2000);
   if (!mpr.begin()) {
     showError("Cannot connect to MicroPressure Sensor!");
   }
   delay(5);
-  avgTimer = 0;
+  avgPressTimer = 0;
   sampleTimer = 0;
-  String zero_offset_msg = "Averaging ambient pressure:";
-  while (avgTimer <= 11000) {
+  String zero_offset_msg = "Averaging ambient pressure in lab:";
+  while (avgPressTimer <= PRESS_AVG_TIME) {
     if (sampleTimer > 1000) {
       initScreen(zero_offset_msg);
       press_cal += mpr.readPressure();
@@ -100,84 +123,107 @@ void setup() {
   delay(3000);
 
   // Initialize the thermocouple sensor
-  
+  sealTempSensor.begin(0x60);
+  sealTempSensor.setAmbientResolution(RES_ZERO_POINT_25);
+  sealTempSensor.setThermocoupleResolution(RES_14_BIT);
+  sumpTempSensor.begin(0x67);
+  sumpTempSensor.setAmbientResolution(RES_ZERO_POINT_25);
+  sumpTempSensor.setThermocoupleResolution(RES_14_BIT);
+
+  // Clear screen to begin test protocol
   lcd.clear();
+
+  // DEBUG VARS
+  test_status = "TESTING";
 }
 
 // MAIN LOOP
 void loop() {
-  updateLCD(press_cal);
+  // DEBUGGING LOOP
+  // add simulated actions here
+  if (debugTimer > 4000) {
+    debugTimer = 0;
+    loop_count++;
+  }
+
+  updateLCD(press_cal, loop_count, test_status, setpoint);
 }
 
 // FUNCTION DEFINITIONS //
-void updateLCD(double press_cal) { // This script Updates the LCD withinformation.
-// include these args: double& cw_torq, double& ccw_torq
+
+void updateLCD(double& press_cal, int& loop_count, String& test_status, double& setpoint) {
+  // I think this function could be passed a struct instead of each and 
+  // every argument
+
+  // Read all sensors
+  String degF = String((char)223) + "F";
+  String loops = String(loop_count);
+  String seal_temp = String(sealTempSensor.getThermocoupleTemp(false), 0) + degF;
+  delay(5);
+  String sump_temp = String(sumpTempSensor.getThermocoupleTemp(false), 0) + degF;
+  delay(5);
+  String pressure = String((mpr.readPressure() - press_cal));
+  
+  pressure = "12.3";                                // DEBUGGING ONLY, DELETE ON RELEASE !!!!
+  double CW_torque = 1.26;
+  double CCW_torque = -0.98;
+  String torques = String(CW_torque) + " / " + String(CCW_torque);
+  
+  String set_point = String(setpoint, 0) + degF;
+
   if (LCDTimer > 2000) {
     LCDTimer = 0;
-    double psi = (mpr.readPressure() - press_cal);
-    delay(5);
-    double Sealtemp = 74;//SealtempSensor.getThermocoupleTemp(false);
-    delay(5);
-    double Sumptemp = 72;//SumptempSensor.getThermocoupleTemp(false);// false returns temp in farenheight.
+    printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status);
+  
 
-    double CW_torque = 1.26;
-    double CCW_torque = -0.98;
-    int LoopCount = 123;
-    String Status = "RUNNING";
-    int Setpoint = 160;
-
-  if (isScreenUpdate == true) {
+    if (isScreenUpdate) {
       isScreenUpdate = !isScreenUpdate;
-      lcd.setCursor(0, 0);
-      lcd.print("Status");
-      lcd.setCursor(11, 0);
-      lcd.print("SetPoint");
-      lcd.setCursor(0, 1);
-      lcd.print(Status);
-      lcd.setCursor(8, 1);
-      lcd.print( "    " + String(Setpoint, 0) + String((char)223) + "F   ");
-      lcd.setCursor(19, 1);
-      lcd.print("  ");
-      lcd.setCursor(0, 2);
-      lcd.print("PSI: " + String(psi, 1) + " ");
-      lcd.setCursor(11, 2);
-      lcd.print("Loop:    " );
-      lcd.setCursor(16, 2);
-      lcd.print(String(LoopCount));
-      lcd.setCursor(0, 3);
-      lcd.print("Temp: " + String(Sealtemp, 0) + String((char)223) + "F  ");
-      lcd.setCursor(11, 3);
-      if (Sumptemp >= 100) {
-        lcd.print("Sump: " + String(Sumptemp, 0) + String((char)223));
-      } else     lcd.print("Sump: " + String(Sumptemp, 0) + String((char)223));
+      printRowPair(0, 1, MAX_CHARS_PER_LINE, "Setpoint:", set_point);
+      printFourColumnRow(2, "P:", pressure +"psi", " Loop:", loops);
+      printFourColumnRow(3, "Seal:", seal_temp, " Sump:", sump_temp);
     }
     else {
       isScreenUpdate = !isScreenUpdate;
-      lcd.setCursor(0, 0);
-      lcd.print("Status");
-      lcd.setCursor(11, 0);
-      //lcd.print("SetPoint");
-      lcd.print("Torque  ");
-      lcd.setCursor(0, 1);
-      lcd.print(Status);
-      lcd.setCursor(8, 1);
-      //lcd.print( String(Setpoint, 0) + String((char)223) + "F   ");
-      lcd.print(String(CW_torque) + " / " + String(CCW_torque));
-      lcd.setCursor(0, 2);
-      lcd.print("PSI: " + String(psi, 1) + " ");
-      lcd.setCursor(11, 2);
-      lcd.print("Loop:    " );
-      lcd.setCursor(16, 2);
-      lcd.print(String(LoopCount));
-      lcd.setCursor(0, 3);
-      lcd.print("Temp: " + String(Sealtemp, 0) + String((char)223) + "F ");
-      lcd.setCursor(11, 3);
-      if (Sumptemp >= 100) {
-        lcd.print("Sump: " + String(Sumptemp, 0) + String((char)223));
-      } else     lcd.print("Sump: " + String(Sumptemp, 0) + String((char)223));
-
+      printRowPair(0, 1, MAX_CHARS_PER_LINE, "Torque:", torques);
     }
   }
+}
+
+void printRowPair(const int& col, const int& row, const int& width,
+                  const String& str1, const String& str2) {
+  /* Takes two strings and prints 'str1' left justified 
+   * and 'str2' right justified on the specified 'row' 
+   * between a distance, specified by width and a start
+   * location specified by 'col' on the lcd screen.
+   */
+  lcd.setCursor(col, row);
+  lcd.print(str1);
+  lcd.setCursor(str1.length()+col, row);
+  lcd.print(padBetweenChars(width, str1, str2));
+}
+
+void printFourColumnRow(const int& row,
+                        const String& str1, const String& str2,
+                        const String& str3, const String& str4) {
+  /* Prints four strings on a row of the LCD screen,
+   * equally spaced apart.
+   */
+  int width = MAX_CHARS_PER_LINE / 2;
+  printRowPair(0, row, width, str1, str2);
+  printRowPair(width, row, width, str3, str4);
+}
+
+String padBetweenChars(const int& num_chars, const String& str1, const String& str2) {
+  /* Function calculates the correct amount of padding 
+   * and pre-pends str2 with " " characters and returns
+   * paddedStr.
+   */
+  unsigned int space = num_chars - (str1).length();
+  String paddedStr = str2;
+  while (paddedStr.length() < space) {
+    paddedStr = " " + paddedStr;
+  }
+  return paddedStr;
 }
 
 void showError(const String& errorMessage) {
