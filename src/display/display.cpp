@@ -1,6 +1,7 @@
 #include <Arduino.h>
-#include <SerLCD.h>
 #include <Wire.h>
+#include <SerLCD.h>
+#include <SparkFun_MicroPressure.h>
 
 // define the board I/O pin numbers
 #define SD_DETECT_PIN 0
@@ -23,35 +24,97 @@
 // INITIALIZE TIMERS
 elapsedMillis SysTimer;
 elapsedMillis LCDTimer;
+elapsedMillis errorTimer;
+elapsedMillis avgTimer; // for initial pressure sensor calibration
+elapsedMillis sampleTimer;
 
 // LCD SCREEN
+#define MAX_CHARS_PER_LINE 20
+#define WHITE_RGB 255, 255, 255
+#define RED_RGB 255, 255, 0
 SerLCD lcd;
 bool isScreenUpdate = true;
+bool isBacklightOn = true;
+String status_msg;
 
 // PRESSURE SENSORS
+SparkFun_MicroPressure mpr; // use default values with reset and EOC pins unused
+double press_cal = 0.0;
+int sample_count = 0;
 
 // FUNCTION DECLARATIONS
-void updateLCD();
+void updateLCD(double press_cal);
+void showError(const String& errorMessage);
+void initScreen(const String& init_msg, const String status_msg = "");
 
-// INTIAL SETUP 
+/* ----------------------------- INTIAL SETUP ----------------------------- */
 void setup() {
-  Wire.begin(); // start the I2C bus
+
+  // Initialize Serial bus
+  Serial.begin(9600);
+  delay(1000);
+  Serial.println("");
+  Serial.println("Initializing display controller...");
+
+  // Initialize the I2C bus
+  Wire.begin();
+  Serial.println(" - i2c bus initialized");
+
+  // Initialize the LCD screen
   lcd.begin(Wire);
-  lcd.setBacklight(255, 255, 255);
+  lcd.setBacklight(WHITE_RGB);
   lcd.setContrast(5);
+  lcd.clear();
+  Serial.println(" - lcd screen initialized");
+
+  // Initialize the pressure sensor and set zero offset
+  initScreen("Connecting to MicroPressor Sensor");
+  delay(2000);
+  if (!mpr.begin()) {
+    showError("Cannot connect to MicroPressure Sensor!");
+  }
+  delay(5);
+  avgTimer = 0;
+  sampleTimer = 0;
+  String zero_offset_msg = "Averaging ambient pressure:";
+  while (avgTimer <= 11000) {
+    if (sampleTimer > 1000) {
+      initScreen(zero_offset_msg);
+      press_cal += mpr.readPressure();
+      sample_count++;  
+      sampleTimer = 0;
+      lcd.setCursor(3, 3);
+      lcd.print(sample_count);
+      lcd.setCursor(String(sample_count).length()+4, 3);
+      lcd.print("secs");
+    }
+  }
+  press_cal /= sample_count;
+  press_cal = 14.7;
+  initScreen(zero_offset_msg);
+  delay(1000);
+  initScreen(zero_offset_msg, "done!");
+  delay(2000);
+  Serial.println(" - pressure sensor initialized");
+  initScreen("Sensor offset by", String(press_cal)+" psi");
+  delay(3000);
+
+  // Initialize the thermocouple sensor
+  
   lcd.clear();
 }
 
 // MAIN LOOP
 void loop() {
-  updateLCD();
+  updateLCD(press_cal);
 }
 
 // FUNCTION DEFINITIONS //
-void updateLCD() { // This script Updates the LCD withinformation.
+void updateLCD(double press_cal) { // This script Updates the LCD withinformation.
+// include these args: double& cw_torq, double& ccw_torq
   if (LCDTimer > 2000) {
     LCDTimer = 0;
-    double psi = 25;//(mpr.readPressure() - psiCalibration);
+    double psi = (mpr.readPressure() - press_cal);
     delay(5);
     double Sealtemp = 74;//SealtempSensor.getThermocoupleTemp(false);
     delay(5);
@@ -87,7 +150,7 @@ void updateLCD() { // This script Updates the LCD withinformation.
       if (Sumptemp >= 100) {
         lcd.print("Sump: " + String(Sumptemp, 0) + String((char)223));
       } else     lcd.print("Sump: " + String(Sumptemp, 0) + String((char)223));
-    } 
+    }
     else {
       isScreenUpdate = !isScreenUpdate;
       lcd.setCursor(0, 0);
@@ -114,5 +177,75 @@ void updateLCD() { // This script Updates the LCD withinformation.
       } else     lcd.print("Sump: " + String(Sumptemp, 0) + String((char)223));
 
     }
+  }
+}
+
+void showError(const String& errorMessage) {
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Error! Error! Error!");
+  lcd.setCursor(0,1);
+  lcd.print(errorMessage);
+
+  while (true) {
+    if (errorTimer >= 1000) {
+      if (isBacklightOn) {
+        lcd.setBacklight(RED_RGB);
+        isBacklightOn = false;
+      }
+      else {
+        lcd.setBacklight(0, 0, 0);
+        isBacklightOn = true;
+      }
+
+    errorTimer = 0;
+    }
+  }
+}
+
+void initScreen(const String& init_msg, const String status_msg) {
+  lcd.clear();
+  // Print the message with line wrapping
+  int startPos = 0;
+  int endPos = 0;
+  int numLines = 0;
+  int messageLength = init_msg.length();
+
+  while (startPos < messageLength) {
+    // Calculate the end position for the line
+    endPos = startPos + MAX_CHARS_PER_LINE - 1;
+
+    // Check if the end position goes beyond the message length
+    if (endPos >= messageLength) {
+      endPos = messageLength - 1;
+    }
+    else {
+      // Find the last space character within the line's range
+      while (endPos > startPos && init_msg[endPos] != ' ') {
+        endPos--;
+      }
+
+      // If no space is found, adjust the end position to the maximum limit
+      if (endPos == startPos) {
+        endPos = startPos + MAX_CHARS_PER_LINE - 1;
+      }
+    }
+
+    // Print the line
+    lcd.setCursor(0, numLines);
+    lcd.print(init_msg.substring(startPos, endPos + 1));
+
+    // Increment the line counter
+    numLines++;
+
+    // Update the start position for the next line
+    startPos = endPos + 1;
+  }
+  
+
+  lcd.setCursor(3, 7);
+
+  if (status_msg != "") {
+    lcd.print(status_msg);
   }
 }
