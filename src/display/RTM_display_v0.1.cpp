@@ -6,6 +6,7 @@
 #include <SparkFun_MCP9600.h>
 #include <PID_v1.h>
 #include <TimeLib.h>
+#include <Bounce2.h>
 
 // define the board I/O pin numbers
 #define SD_DETECT_PIN 0
@@ -26,11 +27,9 @@
 #define RESET_BUS_PIN 20
 
 // INITIALIZE TIMERS
-elapsedMillis SysTimer;
+elapsedMillis LoopTimer;
 elapsedMillis LCDTimer;
 elapsedMillis errorTimer;
-elapsedMillis avgPressTimer;
-elapsedMillis sampleTimer;
 elapsedMillis debugTimer; // DELETE WHEN COMPLETE
 
 // LCD SCREEN
@@ -41,15 +40,12 @@ elapsedMillis debugTimer; // DELETE WHEN COMPLETE
 SerLCD lcd;
 bool isScreenUpdate = true;
 bool isBacklightOn = true;
-String status_msg;
-String msg;
-String test_status;
+String test_status_str = "READY";
 
 // PRESSURE SENSORS
 #define PRESS_AVG_TIME 10000 // duration over which sensor will be averaged in millis
 SparkFun_MicroPressure mpr; // use default values with reset and EOC pins unused
-double press_cal = 0.0;
-int sample_count = 0;
+double press_offset;
 
 // TEMPERATURE SENSORS
 MCP9600 sealTempSensor;
@@ -60,13 +56,30 @@ double setpoint, input, output;
 double Kp = 60, Ki = 40, Kd = 25;
 PID heaterPID(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
 
+// RUN & RESET SWITCH BOUNCERS
+Bounce RunSwitch = Bounce();
+Bounce ResetSwitch = Bounce();
+
 // TEST CONTROL
+bool temp_units = false; // 'false' for farenheit, 'true' for celcius
+bool isTestRunning = false;
+bool hasTestStarted = false;
+
+
+// DEBUGGING ONLY
+bool debug = true;
 int loop_count = 1234;
+double CW_torque;
+double CCW_torque;
+
 
 // FUNCTION DECLARATIONS
 time_t getTeensyTime();
-void updateLCD(double& press_cal, int& loop_count, String& test_status, double& setpoint);
-String tempToStr(const double& temp);
+int pgm_lastIndexOf(uint8_t c, const char *p);
+String srcfile_details();
+double setPressureOffset(const bool& debug=false);
+void updateLCD(double& offset, int& loop_count, String& test_status_str, double& setpoint);
+String tempToStr(const double& temp, const bool& unit);
 String dateTimeStr();
 void printLCDRow(int row, const String& text1, const String& text2);
 void printRowPair(const int& col, const int& row, const int& width,
@@ -87,13 +100,18 @@ void setup() {
   Serial.begin(115200);
   while (!Serial && (millis() < 4000)) {
   }
-  Serial.println("");
-  Serial.println("Initializing display controller...");
+
+  // Get source file information
+  String source_file = srcfile_details();
+  Serial.println();
+  Serial.println(source_file);
+  Serial.println("\nInitializing display controller...");
 
   // Initialize the I2C bus
   Wire.begin();
   Serial.println(" - i2c bus initialized");
 
+  // Initialize Teensy Board Time
   setSyncProvider(getTeensyTime);
 
   // Initialize the LCD screen
@@ -103,30 +121,16 @@ void setup() {
   lcd.clear();
   Serial.println(" - lcd screen initialized");
 
+  // Display source file version on LCD
+  initScreen(source_file);
+  delay(5000);
+
   // Initialize the pressure sensor and set zero offset
   if (!mpr.begin()) {
     showError("Cannot connect to MicroPressure Sensor!");
   }
   delay(5);
-  avgPressTimer = 0;
-  sampleTimer = 0;
-  String zero_offset_msg = "Determining zero offset for pressure sensor:";
-  initScreen(zero_offset_msg);
-  while (avgPressTimer <= PRESS_AVG_TIME) {
-    if (sampleTimer > 1000) {
-      press_cal += mpr.readPressure();
-      sample_count++;  
-      sampleTimer = 0;
-      msg = "please wait... " + String(sample_count) + "s";
-      initScreen(zero_offset_msg, false, msg);
-    }
-  }
-  press_cal /= sample_count;
-  press_cal = 14.7;   // DEBUGGING ONLY, DELETE ON ISSUE
-  Serial.println(" - pressure sensor initialized");
-  msg = "offset: " + String(press_cal) + " psi"; 
-  initScreen(zero_offset_msg, false, msg);
-  delay(3000);
+  press_offset = setPressureOffset(debug);
 
   // Initialize the thermocouple sensors
   sealTempSensor.begin(0x60);
@@ -139,31 +143,52 @@ void setup() {
   // Initialize the heater band PID loop
   heaterPID.SetMode(AUTOMATIC);
   heaterPID.SetOutputLimits(0, 150);
-  input = sumpTempSensor.getThermocoupleTemp(false);
+  input = sumpTempSensor.getThermocoupleTemp(temp_units);
   setpoint = 160.0;
-  String PID_init_msg = "PID Loop initialized";
+  String PID_init_msg = "Heater control initialized";
   initScreen(PID_init_msg);
-  printFourColumnRow(3, "Sump:", tempToStr(input), " Sp:", tempToStr(setpoint));
+  printFourColumnRow(3, "Sump:", tempToStr(input, temp_units),
+                        " Sp:", tempToStr(setpoint, temp_units));
   delay(3000);
   Serial.println(" - PID loop initialized");
 
+  // Initialize the Run and Reset switch pins
+  pinMode(RUN_SW_PIN, INPUT_PULLDOWN);
+  RunSwitch.attach(RUN_SW_PIN);
+  RunSwitch.interval(100);
+  pinMode(RESET_SW_PIN, INPUT_PULLDOWN);
+  ResetSwitch.attach(RESET_SW_PIN);
+  ResetSwitch.interval(100);
+
   // Clear screen to begin test protocol
   lcd.clear();
-
-  // DEBUG VARS
-  test_status = "DEBUGGING";
 }
 
 /* -------------------------------- MAIN LOOP -------------------------------- */
 void loop() {
-  // DEBUGGING LOOP
-  // add simulated actions here
-  if (debugTimer > 4000) {
-    debugTimer = 0;
-    loop_count++;
+  LoopTimer = 0;
+  RunSwitch.update();
+  isTestRunning = RunSwitch.read();
+
+  if (!hasTestStarted && !isTestRunning) {
+    test_status_str = "READY";
   }
 
-  updateLCD(press_cal, loop_count, test_status, setpoint);
+  if (isTestRunning) {
+    test_status_str = "RUNNING";
+    isTestRunning = true;
+    if (debugTimer > 4000) {
+      // DEBUGGING LOOP
+      // add simulated actions here
+      debugTimer = 0;
+      loop_count++;
+    }
+  } 
+  if (hasTestStarted && isTestRunning) {
+    test_status_str = "PAUSED"; // not working!!!!
+  }
+
+  updateLCD(press_offset, loop_count, test_status_str, setpoint);
 }
 
 // FUNCTION DEFINITIONS //
@@ -172,22 +197,50 @@ time_t getTeensyTime() {
   return Teensy3Clock.get();
 }
 
-void updateLCD(double& press_cal, int& loop_count, String& test_status, double& setpoint) {
-  // I think this function could be passed a struct instead of each and 
-  // every argument
-  
-  // Read all sensors and construct strings
+double setPressureOffset(const bool& debug) {
+  String zero_offset_msg = "Determining zero offset for pressure sensor:";
+  String msg;
+  initScreen(zero_offset_msg);
+  double press_cal = 0.0;
+  int sample_count = 0;
+  elapsedMillis avgPressTimer = 0;
+  elapsedMillis sampleTimer = 0;
+  while (avgPressTimer <= PRESS_AVG_TIME) {
+    if (sampleTimer > 1000) {
+      press_cal += mpr.readPressure();
+      sample_count++;  
+      sampleTimer = 0;
+      msg = "please wait... " + String(sample_count) + "s";
+      initScreen(zero_offset_msg, false, msg);
+    }
+  }
+  press_cal /= sample_count;
+
+  if (debug) {
+    press_cal = 14.7;
+  }
+
+  Serial.println(" - pressure sensor initialized");
+  msg = "offset: " + String(press_cal) + " psi"; 
+  initScreen(zero_offset_msg, false, msg);
+  delay(3000);
+  return press_cal;
+}
+
+void updateLCD(double& offset, int& loop_count, String& test_status_str, double& setpoint) {
   String loops = String(loop_count);
-  String seal_temp = tempToStr(sealTempSensor.getThermocoupleTemp(false));
+  String seal_temp = tempToStr(sealTempSensor.getThermocoupleTemp(temp_units), temp_units);
   delay(5);
-  String sump_temp = tempToStr(sumpTempSensor.getThermocoupleTemp(false));
+  String sump_temp = tempToStr(sumpTempSensor.getThermocoupleTemp(temp_units), temp_units);
   delay(5);
-  String pressure = String((mpr.readPressure() - press_cal));
-  pressure = "12.3";         // DEBUGGING ONLY, DELETE ON RELEASE !!!!
-  double CW_torque = 1.26;   // DEBUGGING ONLY, DELETE ON RELEASE !!!!
-  double CCW_torque = -0.98; // DEBUGGING ONLY, DELETE ON RELEASE !!!!
+  String pressure = String((mpr.readPressure() - offset));
+  if (debug) {
+    pressure = "12.3";
+    CW_torque = 1.26;
+    CCW_torque = -0.98;
+  }
   String torques = String(CW_torque) + " / " + String(CCW_torque);
-  String set_point = tempToStr(setpoint);
+  String set_point = tempToStr(setpoint, temp_units);
   String date = String(month()) + "/" + String(day());
   String time = String(hour()) + ":" + String(minute());
   
@@ -196,7 +249,7 @@ void updateLCD(double& press_cal, int& loop_count, String& test_status, double& 
     LCDTimer = 0;
     if (isScreenUpdate) {
       isScreenUpdate = !isScreenUpdate;
-      printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status);
+      printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status_str);
       printRowPair(0, 1, MAX_CHARS_PER_LINE, "Setpoint:", set_point);
       printFourColumnRow(2, "P:", pressure +"psi", " Loop:", loops);
       printFourColumnRow(3, "Seal:", seal_temp, " Sump:", sump_temp);
@@ -209,16 +262,28 @@ void updateLCD(double& press_cal, int& loop_count, String& test_status, double& 
   }
 }
 
-String tempToStr(const double& temp) {
-  return String(temp, 0) + String((char)223) + "F";
+String tempToStr(const double& temp, const bool& unit) {
+  /* Returns a String with correct suffix for farenheit
+   * by default. Pass 'true' after temp to set units to
+   * celcius.
+   */
+  if (unit) {
+    return String(temp, 0) + String((char)223) + "C";
+  }
+  else return String(temp, 0) + String((char)223) + "F";
 }
 
 String dateTimeStr() {
+  /* Function returns the datetime as a String formatted as m/d hh/mm */
   String date = String(month()) + "/" + String(day()) + "/" + String(year());
   String time = String(hour()) + ":" + String(minute());
   return date + " " + time;
 }
 String rightJustifiedString(const String& str) {
+  /* Function returns a String with enough padding
+   * prepended for the LCD screen to right justify the text
+   * on an empty line
+   */
   String paddedStr = str;
   while (paddedStr.length() < MAX_CHARS_PER_LINE) {
     paddedStr = " " + paddedStr;
@@ -265,6 +330,11 @@ String padBetweenChars(const int& num_chars, const String& str1, const String& s
 }
 
 void showError(const String& errorMessage) {
+  /* Function displays an error message on the LCD
+   * and flashes the backlight red. It contains an 
+   * infinite while loop so the only way to clear
+   * the error is the restart the controller 
+   */
   lcd.clear();
   lcd.setCursor(0,0);
   lcd.print("Error! Error! Error!");
@@ -281,14 +351,21 @@ void showError(const String& errorMessage) {
         lcd.setBacklight(0, 0, 0);
         isBacklightOn = true;
       }
-
     errorTimer = 0;
     }
   }
 }
 
 void initScreen(const String& init_msg, const bool& cls, const String& status_msg) {
-  
+  /* Function takes both a main message and a status update and displays the main
+   * message on the LCD screen, left justified with text wrapping. The status
+   * message is displayed in the lower right corner and is right justified.
+   * 
+   * The function can be called to clear the screen (default) prior to displaying 
+   * message. Setting this to false helps prevent flicker during multiple calls
+   * of function while updating only the status_msg.
+  */
+
   if (cls) {
     lcd.clear();
   }
@@ -331,3 +408,54 @@ void initScreen(const String& init_msg, const bool& cls, const String& status_ms
   }
 }
 
+String srcfile_details() { 
+  /* Function fetches the source file filename
+   * as well as the date and time at compile and
+   * returns that as a String.
+  */ 
+  const char *the_path = PSTR(__FILE__);
+  String msg = "Firmware Version: ";
+
+  int slash_loc = pgm_lastIndexOf('/', the_path);
+  if (slash_loc < 0)
+    slash_loc = pgm_lastIndexOf('\\', the_path);
+
+  int dot_loc = pgm_lastIndexOf('.', the_path);
+  if (dot_loc < 0)
+    dot_loc = pgm_lastIndexOf(0, the_path);
+
+  for (int i = slash_loc + 1; i < dot_loc; i++)
+  {
+    uint8_t b = pgm_read_byte(&the_path[i]);
+    if (b != 0) {
+      msg += (char)b;
+    }
+    else {
+      break;
+    }
+  }
+  
+  msg += " Compiled on: ";
+  msg += __DATE__;
+  msg += " at ";
+  msg += __TIME__;
+  return msg;
+}
+
+int pgm_lastIndexOf(uint8_t c, const char *p) {
+  /* finds last index of char 'c', withing string 'p' */
+  int last_index = -1; // -1 indicates no match
+  uint8_t b;
+  for (int i = 0; true; i++) {
+    b = pgm_read_byte(p++);
+    if (b == c) {
+      last_index = i;
+    }
+    else {
+      if (b == 0) {
+        break;
+      }
+    }
+  }
+  return last_index;
+}
