@@ -41,9 +41,10 @@ SerLCD lcd;
 bool isScreenUpdate = true;
 bool isBacklightOn = true;
 String test_status_str = "READY";
+String msg;
 
 // PRESSURE SENSORS
-#define PRESS_AVG_TIME 10000 // duration over which sensor will be averaged in millis
+#define PRESS_AVG_TIME 3000 // duration over which sensor will be averaged in millis
 SparkFun_MicroPressure mpr; // use default values with reset and EOC pins unused
 double press_offset;
 
@@ -55,15 +56,21 @@ MCP9600 sumpTempSensor;
 double setpoint, input, output;
 double Kp = 60, Ki = 40, Kd = 25;
 PID heaterPID(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
+elapsedMillis PIDTimer;
+double sump_temp, seal_temp;
 
 // RUN & RESET SWITCH BOUNCERS
 Bounce RunSwitch = Bounce();
 Bounce ResetSwitch = Bounce();
 
 // TEST CONTROL
+#define RESET_TIME 10000
+elapsedMillis resetTimer = 0;
 bool temp_units = false; // 'false' for farenheit, 'true' for celcius
-bool isTestRunning = false;
+bool isRunSwitchOn = false;
+bool isResetSwitchOn = false;
 bool hasTestStarted = false;
+bool isPreHeated = false;
 
 
 // DEBUGGING ONLY
@@ -79,6 +86,7 @@ int pgm_lastIndexOf(uint8_t c, const char *p);
 String srcfile_details();
 double setPressureOffset(const bool& debug=false);
 void updateLCD(double& offset, int& loop_count, String& test_status_str, double& setpoint);
+void updateHeaterPID();
 String tempToStr(const double& temp, const bool& unit);
 String dateTimeStr();
 void printLCDRow(int row, const String& text1, const String& text2);
@@ -141,23 +149,26 @@ void setup() {
   sumpTempSensor.setThermocoupleResolution(RES_14_BIT);
 
   // Initialize the heater band PID loop
+  pinMode(HEAT_OUTPUT_PIN, OUTPUT);
   heaterPID.SetMode(AUTOMATIC);
   heaterPID.SetOutputLimits(0, 150);
   input = sumpTempSensor.getThermocoupleTemp(temp_units);
-  setpoint = 160.0;
-  String PID_init_msg = "Heater control initialized";
-  initScreen(PID_init_msg);
+  setpoint = 90.0; // This needs to be read from SD
+  msg = "Heater PID control ready";
+  initScreen(msg);
   printFourColumnRow(3, "Sump:", tempToStr(input, temp_units),
                         " Sp:", tempToStr(setpoint, temp_units));
   delay(3000);
   Serial.println(" - PID loop initialized");
 
-  // Initialize the Run and Reset switch pins
+  // Initialize the Run and Reset switch and bus pins
   pinMode(RUN_SW_PIN, INPUT_PULLDOWN);
-  RunSwitch.attach(RUN_SW_PIN);
-  RunSwitch.interval(100);
   pinMode(RESET_SW_PIN, INPUT_PULLDOWN);
+  pinMode(PRGM_RUN_BUS_PIN, OUTPUT);
+  pinMode(RESET_BUS_PIN, OUTPUT);
+  RunSwitch.attach(RUN_SW_PIN);
   ResetSwitch.attach(RESET_SW_PIN);
+  RunSwitch.interval(100);
   ResetSwitch.interval(100);
 
   // Clear screen to begin test protocol
@@ -168,24 +179,66 @@ void setup() {
 void loop() {
   LoopTimer = 0;
   RunSwitch.update();
-  isTestRunning = RunSwitch.read();
+  isRunSwitchOn = RunSwitch.read();
 
-  if (!hasTestStarted && !isTestRunning) {
+  if (!isRunSwitchOn && !hasTestStarted) {
     test_status_str = "READY";
   }
 
-  if (isTestRunning) {
-    test_status_str = "RUNNING";
-    isTestRunning = true;
-    if (debugTimer > 4000) {
-      // DEBUGGING LOOP
-      // add simulated actions here
-      debugTimer = 0;
-      loop_count++;
+  if (isRunSwitchOn) {
+    if (!isPreHeated && sump_temp < setpoint) {
+      test_status_str = "PRE-HEATING";
     }
-  } 
-  if (hasTestStarted && isTestRunning) {
-    test_status_str = "PAUSED"; // not working!!!!
+    else {
+      isPreHeated = true;
+      test_status_str = "RUNNING";
+      if (debugTimer > 1000) {
+        debugTimer = 0;
+      loop_count++;
+      }
+    }
+    updateHeaterPID();
+  }
+  else {
+    ResetSwitch.update();
+    isResetSwitchOn = ResetSwitch.read();
+  }
+
+  if (!isRunSwitchOn && hasTestStarted) {
+    test_status_str = "PAUSED";
+    // don't update PID loop here
+    // disable heaters
+  }
+
+  if (isResetSwitchOn) {
+    ResetSwitch.update();
+    isResetSwitchOn = ResetSwitch.read();
+    msg = "Test will be RESET in:";
+    initScreen(msg);
+    for (int i = 10; i > 0; i--) {
+      initScreen(msg, false, String(i)+" seconds");
+      delay(1000);
+      ResetSwitch.update();
+      isResetSwitchOn = ResetSwitch.read();
+      if (!isResetSwitchOn) {
+        i = 0; // kick out of reset loop
+        lcd.clear();
+      }
+    }
+    if (isResetSwitchOn) {
+      loop_count = 0;
+      lcd.clear();
+      digitalWrite(RESET_BUS_PIN, HIGH);
+      delay(10);
+      digitalWrite(RESET_BUS_PIN, LOW);
+      msg = "Test has been successfully RESET!";
+      delay(4000);
+      initScreen(srcfile_details());
+      delay(2000);
+      press_offset = setPressureOffset(debug);
+      ResetSwitch.update();
+      isResetSwitchOn = ResetSwitch.read();
+    }
   }
 
   updateLCD(press_offset, loop_count, test_status_str, setpoint);
@@ -199,7 +252,6 @@ time_t getTeensyTime() {
 
 double setPressureOffset(const bool& debug) {
   String zero_offset_msg = "Determining zero offset for pressure sensor:";
-  String msg;
   initScreen(zero_offset_msg);
   double press_cal = 0.0;
   int sample_count = 0;
@@ -221,17 +273,17 @@ double setPressureOffset(const bool& debug) {
   }
 
   Serial.println(" - pressure sensor initialized");
-  msg = "offset: " + String(press_cal) + " psi"; 
+  msg = "offset by " + String(press_cal) + " psi"; 
   initScreen(zero_offset_msg, false, msg);
   delay(3000);
   return press_cal;
 }
 
 void updateLCD(double& offset, int& loop_count, String& test_status_str, double& setpoint) {
-  String loops = String(loop_count);
-  String seal_temp = tempToStr(sealTempSensor.getThermocoupleTemp(temp_units), temp_units);
+  String loops_str = loop_count;
+  String seal_temp_str = tempToStr(sealTempSensor.getThermocoupleTemp(temp_units), temp_units);
   delay(5);
-  String sump_temp = tempToStr(sumpTempSensor.getThermocoupleTemp(temp_units), temp_units);
+  String sump_temp_str = tempToStr(sump_temp, temp_units);
   delay(5);
   String pressure = String((mpr.readPressure() - offset));
   if (debug) {
@@ -239,8 +291,8 @@ void updateLCD(double& offset, int& loop_count, String& test_status_str, double&
     CW_torque = 1.26;
     CCW_torque = -0.98;
   }
-  String torques = String(CW_torque) + " / " + String(CCW_torque);
-  String set_point = tempToStr(setpoint, temp_units);
+  String torques_str = String(CCW_torque) + " / " + String(CW_torque);
+  String set_point_str = tempToStr(setpoint, temp_units);
   String date = String(month()) + "/" + String(day());
   String time = String(hour()) + ":" + String(minute());
   
@@ -250,14 +302,15 @@ void updateLCD(double& offset, int& loop_count, String& test_status_str, double&
     if (isScreenUpdate) {
       isScreenUpdate = !isScreenUpdate;
       printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status_str);
-      printRowPair(0, 1, MAX_CHARS_PER_LINE, "Setpoint:", set_point);
-      printFourColumnRow(2, "P:", pressure +"psi", " Loop:", loops);
-      printFourColumnRow(3, "Seal:", seal_temp, " Sump:", sump_temp);
+      printRowPair(0, 1, MAX_CHARS_PER_LINE, "Setpoint:", set_point_str);
+      printFourColumnRow(2, "P:", pressure +"psi", " Loop:", loops_str);
+      printFourColumnRow(3, "Seal:", seal_temp_str, " Sump:", sump_temp_str);
     }
     else {
       isScreenUpdate = !isScreenUpdate;
-      printRowPair(0, 0, MAX_CHARS_PER_LINE, "Date:", dateTimeStr());
-      printRowPair(0, 1, MAX_CHARS_PER_LINE, "Torque:", torques);
+      // printRowPair(0, 0, MAX_CHARS_PER_LINE, "Date:", dateTimeStr());
+      // print the remaining test time here
+      printRowPair(0, 1, MAX_CHARS_PER_LINE, "Torque:", torques_str);
     }
   }
 }
@@ -288,7 +341,6 @@ String rightJustifiedString(const String& str) {
   while (paddedStr.length() < MAX_CHARS_PER_LINE) {
     paddedStr = " " + paddedStr;
   }
-  Serial.println(paddedStr);
   return paddedStr;
 }
 
@@ -434,8 +486,11 @@ String srcfile_details() {
       break;
     }
   }
-  
-  msg += " Compiled on: ";
+  String d = day();
+  String mo = month();
+  String y = year();
+
+  msg += " - compiled on: ";
   msg += __DATE__;
   msg += " at ";
   msg += __TIME__;
@@ -458,4 +513,18 @@ int pgm_lastIndexOf(uint8_t c, const char *p) {
     }
   }
   return last_index;
+}
+
+void updateHeaterPID() {
+  if (PIDTimer > 100) {
+    sump_temp = sumpTempSensor.getThermocoupleTemp(temp_units);
+    PIDTimer = 0;
+    input = sump_temp;
+    heaterPID.Compute();
+    analogWrite(HEAT_OUTPUT_PIN, output);
+  }
+}
+
+void resetController() {
+  
 }
