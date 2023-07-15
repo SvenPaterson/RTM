@@ -86,7 +86,6 @@ void setup() {
   // Initialize Serial bus
   Serial.begin(115200);
   while (!Serial && (millis() < 4000)) {
-    // wait for Serial bus to connect
   }
   Serial.println("");
   Serial.println("Initializing display controller...");
@@ -129,7 +128,7 @@ void setup() {
   initScreen(zero_offset_msg, false, msg);
   delay(3000);
 
-  // Initialize the thermocouple sensor
+  // Initialize the thermocouple sensors
   sealTempSensor.begin(0x60);
   sealTempSensor.setAmbientResolution(RES_ZERO_POINT_25);
   sealTempSensor.setThermocoupleResolution(RES_14_BIT);
@@ -152,7 +151,7 @@ void setup() {
   lcd.clear();
 
   // DEBUG VARS
-  test_status = "TESTING";
+  test_status = "DEBUGGING";
 }
 
 /* -------------------------------- MAIN LOOP -------------------------------- */
