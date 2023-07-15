@@ -4,6 +4,8 @@
 #include <SerLCD.h>
 #include <SparkFun_MicroPressure.h>
 #include <SparkFun_MCP9600.h>
+#include <PID_v1.h>
+#include <TimeLib.h>
 
 // define the board I/O pin numbers
 #define SD_DETECT_PIN 0
@@ -53,14 +55,19 @@ int sample_count = 0;
 MCP9600 sealTempSensor;
 MCP9600 sumpTempSensor;
 
-// PID LOOP
-double setpoint = 160.0;
+// PID LOOP FOR HEATER CONTROL
+double setpoint, input, output;
+double Kp = 60, Ki = 40, Kd = 25;
+PID heaterPID(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
 
 // TEST CONTROL
 int loop_count = 1234;
 
 // FUNCTION DECLARATIONS
+time_t getTeensyTime();
 void updateLCD(double& press_cal, int& loop_count, String& test_status, double& setpoint);
+String tempToStr(const double& temp);
+String dateTimeStr();
 void printLCDRow(int row, const String& text1, const String& text2);
 void printRowPair(const int& col, const int& row, const int& width,
                   const String& str1, const String& str2);
@@ -77,14 +84,18 @@ void initScreen(const String& init_msg, const bool& cls = true, const String& st
 void setup() {
 
   // Initialize Serial bus
-  Serial.begin(9600);
-  delay(1000);
+  Serial.begin(115200);
+  while (!Serial && (millis() < 4000)) {
+    // wait for Serial bus to connect
+  }
   Serial.println("");
   Serial.println("Initializing display controller...");
 
   // Initialize the I2C bus
   Wire.begin();
   Serial.println(" - i2c bus initialized");
+
+  setSyncProvider(getTeensyTime);
 
   // Initialize the LCD screen
   lcd.begin(Wire);
@@ -112,11 +123,7 @@ void setup() {
     }
   }
   press_cal /= sample_count;
-  press_cal = 14.7;
-/*   initScreen(zero_offset_msg, false);
-  delay(1000);
-  initScreen(zero_offset_msg, false);
-  delay(2000); */
+  press_cal = 14.7;   // DEBUGGING ONLY, DELETE ON ISSUE
   Serial.println(" - pressure sensor initialized");
   msg = "offset: " + String(press_cal) + " psi"; 
   initScreen(zero_offset_msg, false, msg);
@@ -129,6 +136,17 @@ void setup() {
   sumpTempSensor.begin(0x67);
   sumpTempSensor.setAmbientResolution(RES_ZERO_POINT_25);
   sumpTempSensor.setThermocoupleResolution(RES_14_BIT);
+
+  // Initialize the heater band PID loop
+  heaterPID.SetMode(AUTOMATIC);
+  heaterPID.SetOutputLimits(0, 150);
+  input = sumpTempSensor.getThermocoupleTemp(false);
+  setpoint = 160.0;
+  String PID_init_msg = "PID Loop initialized";
+  initScreen(PID_init_msg);
+  printFourColumnRow(3, "Sump:", tempToStr(input), " Sp:", tempToStr(setpoint));
+  delay(3000);
+  Serial.println(" - PID loop initialized");
 
   // Clear screen to begin test protocol
   lcd.clear();
@@ -151,39 +169,63 @@ void loop() {
 
 // FUNCTION DEFINITIONS //
 
+time_t getTeensyTime() {
+  return Teensy3Clock.get();
+}
+
 void updateLCD(double& press_cal, int& loop_count, String& test_status, double& setpoint) {
   // I think this function could be passed a struct instead of each and 
   // every argument
   
   // Read all sensors and construct strings
-  String degF = String((char)223) + "F";
   String loops = String(loop_count);
-  String seal_temp = String(sealTempSensor.getThermocoupleTemp(false), 0) + degF;
+  String seal_temp = tempToStr(sealTempSensor.getThermocoupleTemp(false));
   delay(5);
-  String sump_temp = String(sumpTempSensor.getThermocoupleTemp(false), 0) + degF;
+  String sump_temp = tempToStr(sumpTempSensor.getThermocoupleTemp(false));
   delay(5);
   String pressure = String((mpr.readPressure() - press_cal));
   pressure = "12.3";         // DEBUGGING ONLY, DELETE ON RELEASE !!!!
   double CW_torque = 1.26;   // DEBUGGING ONLY, DELETE ON RELEASE !!!!
   double CCW_torque = -0.98; // DEBUGGING ONLY, DELETE ON RELEASE !!!!
   String torques = String(CW_torque) + " / " + String(CCW_torque);
-  String set_point = String(setpoint, 0) + degF;
+  String set_point = tempToStr(setpoint);
+  String date = String(month()) + "/" + String(day());
+  String time = String(hour()) + ":" + String(minute());
   
+
   if (LCDTimer > REFRESH_INTERVAL) {
     LCDTimer = 0;
-    printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status);
-  
     if (isScreenUpdate) {
       isScreenUpdate = !isScreenUpdate;
+      printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status);
       printRowPair(0, 1, MAX_CHARS_PER_LINE, "Setpoint:", set_point);
       printFourColumnRow(2, "P:", pressure +"psi", " Loop:", loops);
       printFourColumnRow(3, "Seal:", seal_temp, " Sump:", sump_temp);
     }
     else {
       isScreenUpdate = !isScreenUpdate;
+      printRowPair(0, 0, MAX_CHARS_PER_LINE, "Date:", dateTimeStr());
       printRowPair(0, 1, MAX_CHARS_PER_LINE, "Torque:", torques);
     }
   }
+}
+
+String tempToStr(const double& temp) {
+  return String(temp, 0) + String((char)223) + "F";
+}
+
+String dateTimeStr() {
+  String date = String(month()) + "/" + String(day()) + "/" + String(year());
+  String time = String(hour()) + ":" + String(minute());
+  return date + " " + time;
+}
+String rightJustifiedString(const String& str) {
+  String paddedStr = str;
+  while (paddedStr.length() < MAX_CHARS_PER_LINE) {
+    paddedStr = " " + paddedStr;
+  }
+  Serial.println(paddedStr);
+  return paddedStr;
 }
 
 void printRowPair(const int& col, const int& row, const int& width,
@@ -247,9 +289,11 @@ void showError(const String& errorMessage) {
 }
 
 void initScreen(const String& init_msg, const bool& cls, const String& status_msg) {
+  
   if (cls) {
     lcd.clear();
   }
+
   // Print the message with line wrapping
   int startPos = 0;
   int endPos = 0;
@@ -269,24 +313,17 @@ void initScreen(const String& init_msg, const bool& cls, const String& status_ms
       while (endPos > startPos && init_msg[endPos] != ' ') {
         endPos--;
       }
-
-      // If no space is found, adjust the end position to the maximum limit
+      // adjust end pos to max limit if no space found
       if (endPos == startPos) {
         endPos = startPos + MAX_CHARS_PER_LINE - 1;
       }
     }
 
-    // Print the line
     lcd.setCursor(0, numLines);
     lcd.print(init_msg.substring(startPos, endPos + 1));
-
-    // Increment the line counter
     numLines++;
-
-    // Update the start position for the next line
     startPos = endPos + 1;
   }
-  
 
   lcd.setCursor(0, 3);
 
@@ -295,11 +332,3 @@ void initScreen(const String& init_msg, const bool& cls, const String& status_ms
   }
 }
 
-String rightJustifiedString(const String& str) {
-  String paddedStr = str;
-  while (paddedStr.length() < MAX_CHARS_PER_LINE) {
-    paddedStr = " " + paddedStr;
-  }
-  Serial.println(paddedStr);
-  return paddedStr;
-}
