@@ -149,11 +149,14 @@ void setup() {
   sumpTempSensor.setThermocoupleResolution(RES_14_BIT);
 
   // Initialize the heater band PID loop
+  pinMode(HEAT_SAFETY_PIN, OUTPUT);
   pinMode(HEAT_OUTPUT_PIN, OUTPUT);
+  digitalWrite(HEAT_SAFETY_PIN, LOW);
+  digitalWrite(HEAT_OUTPUT_PIN, LOW);
   heaterPID.SetMode(AUTOMATIC);
   heaterPID.SetOutputLimits(0, 150);
   input = sumpTempSensor.getThermocoupleTemp(temp_units);
-  setpoint = 90.0; // This needs to be read from SD
+  setpoint = 60.0; // This needs to be read from SD
   msg = "Heater PID control ready";
   initScreen(msg);
   printFourColumnRow(3, "Sump:", tempToStr(input, temp_units),
@@ -181,35 +184,45 @@ void loop() {
   RunSwitch.update();
   isRunSwitchOn = RunSwitch.read();
 
+  // PRE-TEST LOGIC //
   if (!isRunSwitchOn && !hasTestStarted) {
     test_status_str = "READY";
-  }
+    digitalWrite(HEAT_SAFETY_PIN, LOW);
+  } // END PRE-TEST LOGIC
 
+  // RUN LOGIC //
   if (isRunSwitchOn) {
     if (!isPreHeated && sump_temp < setpoint) {
-      test_status_str = "PRE-HEATING";
+      test_status_str = "HEATING";
+      digitalWrite(HEAT_SAFETY_PIN, HIGH);
     }
-    else {
+    else { // TEST HAS PRE-HEATED //
       isPreHeated = true;
       test_status_str = "RUNNING";
+      hasTestStarted = true;
+
+      // PROFILE LOGIC GOES HERE //
       if (debugTimer > 1000) {
         debugTimer = 0;
       loop_count++;
-      }
+      } // END OF PROFILE LOGIC
     }
     updateHeaterPID();
   }
   else {
     ResetSwitch.update();
     isResetSwitchOn = ResetSwitch.read();
-  }
+  } // END OF RUN LOGIC
 
+  // PAUSED LOGIC //
   if (!isRunSwitchOn && hasTestStarted) {
     test_status_str = "PAUSED";
-    // don't update PID loop here
-    // disable heaters
-  }
+    isPreHeated = false; // test may have cooled off
+    digitalWrite(HEAT_OUTPUT_PIN, LOW);
+    digitalWrite(HEAT_SAFETY_PIN, LOW);
+  } // END OF PAUSED LOGIC
 
+  // RESET LOGIC //
   if (isResetSwitchOn) {
     ResetSwitch.update();
     isResetSwitchOn = ResetSwitch.read();
@@ -239,7 +252,7 @@ void loop() {
       ResetSwitch.update();
       isResetSwitchOn = ResetSwitch.read();
     }
-  }
+  } // END RESET LOGIC
 
   updateLCD(press_offset, loop_count, test_status_str, setpoint);
 }
