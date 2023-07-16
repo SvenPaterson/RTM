@@ -71,7 +71,11 @@ bool isRunSwitchOn = false;
 bool isResetSwitchOn = false;
 bool hasTestStarted = false;
 bool isPreHeated = false;
+bool torqueRequested = false;
 
+// INTERRUPT VOLITILE VARIABLES
+volatile unsigned long start_micros = 0;
+volatile unsigned long end_micros = 0;
 
 // DEBUGGING ONLY
 bool debug = true;
@@ -79,13 +83,12 @@ int loop_count = 1234;
 double CW_torque;
 double CCW_torque;
 
-
 // FUNCTION DECLARATIONS
 time_t getTeensyTime();
 int pgm_lastIndexOf(uint8_t c, const char *p);
 String srcfile_details();
 double setPressureOffset(const bool& debug=false);
-void updateLCD(double& offset, int& loop_count, String& test_status_str, double& setpoint);
+void updateLCD(String& test_status_str);
 void updateHeaterPID();
 String tempToStr(const double& temp, const bool& unit);
 String dateTimeStr();
@@ -99,7 +102,9 @@ String padBetweenChars(const int& num_chars, const String& str1, const String& s
 String rightJustifiedString(const String& str);            
 void showError(const String& errorMessage);
 void initScreen(const String& init_msg, const bool& cls = true, const String& status_msg = "");
-
+void loopPinRisingEdge();
+void loopPinFallingEdge();
+void torqueRequestRisingEdge();
 
 /* ----------------------------- INTIAL SETUP ----------------------------- */
 void setup() {
@@ -174,6 +179,17 @@ void setup() {
   RunSwitch.interval(100);
   ResetSwitch.interval(100);
 
+  // Initialize bus pins and attach interrupts
+  pinMode(LOOP_BUS_PIN, INPUT_PULLDOWN);
+  pinMode(TORQ_FLAG_BUS_PIN, INPUT_PULLDOWN);
+  attachInterrupt(digitalPinToInterrupt(LOOP_BUS_PIN), loopPinRisingEdge, RISING);
+  attachInterrupt(digitalPinToInterrupt(TORQ_FLAG_BUS_PIN), torqueRequestRisingEdge, RISING);
+
+  // Initialize Motor PWM pin for reading torque
+  pinMode(MOTOR_HLFB_PIN, INPUT_PULLUP);
+  
+
+
   // Clear screen to begin test protocol
   lcd.clear();
 }
@@ -201,6 +217,11 @@ void loop() {
       test_status_str = "RUNNING";
       hasTestStarted = true;
 
+      if (torqueRequested) {
+        // calculate torque here
+        delay(100);
+      }
+       
       // PROFILE LOGIC GOES HERE //
       if (debugTimer > 1000) {
         debugTimer = 0;
@@ -224,6 +245,8 @@ void loop() {
 
   // RESET LOGIC //
   if (isResetSwitchOn) {
+    digitalWrite(HEAT_OUTPUT_PIN, LOW);
+    digitalWrite(HEAT_SAFETY_PIN, LOW);
     ResetSwitch.update();
     isResetSwitchOn = ResetSwitch.read();
     msg = "Test will be RESET in:";
@@ -254,7 +277,7 @@ void loop() {
     }
   } // END RESET LOGIC
 
-  updateLCD(press_offset, loop_count, test_status_str, setpoint);
+  updateLCD(test_status_str);
 }
 
 // FUNCTION DEFINITIONS //
@@ -292,13 +315,13 @@ double setPressureOffset(const bool& debug) {
   return press_cal;
 }
 
-void updateLCD(double& offset, int& loop_count, String& test_status_str, double& setpoint) {
+void updateLCD(String& test_status_str) {
   String loops_str = loop_count;
   String seal_temp_str = tempToStr(sealTempSensor.getThermocoupleTemp(temp_units), temp_units);
   delay(5);
   String sump_temp_str = tempToStr(sump_temp, temp_units);
   delay(5);
-  String pressure = String((mpr.readPressure() - offset));
+  String pressure = String((mpr.readPressure() - press_offset));
   if (debug) {
     pressure = "12.3";
     CW_torque = 1.26;
@@ -538,6 +561,20 @@ void updateHeaterPID() {
   }
 }
 
-void resetController() {
-  
+void loopPinRisingEdge() {
+  attachInterrupt(digitalPinToInterrupt(LOOP_BUS_PIN), loopPinFallingEdge, FALLING);
+  start_micros = micros();
+}
+
+void loopPinFallingEdge() {
+  end_micros = micros();
+  volatile unsigned long duration = (end_micros - start_micros);
+  if ((duration >= 990 && duration < 1010)) {
+    loop_count++;
+  }
+  attachInterrupt(digitalPinToInterrupt(LOOP_BUS_PIN), loopPinRisingEdge, RISING); // Enable the interupt.
+}
+
+void torqueRequestRisingEdge() {
+  torqueRequested = true;
 }
