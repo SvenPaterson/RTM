@@ -15,3 +15,11 @@ void DisplayController::updateTemps() {
     _seal_temp = _sealTempSensor.getThermocoupleTemp(false);
     _sump_temp = _sumpTempSensor.getThermocoupleTemp(false);
 }
+
+double DisplayController::getSealTemp() {
+    return _seal_temp;
+}
+
+double DisplayController::getSumpTemp() {
+    return _sump_temp;
+}

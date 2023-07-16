@@ -11,6 +11,8 @@ class DisplayController {
     public:
         DisplayController();
         void updateTemps();
+        double getSealTemp();
+        double getSumpTemp();
 
 
     private:
