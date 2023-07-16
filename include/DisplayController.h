@@ -17,10 +17,9 @@ class DisplayController {
 
         // Initialize connected devices
         void begin();
-
-        void heaterPins(byte saftey_pin, byte output_pin);
-        int heaterOutput();
-
+        void setHeaterPins(byte saftey_pin, byte output_pin);
+        void setTempSetpoint(double setpoint);
+        
         // read sensors
         void update();
 
@@ -31,6 +30,9 @@ class DisplayController {
         
         // LCD SCREEN
         SerLCD lcd;
+
+        // Heater PID Loop
+        double computeHeaterOutput();
         
 
     private:
@@ -47,7 +49,7 @@ class DisplayController {
 
         // HEATER
         byte _safety_pin, _output_pin;
-        double _setpoint, _input, _output;
+        double _setpoint_temp, _input, _output;
         double _Kp = 60, _Ki = 40, _Kd = 25;
         PID _heaterPIDControl;
 

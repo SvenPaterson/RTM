@@ -2,14 +2,24 @@
 
 #define RGB_WHITE 255, 255, 255
 
-DisplayController::DisplayController() : _heaterPIDControl(&_input, &_output, &_setpoint, _Kp, _Ki, _Kd, DIRECT)
+DisplayController::DisplayController() : _heaterPIDControl(&_input, &_output, &_setpoint_temp, _Kp, _Ki, _Kd, DIRECT)
 {
-    _setpoint = 70.0;
+    _setpoint_temp = 70.0;
+    _heaterPIDControl.SetMode(AUTOMATIC);
+    _heaterPIDControl.SetOutputLimits(0, 150);
 }
 
-int DisplayController::heaterOutput() {
-    _heaterPIDControl.Compute();
-    return _output;
+void DisplayController::setHeaterPins(byte safety_pin, byte output_pin) {
+    _safety_pin = safety_pin;
+    _output_pin = output_pin;
+    pinMode(_safety_pin, OUTPUT);
+    pinMode(_output_pin, OUTPUT);
+    digitalWrite(_safety_pin, LOW);
+    digitalWrite(_output_pin, LOW);
+}
+
+void DisplayController::setTempSetpoint(double setpoint) {
+    _setpoint_temp = setpoint;
 }
 
 void DisplayController::begin() {
@@ -41,15 +51,13 @@ void DisplayController::begin() {
     _press_fault = _pressSensor.begin();
     if (_press_fault) _msg = "Pressure Sensor Fault!"; 
 
-    pinMode(_safety_pin, OUTPUT);
-    pinMode(_output_pin, OUTPUT);
-    digitalWrite(_safety_pin, LOW);
-    digitalWrite(_output_pin, LOW);
 }
 
-void DisplayController::heaterPins(byte safety_pin, byte output_pin) {
-  _safety_pin = safety_pin;
-  _output_pin = output_pin;
+double DisplayController::computeHeaterOutput() {
+    _input = getSumpTemp();
+    _heaterPIDControl.Compute();
+    analogWrite(_output_pin, _output);
+    return _output;
 }
 
 void DisplayController::update() {

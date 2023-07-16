@@ -27,6 +27,7 @@
 // INITIALIZE TIMERS
 elapsedMillis LoopTimer;
 elapsedMillis LCDTimer;
+elapsedMillis heaterPIDTimer;
 elapsedMillis errorTimer;
 elapsedMillis debugTimer; // DELETE WHEN COMPLETE
 
@@ -45,13 +46,6 @@ DisplayController displayController;
 // temp vars
 #define PRESS_AVG_TIME 3000
 double press_offset;
-
-// PID LOOP FOR HEATER CONTROL
-/* double setpoint, input, output;
-double Kp = 60, Ki = 40, Kd = 25;
-PID heaterPID(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
-elapsedMillis PIDTimer; */
-double sump_temp, seal_temp;
 
 // RUN & RESET SWITCH BOUNCERS
 Bounce RunSwitch = Bounce();
@@ -76,6 +70,7 @@ bool debug = true;
 int loop_count = 1234;
 double CW_torque;
 double CCW_torque;
+double temp_setpoint = 60.0; // will be set by SD card file
 
 // FUNCTION DECLARATIONS
 time_t getTeensyTime();
@@ -83,7 +78,6 @@ int pgm_lastIndexOf(uint8_t c, const char *p);
 String srcfile_details();
 double setPressureOffset(const bool& debug=false);
 void updateLCD(String& test_status_str);
-void updateHeaterPID();
 String tempToStr(const double& temp, const bool& unit);
 String dateTimeStr();
 void printLCDRow(int row, const String& text1, const String& text2);
@@ -103,14 +97,8 @@ void torqueRequestRisingEdge();
 /* ----------------------------- INTIAL SETUP ----------------------------- */
 void setup() {
 
+  displayController.setHeaterPins(HEAT_SAFETY_PIN, HEAT_OUTPUT_PIN);
   displayController.begin();
-  
-  displayController.heaterPins(HEAT_SAFETY_PIN, HEAT_OUTPUT_PIN);
-
-  // Initialize Serial bus
-  /* Serial.begin(115200);
-  while (!Serial && (millis() < 4000)) {
-  } */
 
   // Get source file information
   String source_file = srcfile_details();
@@ -118,48 +106,23 @@ void setup() {
   Serial.println(source_file);
   Serial.println("\nInitializing display controller...");
 
-  /* // Initialize the I2C bus
-  Wire.begin();
-  Serial.println(" - i2c bus initialized"); */
-
   // Initialize Teensy Board Time
   setSyncProvider(getTeensyTime);
-
-  /* // Initialize the LCD screen
-  lcd.begin(Wire);
-  lcd.setBacklight(WHITE_RGB);
-  lcd.setContrast(5);
-  lcd.clear();
-  Serial.println(" - lcd screen initialized"); */
 
   // Display source file version on LCD
   initScreen(source_file);
   delay(5000);
 
-  
-
-  // Initialize the pressure sensor and set zero offset
-  /* if (!mpr.begin()) {
-    showError("Cannot connect to MicroPressure Sensor!");
-  }
-  delay(5); */
   press_offset = setPressureOffset(debug);
 
   // Initialize the heater band PID loop
-  pinMode(HEAT_SAFETY_PIN, OUTPUT);
-  pinMode(HEAT_OUTPUT_PIN, OUTPUT);
-  digitalWrite(HEAT_SAFETY_PIN, LOW);
-  digitalWrite(HEAT_OUTPUT_PIN, LOW);
-  heaterPID.SetMode(AUTOMATIC);
-  heaterPID.SetOutputLimits(0, 150);
-  //input = sumpTempSensor.getThermocoupleTemp(temp_units);
   displayController.update();
-  input = displayController.getSumpTemp();
-  setpoint = 60.0; // This needs to be read from SD
+  displayController.setTempSetpoint(temp_setpoint);
   msg = "Heater PID control ready";
   initScreen(msg);
-  printFourColumnRow(3, "Sump:", tempToStr(input, temp_units),
-                        " Sp:", tempToStr(setpoint, temp_units));
+  String input_str = tempToStr(displayController.getSumpTemp(), temp_units);
+  String setpoint_str = tempToStr(temp_setpoint, temp_units);
+  printFourColumnRow(3, "Sump:", input_str, " Sp:", setpoint_str);
   delay(3000);
   Serial.println(" - PID loop initialized");
 
@@ -189,6 +152,7 @@ void setup() {
 /* -------------------------------- MAIN LOOP -------------------------------- */
 void loop() {
   LoopTimer = 0;
+  displayController.update();
   RunSwitch.update();
   isRunSwitchOn = RunSwitch.read();
 
@@ -200,7 +164,7 @@ void loop() {
 
   // RUN LOGIC //
   if (isRunSwitchOn) {
-    if (!isPreHeated && sump_temp < setpoint) {
+    if (!isPreHeated && displayController.getSumpTemp() < temp_setpoint) {
       test_status_str = "HEATING";
       digitalWrite(HEAT_SAFETY_PIN, HIGH);
     }
@@ -220,7 +184,7 @@ void loop() {
       loop_count++;
       } // END OF PROFILE LOGIC
     }
-    updateHeaterPID();
+    displayController.computeHeaterOutput();
   }
   else {
     ResetSwitch.update();
@@ -268,8 +232,10 @@ void loop() {
       isResetSwitchOn = ResetSwitch.read();
     }
   } // END RESET LOGIC
-
-  updateLCD(test_status_str);
+  if (heaterPIDTimer > 100) {
+    heaterPIDTimer = 0;
+    updateLCD(test_status_str);
+  }
 }
 
 // FUNCTION DEFINITIONS //
@@ -312,7 +278,7 @@ void updateLCD(String& test_status_str) {
   String loops_str = loop_count;
   String seal_temp_str = tempToStr(displayController.getSealTemp(), temp_units);
   delay(5);
-  String sump_temp_str = tempToStr(sump_temp, temp_units);
+  String sump_temp_str = tempToStr(displayController.getSumpTemp(), temp_units);
   delay(5);
   String pressure = String((displayController.getPressure() - press_offset));
   if (debug) {
@@ -321,7 +287,7 @@ void updateLCD(String& test_status_str) {
     CCW_torque = -0.98;
   }
   String torques_str = String(CCW_torque) + " / " + String(CW_torque);
-  String set_point_str = tempToStr(setpoint, temp_units);
+  String set_point_str = tempToStr(temp_setpoint, temp_units);
   String date = String(month()) + "/" + String(day());
   String time = String(hour()) + ":" + String(minute());
   
@@ -542,17 +508,6 @@ int pgm_lastIndexOf(uint8_t c, const char *p) {
     }
   }
   return last_index;
-}
-
-void updateHeaterPID() {
-  if (PIDTimer > 100) {
-    displayController.update();
-    sump_temp = displayController.getSumpTemp();
-    PIDTimer = 0;
-    input = sump_temp;
-    heaterPID.Compute();
-    analogWrite(HEAT_OUTPUT_PIN, output);
-  }
 }
 
 void loopPinRisingEdge() {
