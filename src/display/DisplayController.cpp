@@ -1,10 +1,11 @@
 #include "DisplayController.h"
 
 // LCD screen parameters
+#define SCREEN_REFRESH_INTERVAL 2000
 #define RGB_WHITE 255, 255, 255
 #define RGB_RED 255, 0, 0
 #define MAX_CHARS_PER_LINE 20
-#define ERROR_SCREEN_DURATION 10
+#define ERROR_SCREEN_DURATION 5
 
 // Pressure Sensor Parameters
 #define PRESS_AVG_TIME 3000
@@ -14,11 +15,13 @@ DisplayController::DisplayController() : _heaterPIDControl(&_input, &_output, &_
     _setpoint_temp = 70.0;
     _heaterPIDControl.SetMode(AUTOMATIC);
     _heaterPIDControl.SetOutputLimits(0, 150);
+    Serial.println(" - PID loop initialized");
     _runSwitch = NULL;
     _resetSwitch = NULL;
 }
 
-void DisplayController::setHeaterPins(const byte& safety_pin, const byte& output_pin) {
+void DisplayController::setHeaterPins(const byte& safety_pin,
+                                      const byte& output_pin) {
     _safety_pin = safety_pin;
     _output_pin = output_pin;
     pinMode(_safety_pin, OUTPUT);
@@ -27,15 +30,18 @@ void DisplayController::setHeaterPins(const byte& safety_pin, const byte& output
     digitalWrite(_output_pin, LOW);
 }
 
-void DisplayController::setSwitchPins(const byte& run_pin, const byte& reset_pin) {
+void DisplayController::setSwitchPins(const byte& run_pin,
+                                      const byte& reset_pin) {
     _run_pin = run_pin;
     _reset_pin = reset_pin;
     pinMode(_run_pin, INPUT_PULLDOWN);
     pinMode(_reset_pin, INPUT_PULLDOWN);
 }
 
-void DisplayController::setBusPins(const byte& run_bus_pin, const byte& reset_bus_pin,
-                                   const byte& read_torque_bus_pin, const byte& loop_bus_pin) {
+void DisplayController::setBusPins(const byte& run_bus_pin,
+                                   const byte& reset_bus_pin,
+                                   const byte& read_torque_bus_pin,
+                                   const byte& loop_bus_pin) {
     _run_bus_pin = run_bus_pin;
     _reset_bus_pin = reset_bus_pin;
     _read_torque_bus_pin = read_torque_bus_pin;
@@ -47,9 +53,21 @@ void DisplayController::setBusPins(const byte& run_bus_pin, const byte& reset_bu
     pinMode(_read_torque_bus_pin, INPUT_PULLDOWN);
 }
 
-void 
-void DisplayController::setTempSetpoint(double setpoint) {
+void DisplayController::setTorquePin(const byte& torque_pin) {
+    _torque_pin = torque_pin;
+}
+
+void DisplayController::setTempSetpoint(const double& setpoint,
+                                        const bool& units) {
     _setpoint_temp = setpoint;
+    _temp_units = units;
+    update();
+    String msg = "Heater PID control ready";
+    messageScreen(msg);
+    String input_str = tempToStr(getSumpTemp(), _temp_units);
+    String setpoint_str = tempToStr(_setpoint_temp, _temp_units);
+    printFourColumnRow(3, "Sump:", input_str, " Sp:", setpoint_str);
+    delay(3000);
 }
 
 void DisplayController::begin() {
@@ -105,16 +123,15 @@ void DisplayController::begin() {
     _runSwitch->interval(100);
     _resetSwitch->attach(_reset_pin);
     _resetSwitch->interval(100);
-    
 }
 
-double DisplayController::computeHeaterOutput() {
-    _input = getSumpTemp();
-    _heaterPIDControl.Compute();
-    analogWrite(_output_pin, _output);
-    Serial.print("heater pin output: ");
-    Serial.println(_output);
-    return _output;
+void DisplayController::computeHeaterOutput() {
+    if (_PIDTimer > 100) {
+        _input = _sump_temp;
+        _heaterPIDControl.Compute();
+        analogWrite(_output_pin, _output);
+        _PIDTimer = 0;
+    }
 }
 
 void DisplayController::turnOffHeaters() {
@@ -127,8 +144,8 @@ void DisplayController::armHeaters() {
 }
 
 void DisplayController::update() {
-    _seal_temp = _sealTempSensor.getThermocoupleTemp(false);
-    _sump_temp = _sumpTempSensor.getThermocoupleTemp(false);
+    _seal_temp = _sealTempSensor.getThermocoupleTemp(_temp_units);
+    _sump_temp = _sumpTempSensor.getThermocoupleTemp(_temp_units);
     _pressure = _pressSensor.readPressure();
     _runSwitch->update();
     _resetSwitch->update();
@@ -155,6 +172,23 @@ void DisplayController::setPressureOffset() {
     messageScreen(msg, false, status);
 }
 
+void DisplayController::readTorque() {
+    uint32_t pwm_high_val = pulseIn(_torque_pin, HIGH, 100000);
+    uint32_t pwm_low_val = pulseIn(_torque_pin, LOW, 100000);
+    double pwm_duty_value = pwm_high_val / (pwm_high_val + pwm_low_val) * 100;
+
+    if (pwm_duty_value < 96 && pwm_duty_value > 4) {
+        double torque = ((pwm_duty_value - 50) * .3636);
+        if (torque > 0) {
+            _cw_torque = torque;
+        }
+        else {
+            _ccw_torque = torque;
+        }
+    }
+
+}
+
 double DisplayController::getSealTemp() {
     return _seal_temp;
 }
@@ -176,7 +210,10 @@ bool DisplayController::getResetSwitch() {
 }
 
 /****** LCD SCREEN FUNCTION DEFINITIONS ******/
-void DisplayController::messageScreen(const String& msg, const bool& cls, const String& status) {
+
+void DisplayController::messageScreen(const String& msg,
+                                      const bool& cls,
+                                      const String& status) {
     /* Function takes both a main message and a status update and displays the main
    * message on the LCD screen, left justified with text wrapping. The status
    * message is displayed in the lower right corner and is right justified.
@@ -266,4 +303,94 @@ String DisplayController::rightJustifiedString(const String& str) {
     paddedStr = " " + paddedStr;
     }
     return paddedStr;
+}
+
+void DisplayController::printFourColumnRow(const int& row, const String& str1,
+                                           const String& str2, const String& str3, 
+                                           const String& str4) {
+    /* Prints four strings on a row of the LCD screen,
+    * equally spaced apart.
+    */
+    int width = MAX_CHARS_PER_LINE / 2;
+    printRowPair(0, row, width, str1, str2);
+    printRowPair(width, row, width, str3, str4);
+}
+
+void DisplayController::printRowPair(const int& col, const int& row,
+                                     const int& width, const String& str1,
+                                     const String& str2) {
+    /* Takes two strings and prints 'str1' left justified 
+    * and 'str2' right justified on the specified 'row' 
+    * between a distance, specified by width and a start
+    * location specified by 'col' on the lcd screen.
+    */
+    lcd.setCursor(col, row);
+    lcd.print(str1);
+    lcd.setCursor(str1.length()+col, row);
+    lcd.print(padBetweenChars(width, str1, str2));
+}
+
+String DisplayController::padBetweenChars(const int& num_chars, 
+                                          const String& str1,
+                                          const String& str2) {
+    /* Function calculates the correct amount of padding 
+    * and pre-pends str2 with " " characters and returns
+    * paddedStr.
+    */
+    unsigned int space = num_chars - (str1).length();
+    String paddedStr = str2;
+    while (paddedStr.length() < space) {
+    paddedStr = " " + paddedStr;
+    }
+    return paddedStr;
+}
+
+String DisplayController::tempToStr(const double& temp,
+                                    const bool& unit) {
+  /* Returns a String with correct suffix for farenheit
+   * by default. Pass 'true' after temp to set units to
+   * celcius.
+   */
+  if (unit) {
+    return String(temp, 0) + String((char)223) + "C";
+  }
+  else return String(temp, 0) + String((char)223) + "F";
+}
+
+void DisplayController::updateLCD(const String& test_status_str,
+                                  const unsigned int& loop_count) {
+    String loops_str = loop_count;
+    String seal_temp_str = tempToStr(_seal_temp, _temp_units);
+    delay(5);
+    String sump_temp_str = tempToStr(_sump_temp, _temp_units);
+    delay(5);
+    String pressure = String((_pressure - _press_offset));
+
+    /**** DEBUGGING ONLY!!! ****/
+    pressure = "12.3";
+    double _cw_torque = 1.26;
+    double _ccw_torque = -0.98;
+    /***************************/
+
+    String torques_str = String(_ccw_torque) + " / " + String(_cw_torque);
+    String set_point_str = tempToStr(_setpoint_temp, _temp_units);
+    String date = String(month()) + "/" + String(day());
+    String time = String(hour()) + ":" + String(minute());
+    
+    if (_screenTimer > SCREEN_REFRESH_INTERVAL) {
+        _screenTimer = 0;
+        if (_isScreenUpdate) {
+            _isScreenUpdate = !_isScreenUpdate;
+            printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status_str);
+            printRowPair(0, 1, MAX_CHARS_PER_LINE, "Setpoint:", set_point_str);
+            printFourColumnRow(2, "P:", pressure +"psi", " Loop:", loops_str);
+            printFourColumnRow(3, "Seal:", seal_temp_str, " Sump:", sump_temp_str);
+        }
+        else {
+            _isScreenUpdate = !_isScreenUpdate;
+            // printRowPair(0, 0, MAX_CHARS_PER_LINE, "Date:", dateTimeStr());
+            // print the remaining test time here
+            printRowPair(0, 1, MAX_CHARS_PER_LINE, "Torque:", torques_str);
+        }
+    }
 }

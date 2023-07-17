@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Wire.h>
 
 // define the board I/O pin numbers
 #define LOOP_BUS_PIN 1
@@ -15,13 +16,21 @@
 #define RESET_BUS_PIN 20
 
 elapsedMillis test;
+String str = "test";
 
 void setup() {
-  test = 0;
+  Serial.begin(112500);
+  Wire.begin();
+  pinMode(LOOP_BUS_PIN, OUTPUT);
+  
 }
 
 void loop() {
-  if (test % 100) {
-    Serial.println('test');
+  if (test > 10000) {
+    // simulate a 10 second loop
+    digitalWrite(LOOP_BUS_PIN, HIGH);
+    delay(1);
+    digitalWrite(LOOP_BUS_PIN, LOW);
+    test = 0;
   }
 }
