@@ -25,7 +25,6 @@
 #define RESET_BUS_PIN 20
 
 // INITIALIZE TIMERS
-elapsedMillis LoopTimer;
 elapsedMillis LCDTimer;
 elapsedMillis heaterPIDTimer;
 elapsedMillis errorTimer;
@@ -48,8 +47,8 @@ DisplayController displayController;
 double press_offset;
 
 // RUN & RESET SWITCH BOUNCERS
-Bounce RunSwitch = Bounce();
-Bounce ResetSwitch = Bounce();
+/* Bounce RunSwitch = Bounce();
+Bounce ResetSwitch = Bounce(); */
 
 // TEST CONTROL
 #define RESET_TIME 10000
@@ -67,10 +66,10 @@ volatile unsigned long end_micros = 0;
 
 // DEBUGGING ONLY
 bool debug = true;
-int loop_count = 1234;
+int loop_count = 0;
 double CW_torque;
 double CCW_torque;
-double temp_setpoint = 60.0; // will be set by SD card file
+double temp_setpoint = 90.0; // will be set by SD card file
 
 // FUNCTION DECLARATIONS
 time_t getTeensyTime();
@@ -87,9 +86,7 @@ void printFourColumnRow(const int& row,
                         const String& str1, const String& str2,
                         const String& str3, const String& str4);
 String padBetweenChars(const int& num_chars, const String& str1, const String& str2);
-String rightJustifiedString(const String& str);            
-void showError(const String& errorMessage);
-//void initScreen(const String& init_msg, const bool& cls = true, const String& status_msg = "");
+           
 void loopPinRisingEdge();
 void loopPinFallingEdge();
 void torqueRequestRisingEdge();
@@ -103,6 +100,9 @@ void setup() {
   Serial.println(source_file);
 
   displayController.setHeaterPins(HEAT_SAFETY_PIN, HEAT_OUTPUT_PIN);
+  displayController.setSwitchPins(RUN_SW_PIN, RESET_SW_PIN);
+  displayController.setBusPins(PRGM_RUN_BUS_PIN, RESET_BUS_PIN,
+                               TORQ_FLAG_BUS_PIN, LOOP_BUS_PIN);
   displayController.begin();
 
   // Initialize Teensy Board Time
@@ -117,7 +117,7 @@ void setup() {
   delay(3000);
 
   // Initialize the heater band PID loop
-  displayController.updateSensors();
+  displayController.update();
   displayController.setTempSetpoint(temp_setpoint);
   msg = "Heater PID control ready";
   displayController.messageScreen(msg);
@@ -128,14 +128,8 @@ void setup() {
   Serial.println(" - PID loop initialized");
 
   // Initialize the Run and Reset switch and bus pins
-  pinMode(RUN_SW_PIN, INPUT_PULLDOWN);
-  pinMode(RESET_SW_PIN, INPUT_PULLDOWN);
   pinMode(PRGM_RUN_BUS_PIN, OUTPUT);
   pinMode(RESET_BUS_PIN, OUTPUT);
-  RunSwitch.attach(RUN_SW_PIN);
-  ResetSwitch.attach(RESET_SW_PIN);
-  RunSwitch.interval(100);
-  ResetSwitch.interval(100);
 
   // Initialize bus pins and attach interrupts
   pinMode(LOOP_BUS_PIN, INPUT_PULLDOWN);
@@ -152,22 +146,22 @@ void setup() {
 
 /* -------------------------------- MAIN LOOP -------------------------------- */
 void loop() {
-  LoopTimer = 0;
-  displayController.updateSensors();
-  RunSwitch.update();
-  isRunSwitchOn = RunSwitch.read();
+  displayController.update();
+  isRunSwitchOn = displayController.getRunSwitch();
 
+  updateLCD(test_status_str);
+  
   // PRE-TEST LOGIC //
   if (!isRunSwitchOn && !hasTestStarted) {
     test_status_str = "READY";
-    digitalWrite(HEAT_SAFETY_PIN, LOW);
+    displayController.turnOffHeaters();
   } // END PRE-TEST LOGIC
 
   // RUN LOGIC //
   if (isRunSwitchOn) {
     if (!isPreHeated && displayController.getSumpTemp() < temp_setpoint) {
       test_status_str = "HEATING";
-      digitalWrite(HEAT_SAFETY_PIN, HIGH);
+      displayController.armHeaters();
     }
     else { // TEST HAS PRE-HEATED //
       isPreHeated = true;
@@ -180,39 +174,39 @@ void loop() {
       }
        
       // PROFILE LOGIC GOES HERE //
-      if (debugTimer > 1000) {
+      /* if (debugTimer > 1000) {
         debugTimer = 0;
       loop_count++;
-      } // END OF PROFILE LOGIC
+      } // END OF PROFILE LOGIC */
     }
+
+    if (heaterPIDTimer > 100) {
+    heaterPIDTimer = 0;
     displayController.computeHeaterOutput();
+    }
   }
   else {
-    ResetSwitch.update();
-    isResetSwitchOn = ResetSwitch.read();
+    isResetSwitchOn = displayController.getResetSwitch();
   } // END OF RUN LOGIC
 
   // PAUSED LOGIC //
   if (!isRunSwitchOn && hasTestStarted) {
     test_status_str = "PAUSED";
     isPreHeated = false; // test may have cooled off
-    digitalWrite(HEAT_OUTPUT_PIN, LOW);
-    digitalWrite(HEAT_SAFETY_PIN, LOW);
+    displayController.turnOffHeaters();
   } // END OF PAUSED LOGIC
 
   // RESET LOGIC //
   if (isResetSwitchOn) {
-    digitalWrite(HEAT_OUTPUT_PIN, LOW);
-    digitalWrite(HEAT_SAFETY_PIN, LOW);
-    ResetSwitch.update();
-    isResetSwitchOn = ResetSwitch.read();
+    displayController.turnOffHeaters();
+    isResetSwitchOn = displayController.getResetSwitch();
     msg = "Test will be RESET in:";
     displayController.messageScreen(msg);
     for (int i = 10; i > 0; i--) {
       displayController.messageScreen(msg, false, String(i)+" seconds");
       delay(1000);
-      ResetSwitch.update();
-      isResetSwitchOn = ResetSwitch.read();
+      displayController.update();
+      isResetSwitchOn = displayController.getResetSwitch();
       if (!isResetSwitchOn) {
         i = 0; // kick out of reset loop
         displayController.lcd.clear();
@@ -220,7 +214,9 @@ void loop() {
     }
     if (isResetSwitchOn) {
       loop_count = 0;
+      hasTestStarted = false;
       displayController.lcd.clear();
+      displayController.turnOffHeaters();
       digitalWrite(RESET_BUS_PIN, HIGH);
       delay(10);
       digitalWrite(RESET_BUS_PIN, LOW);
@@ -230,50 +226,16 @@ void loop() {
       delay(2000);
       displayController.setPressureOffset();
       delay(3000);
-      ResetSwitch.update();
-      isResetSwitchOn = ResetSwitch.read();
+      displayController.update();
+      isResetSwitchOn = displayController.getResetSwitch();
     }
   } // END RESET LOGIC
-  if (heaterPIDTimer > 100) {
-    heaterPIDTimer = 0;
-    updateLCD(test_status_str);
-  }
 }
 
 // FUNCTION DEFINITIONS //
 
 time_t getTeensyTime() {
   return Teensy3Clock.get();
-}
-
-double setPressureOffset(const bool& debug) {
-  String zero_offset_msg = "Determining zero offset for pressure sensor:";
-  displayController.messageScreen(zero_offset_msg);
-  double press_cal = 0.0;
-  int sample_count = 0;
-  elapsedMillis avgPressTimer = 0;
-  elapsedMillis sampleTimer = 0;
-  while (avgPressTimer <= PRESS_AVG_TIME) {
-    if (sampleTimer > 1000) {
-      displayController.updateSensors();
-      press_cal += displayController.getPressure();
-      sample_count++;  
-      sampleTimer = 0;
-      msg = "please wait... " + String(sample_count) + "s";
-      displayController.messageScreen(zero_offset_msg, false, msg);
-    }
-  }
-  press_cal /= sample_count;
-
-  if (debug) {
-    press_cal = 14.7;
-  }
-
-  Serial.println(" - pressure sensor initialized");
-  msg = "offset by " + String(press_cal) + " psi"; 
-  displayController.messageScreen(zero_offset_msg, false, msg);
-  delay(3000);
-  return press_cal;
 }
 
 void updateLCD(String& test_status_str) {
@@ -329,17 +291,6 @@ String dateTimeStr() {
   String time = String(hour()) + ":" + String(minute());
   return date + " " + time;
 }
-String rightJustifiedString(const String& str) {
-  /* Function returns a String with enough padding
-   * prepended for the LCD screen to right justify the text
-   * on an empty line
-   */
-  String paddedStr = str;
-  while (paddedStr.length() < MAX_CHARS_PER_LINE) {
-    paddedStr = " " + paddedStr;
-  }
-  return paddedStr;
-}
 
 void printRowPair(const int& col, const int& row, const int& width,
                   const String& str1, const String& str2) {
@@ -378,85 +329,6 @@ String padBetweenChars(const int& num_chars, const String& str1, const String& s
   return paddedStr;
 }
 
-void showError(const String& errorMessage) {
-  /* Function displays an error message on the LCD
-   * and flashes the backlight red. It contains an 
-   * infinite while loop so the only way to clear
-   * the error is the restart the controller 
-   */
-  displayController.lcd.clear();
-  displayController.lcd.setCursor(0,0);
-  displayController.lcd.print("Error! Error! Error!");
-  displayController.lcd.setCursor(0,1);
-  displayController.lcd.print(errorMessage);
-
-  while (true) {
-    if (errorTimer >= 1000) {
-      if (isBacklightOn) {
-        displayController.lcd.setBacklight(RED_RGB);
-        isBacklightOn = false;
-      }
-      else {
-        displayController.lcd.setBacklight(0, 0, 0);
-        isBacklightOn = true;
-      }
-    errorTimer = 0;
-    }
-  }
-}
-/* 
-void initScreen(const String& init_msg, const bool& cls, const String& status_msg) {
-  /* Function takes both a main message and a status update and displays the main
-   * message on the LCD screen, left justified with text wrapping. The status
-   * message is displayed in the lower right corner and is right justified.
-   * 
-   * The function can be called to clear the screen (default) prior to displaying 
-   * message. Setting this to false helps prevent flicker during multiple calls
-   * of function while updating only the status_msg.
-  
-
-  if (cls) {
-    displayController.lcd.clear();
-  }
-
-  // Print the message with line wrapping
-  int startPos = 0;
-  int endPos = 0;
-  int numLines = 0;
-  int messageLength = init_msg.length();
-
-  while (startPos < messageLength) {
-    // Calculate the end position for the line
-    endPos = startPos + MAX_CHARS_PER_LINE - 1;
-
-    // Check if the end position goes beyond the message length
-    if (endPos >= messageLength) {
-      endPos = messageLength - 1;
-    }
-    else {
-      // Find the last space character within the line's range
-      while (endPos > startPos && init_msg[endPos] != ' ') {
-        endPos--;
-      }
-      // adjust end pos to max limit if no space found
-      if (endPos == startPos) {
-        endPos = startPos + MAX_CHARS_PER_LINE - 1;
-      }
-    }
-
-    displayController.lcd.setCursor(0, numLines);
-    displayController.lcd.print(init_msg.substring(startPos, endPos + 1));
-    numLines++;
-    startPos = endPos + 1;
-  }
-
-  displayController.lcd.setCursor(0, 3);
-
-  if (status_msg != "") {
-    displayController.lcd.print(rightJustifiedString(status_msg));
-  }
-}
- */
 String srcfile_details() { 
   /* Function fetches the source file filename
    * as well as the date and time at compile and

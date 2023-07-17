@@ -2,19 +2,23 @@
 
 // LCD screen parameters
 #define RGB_WHITE 255, 255, 255
+#define RGB_RED 255, 0, 0
 #define MAX_CHARS_PER_LINE 20
+#define ERROR_SCREEN_DURATION 10
 
 // Pressure Sensor Parameters
-#define PRESS_AVG_TIME 10000
+#define PRESS_AVG_TIME 3000
 
 DisplayController::DisplayController() : _heaterPIDControl(&_input, &_output, &_setpoint_temp, _Kp, _Ki, _Kd, DIRECT)
 {
     _setpoint_temp = 70.0;
     _heaterPIDControl.SetMode(AUTOMATIC);
     _heaterPIDControl.SetOutputLimits(0, 150);
+    _runSwitch = NULL;
+    _resetSwitch = NULL;
 }
 
-void DisplayController::setHeaterPins(byte safety_pin, byte output_pin) {
+void DisplayController::setHeaterPins(const byte& safety_pin, const byte& output_pin) {
     _safety_pin = safety_pin;
     _output_pin = output_pin;
     pinMode(_safety_pin, OUTPUT);
@@ -23,6 +27,27 @@ void DisplayController::setHeaterPins(byte safety_pin, byte output_pin) {
     digitalWrite(_output_pin, LOW);
 }
 
+void DisplayController::setSwitchPins(const byte& run_pin, const byte& reset_pin) {
+    _run_pin = run_pin;
+    _reset_pin = reset_pin;
+    pinMode(_run_pin, INPUT_PULLDOWN);
+    pinMode(_reset_pin, INPUT_PULLDOWN);
+}
+
+void DisplayController::setBusPins(const byte& run_bus_pin, const byte& reset_bus_pin,
+                                   const byte& read_torque_bus_pin, const byte& loop_bus_pin) {
+    _run_bus_pin = run_bus_pin;
+    _reset_bus_pin = reset_bus_pin;
+    _read_torque_bus_pin = read_torque_bus_pin;
+    _loop_bus_pin = loop_bus_pin;
+
+    pinMode(_run_bus_pin, OUTPUT);
+    pinMode(_reset_bus_pin, OUTPUT);
+    pinMode(_loop_bus_pin, INPUT_PULLDOWN);
+    pinMode(_read_torque_bus_pin, INPUT_PULLDOWN);
+}
+
+void 
 void DisplayController::setTempSetpoint(double setpoint) {
     _setpoint_temp = setpoint;
 }
@@ -44,6 +69,13 @@ void DisplayController::begin() {
     lcd.clear();
     Serial.println(" - lcd screen initialized");
 
+    // Initialize pressure sensor
+    _press_fault = _pressSensor.begin();
+    if (_press_fault) {
+        _msg = "Pressure Sensor Fault!";
+        errorScreen(_msg);
+    }
+
     // Initialize seal thermocouple sensor
     _seal_fault = !_sealTempSensor.begin(_SEAL_TC_ADDR);
     if (_seal_fault) _msg = "Seal TC Sensor Fault!";
@@ -60,34 +92,56 @@ void DisplayController::begin() {
     Serial.println(" - Sump TC sensor initialized");
     delay(100);
 
-    // Initialize pressure sensor
-    _press_fault = _pressSensor.begin();
-    if (_press_fault) _msg = "Pressure Sensor Fault!";
-
     Serial.println(_msg);
+
+    // Initialize the Run / Reset Switch
+    if (_runSwitch == NULL) {
+        _runSwitch = new Bounce();
+    }
+    if (_resetSwitch == NULL) {
+        _resetSwitch = new Bounce();
+    }
+    _runSwitch->attach(_run_pin);
+    _runSwitch->interval(100);
+    _resetSwitch->attach(_reset_pin);
+    _resetSwitch->interval(100);
+    
 }
 
 double DisplayController::computeHeaterOutput() {
     _input = getSumpTemp();
     _heaterPIDControl.Compute();
     analogWrite(_output_pin, _output);
+    Serial.print("heater pin output: ");
+    Serial.println(_output);
     return _output;
 }
 
-void DisplayController::updateSensors() {
+void DisplayController::turnOffHeaters() {
+    analogWrite(_output_pin, 0);
+    digitalWrite(_safety_pin, LOW);
+}
+
+void DisplayController::armHeaters() {
+    digitalWrite(_safety_pin, HIGH);
+}
+
+void DisplayController::update() {
     _seal_temp = _sealTempSensor.getThermocoupleTemp(false);
     _sump_temp = _sumpTempSensor.getThermocoupleTemp(false);
     _pressure = _pressSensor.readPressure();
+    _runSwitch->update();
+    _resetSwitch->update();
 }
 
 void DisplayController::setPressureOffset() {
     String status, msg = "Determining zero offset for pressure sensor:";
+    elapsedMillis avgPressTimer, sampleTimer;
     messageScreen(msg);
     int sample_count = 0;
-    elapsedMillis avgPressTimer=0, sampleTimer=0;
     while (avgPressTimer <= PRESS_AVG_TIME) {
         if (sampleTimer > 1000) {
-            updateSensors();
+            update();
             _press_offset += _pressure;
             sample_count++;  
             sampleTimer = 0;
@@ -101,6 +155,27 @@ void DisplayController::setPressureOffset() {
     messageScreen(msg, false, status);
 }
 
+double DisplayController::getSealTemp() {
+    return _seal_temp;
+}
+
+double DisplayController::getSumpTemp() {
+    return _sump_temp;
+}
+
+double DisplayController::getPressure() {
+    return _pressure;
+}
+
+bool DisplayController::getRunSwitch() {
+    return _runSwitch->read();
+}
+
+bool DisplayController::getResetSwitch() {
+    return _resetSwitch->read();
+}
+
+/****** LCD SCREEN FUNCTION DEFINITIONS ******/
 void DisplayController::messageScreen(const String& msg, const bool& cls, const String& status) {
     /* Function takes both a main message and a status update and displays the main
    * message on the LCD screen, left justified with text wrapping. The status
@@ -145,16 +220,50 @@ void DisplayController::messageScreen(const String& msg, const bool& cls, const 
     numLines++;
     startPos = endPos + 1;
     }
+
+    lcd.setCursor(0, 3);
+    if (status != "") {
+        lcd.print(rightJustifiedString(status));
+    }
 }
 
-double DisplayController::getSealTemp() {
-    return _seal_temp;
+void DisplayController::errorScreen(const String& msg) {
+    /* Function displays an error message on the LCD
+    * and flashes the backlight red. It contains an 
+    * infinite while loop so the only way to clear
+    * the error is the restart the controller 
+    */
+    bool flasher = true;
+    elapsedMillis _errorTimer;
+    messageScreen(msg);
+    for (int x=ERROR_SCREEN_DURATION; x>0; x--) {
+        //update();
+        if (_errorTimer >= 1000) {
+            if (flasher) {
+                lcd.setBacklight(RGB_RED);
+            }
+            else lcd.setBacklight(RGB_WHITE);
+            flasher = !flasher;
+            _errorTimer = 0;
+            messageScreen(msg, false, "continue in " + String(x) + "s");
+            /* if (getResetSwitch()) {
+                x = 0;
+            } */
+        }
+        delay(1000);
+        
+    }
+    lcd.setBacklight(RGB_WHITE);
 }
 
-double DisplayController::getSumpTemp() {
-    return _sump_temp;
-}
-
-double DisplayController::getPressure() {
-    return _pressure;
+String DisplayController::rightJustifiedString(const String& str) {
+    /* Function returns a String with enough padding
+    * prepended for the LCD screen to right justify the text
+    * on an empty line
+    */
+    String paddedStr = str;
+    while (paddedStr.length() < MAX_CHARS_PER_LINE) {
+    paddedStr = " " + paddedStr;
+    }
+    return paddedStr;
 }
