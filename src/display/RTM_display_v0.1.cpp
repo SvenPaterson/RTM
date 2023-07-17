@@ -76,7 +76,7 @@ double temp_setpoint = 60.0; // will be set by SD card file
 time_t getTeensyTime();
 int pgm_lastIndexOf(uint8_t c, const char *p);
 String srcfile_details();
-double setPressureOffset(const bool& debug=false);
+//double setPressureOffset(const bool& debug=false);
 void updateLCD(String& test_status_str);
 String tempToStr(const double& temp, const bool& unit);
 String dateTimeStr();
@@ -89,37 +89,38 @@ void printFourColumnRow(const int& row,
 String padBetweenChars(const int& num_chars, const String& str1, const String& str2);
 String rightJustifiedString(const String& str);            
 void showError(const String& errorMessage);
-void initScreen(const String& init_msg, const bool& cls = true, const String& status_msg = "");
+//void initScreen(const String& init_msg, const bool& cls = true, const String& status_msg = "");
 void loopPinRisingEdge();
 void loopPinFallingEdge();
 void torqueRequestRisingEdge();
 
 /* ----------------------------- INTIAL SETUP ----------------------------- */
 void setup() {
-
-  displayController.setHeaterPins(HEAT_SAFETY_PIN, HEAT_OUTPUT_PIN);
-  displayController.begin();
-
+  
   // Get source file information
   String source_file = srcfile_details();
   Serial.println();
   Serial.println(source_file);
-  Serial.println("\nInitializing display controller...");
+
+  displayController.setHeaterPins(HEAT_SAFETY_PIN, HEAT_OUTPUT_PIN);
+  displayController.begin();
 
   // Initialize Teensy Board Time
   setSyncProvider(getTeensyTime);
 
   // Display source file version on LCD
-  initScreen(source_file);
+  displayController.messageScreen(source_file);
   delay(5000);
 
-  press_offset = setPressureOffset(debug);
+  // measure ambient lab pressure and set offset
+  displayController.setPressureOffset();
+  delay(3000);
 
   // Initialize the heater band PID loop
-  displayController.update();
+  displayController.updateSensors();
   displayController.setTempSetpoint(temp_setpoint);
   msg = "Heater PID control ready";
-  initScreen(msg);
+  displayController.messageScreen(msg);
   String input_str = tempToStr(displayController.getSumpTemp(), temp_units);
   String setpoint_str = tempToStr(temp_setpoint, temp_units);
   printFourColumnRow(3, "Sump:", input_str, " Sp:", setpoint_str);
@@ -152,7 +153,7 @@ void setup() {
 /* -------------------------------- MAIN LOOP -------------------------------- */
 void loop() {
   LoopTimer = 0;
-  displayController.update();
+  displayController.updateSensors();
   RunSwitch.update();
   isRunSwitchOn = RunSwitch.read();
 
@@ -206,9 +207,9 @@ void loop() {
     ResetSwitch.update();
     isResetSwitchOn = ResetSwitch.read();
     msg = "Test will be RESET in:";
-    initScreen(msg);
+    displayController.messageScreen(msg);
     for (int i = 10; i > 0; i--) {
-      initScreen(msg, false, String(i)+" seconds");
+      displayController.messageScreen(msg, false, String(i)+" seconds");
       delay(1000);
       ResetSwitch.update();
       isResetSwitchOn = ResetSwitch.read();
@@ -225,9 +226,10 @@ void loop() {
       digitalWrite(RESET_BUS_PIN, LOW);
       msg = "Test has been successfully RESET!";
       delay(4000);
-      initScreen(srcfile_details());
+      displayController.messageScreen(srcfile_details());
       delay(2000);
-      press_offset = setPressureOffset(debug);
+      displayController.setPressureOffset();
+      delay(3000);
       ResetSwitch.update();
       isResetSwitchOn = ResetSwitch.read();
     }
@@ -246,19 +248,19 @@ time_t getTeensyTime() {
 
 double setPressureOffset(const bool& debug) {
   String zero_offset_msg = "Determining zero offset for pressure sensor:";
-  initScreen(zero_offset_msg);
+  displayController.messageScreen(zero_offset_msg);
   double press_cal = 0.0;
   int sample_count = 0;
   elapsedMillis avgPressTimer = 0;
   elapsedMillis sampleTimer = 0;
   while (avgPressTimer <= PRESS_AVG_TIME) {
     if (sampleTimer > 1000) {
-      displayController.update();
+      displayController.updateSensors();
       press_cal += displayController.getPressure();
       sample_count++;  
       sampleTimer = 0;
       msg = "please wait... " + String(sample_count) + "s";
-      initScreen(zero_offset_msg, false, msg);
+      displayController.messageScreen(zero_offset_msg, false, msg);
     }
   }
   press_cal /= sample_count;
@@ -269,7 +271,7 @@ double setPressureOffset(const bool& debug) {
 
   Serial.println(" - pressure sensor initialized");
   msg = "offset by " + String(press_cal) + " psi"; 
-  initScreen(zero_offset_msg, false, msg);
+  displayController.messageScreen(zero_offset_msg, false, msg);
   delay(3000);
   return press_cal;
 }
@@ -402,7 +404,7 @@ void showError(const String& errorMessage) {
     }
   }
 }
-
+/* 
 void initScreen(const String& init_msg, const bool& cls, const String& status_msg) {
   /* Function takes both a main message and a status update and displays the main
    * message on the LCD screen, left justified with text wrapping. The status
@@ -411,7 +413,7 @@ void initScreen(const String& init_msg, const bool& cls, const String& status_ms
    * The function can be called to clear the screen (default) prior to displaying 
    * message. Setting this to false helps prevent flicker during multiple calls
    * of function while updating only the status_msg.
-  */
+  
 
   if (cls) {
     displayController.lcd.clear();
@@ -454,7 +456,7 @@ void initScreen(const String& init_msg, const bool& cls, const String& status_ms
     displayController.lcd.print(rightJustifiedString(status_msg));
   }
 }
-
+ */
 String srcfile_details() { 
   /* Function fetches the source file filename
    * as well as the date and time at compile and

@@ -19,9 +19,11 @@ class DisplayController {
         void begin();
         void setHeaterPins(byte saftey_pin, byte output_pin);
         void setTempSetpoint(double setpoint);
+        void setPressurePin(byte );
         
         // read sensors
-        void update();
+        void updateSensors();
+        void setPressureOffset();
 
         // return measured values
         double getSealTemp();
@@ -30,6 +32,7 @@ class DisplayController {
         
         // LCD SCREEN
         SerLCD lcd;
+        void messageScreen(const String& msg, const bool& cls=true, const String& status="");
 
         // Heater PID Loop
         double computeHeaterOutput();
@@ -56,7 +59,7 @@ class DisplayController {
         //elapsedMillis PIDTimer;
 
         SparkFun_MicroPressure _pressSensor;
-        double _pressure, _press_offset;
+        double _pressure, _press_offset=0.0;
  
 };
 
