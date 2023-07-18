@@ -53,7 +53,6 @@ void torquePinRisingEdge();
 /* ----------------------------- INTIAL SETUP ----------------------------- */
 void setup() {
   /****** DEBUGGING *******/
-
   displayController.setHeaterPins(HEAT_SAFETY_PIN, HEAT_OUTPUT_PIN);
   displayController.setSwitchPins(RUN_SW_PIN, RESET_SW_PIN);
   displayController.setTestBusPins(PRGM_RUN_BUS_PIN, RESET_BUS_PIN, LOOP_BUS_PIN);
@@ -93,6 +92,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(TORQ_FLAG_BUS_PIN), torquePinRisingEdge, RISING);
   
   // Clear screen to begin test protocol
+  Serial.println("Test Status: " + test_status_str);
   displayController.lcd.clear();
 }
 

@@ -80,11 +80,12 @@ void DisplayController::setTempSetpoint(const double& setpoint,
     _setpoint_temp = setpoint;
     _temp_units = units;
     update();
-    String msg = "Heater PID control ready";
+    String msg = "Heater PID control initialized";
     messageScreen(msg);
     String input_str = tempToStr(getSumpTemp(), _temp_units);
     String setpoint_str = tempToStr(_setpoint_temp, _temp_units);
     printFourColumnRow(3, "Sump:", input_str, " Sp:", setpoint_str);
+    Serial.println("- " + msg);
     delay(3000);
 }
 
@@ -142,8 +143,6 @@ void DisplayController::begin() {
     }
     Serial.println(msg);
     delay(100);
-    Serial.print("Pressure: ");
-    Serial.println(_pressSensor.readPressure());
 
     // Initialize the Run / Reset Switch
     if (_runSwitch == NULL) {
@@ -179,7 +178,8 @@ void DisplayController::armHeaters() {
 void DisplayController::update() {
     _seal_temp = _sealTempSensor.getThermocoupleTemp(_temp_units);
     _sump_temp = _sumpTempSensor.getThermocoupleTemp(_temp_units);
-    _pressure = _pressSensor.readPressure();
+    _abs_pressure = _pressSensor.readPressure();
+    _rel_pressure = _abs_pressure - _press_offset;
     _runSwitch->update();
     _resetSwitch->update();
 }
@@ -188,16 +188,18 @@ void DisplayController::setPressureOffset(const byte& num_meas) {
 
     // NEED TO IMPLEMENT PRESSURE OPEN TO ATMOS FOR THIS //
     String status, msg = "Determining zero offset for pressure sensor:";
+    Serial.println("- " + msg);
     elapsedMillis avgPressTimer, sampleTimer;
     messageScreen(msg);
     int sample_count = 0;
-    while (avgPressTimer <= (num_meas * 1000)) {
+    while (avgPressTimer <= ((num_meas + 1) * 1000)) {
         if (sampleTimer > 1000) {
             update();
-            _press_offset += _pressure;
+            _press_offset += _abs_pressure;
             sample_count++;  
             sampleTimer = 0;
             status = "please wait... " + String(sample_count) + "s";
+            Serial.println("    " + status);
             messageScreen(msg, false, status);
         }
     }
@@ -232,10 +234,7 @@ double DisplayController::getSumpTemp() {
 }
 
 double DisplayController::getPressure() {
-    if (_press_offset) {
-        return _pressure - _press_offset;
-    }
-    else return _pressure;
+    return _abs_pressure;
 }
 
 bool DisplayController::getRunSwitch() {
@@ -381,10 +380,8 @@ void DisplayController::updateLCD(const String& test_status_str,
                                   const unsigned int& loop_count) {
     String loops_str = loop_count;
     String seal_temp_str = tempToStr(_seal_temp, _temp_units);
-    delay(5);
     String sump_temp_str = tempToStr(_sump_temp, _temp_units);
-    delay(5);
-    String pressure = String((_pressure - _press_offset));
+    String pressure = String(_rel_pressure);
 
     /**** DEBUGGING ONLY!!! ****/
     //pressure = "12.3";

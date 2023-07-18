@@ -108,8 +108,7 @@ class DisplayController {
         double getSumpTemp();
 
         /**  
-         * Determines if a pressure offset exists and returns
-         * calculate pressure reading.
+         * @brief Returns relative pressure.
          * @return pressure, in psi
          */
         double getPressure();
@@ -187,6 +186,7 @@ class DisplayController {
         void turnOffHeaters();
 
     private:
+    
         // SENSORS
         bool _temp_units; // false for farenheit, true for celcius
         char _SEAL_TC_ADDR = MCP9600_DEFAULT_ADDR_ONE;
@@ -195,7 +195,8 @@ class DisplayController {
         double _seal_temp, _sump_temp;
 
         SparkFun_MicroPressure _pressSensor;
-        double _pressure, _press_offset=0.0;
+        double _abs_pressure, _rel_pressure;
+        double _press_offset=0.0;
 
         bool _seal_fault = false;
         bool _sump_fault = false;
