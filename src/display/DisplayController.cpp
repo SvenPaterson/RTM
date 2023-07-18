@@ -38,23 +38,41 @@ void DisplayController::setSwitchPins(const byte& run_pin,
     pinMode(_reset_pin, INPUT_PULLDOWN);
 }
 
-void DisplayController::setBusPins(const byte& run_bus_pin,
-                                   const byte& reset_bus_pin,
-                                   const byte& read_torque_bus_pin,
-                                   const byte& loop_bus_pin) {
+void DisplayController::setTestBusPins(const byte& run_bus_pin,
+                                       const byte& reset_bus_pin,
+                                       const byte& loop_bus_pin) {
     _run_bus_pin = run_bus_pin;
     _reset_bus_pin = reset_bus_pin;
-    _read_torque_bus_pin = read_torque_bus_pin;
     _loop_bus_pin = loop_bus_pin;
 
     pinMode(_run_bus_pin, OUTPUT);
     pinMode(_reset_bus_pin, OUTPUT);
     pinMode(_loop_bus_pin, INPUT_PULLDOWN);
+
+}
+
+void DisplayController::setTorquePins(const byte& torque_pin,
+                                     const byte& torque_bus_pin) {
+    _read_torque_bus_pin = torque_bus_pin;
+    _torque_pin = torque_pin;
+
+    pinMode(_torque_pin, INPUT_PULLUP);
     pinMode(_read_torque_bus_pin, INPUT_PULLDOWN);
 }
 
-void DisplayController::setTorquePin(const byte& torque_pin) {
-    _torque_pin = torque_pin;
+void DisplayController::setAirPins(const byte& supply_bus_pin,
+                                   const byte& dump_bus_pin,
+                                   const byte& supply_valve_pin,
+                                   const byte& dump_valve_pin) {
+    _supply_bus_pin = supply_bus_pin;
+    _dump_bus_pin = dump_bus_pin;
+    _supply_valve_pin = supply_valve_pin;
+    _dump_valve_pin = dump_valve_pin;
+
+    pinMode(_supply_bus_pin, INPUT_PULLDOWN);
+    pinMode(_dump_bus_pin, INPUT_PULLDOWN);
+    pinMode(_supply_valve_pin, OUTPUT);
+    pinMode(_dump_valve_pin, OUTPUT);
 }
 
 void DisplayController::setTempSetpoint(const double& setpoint,
@@ -71,10 +89,11 @@ void DisplayController::setTempSetpoint(const double& setpoint,
 }
 
 void DisplayController::begin() {
+    String msg;
     Serial.begin(115200);
-    Serial.println("\nInitializing display controller...");
     while (!Serial && (millis() < 4000)) {
     }
+    Serial.println("\nInitializing display controller...");
 
     // Initialize the I2C bus
     Wire.begin();
@@ -87,30 +106,44 @@ void DisplayController::begin() {
     lcd.clear();
     Serial.println(" - lcd screen initialized");
 
-    // Initialize pressure sensor
-    _press_fault = _pressSensor.begin();
-    if (_press_fault) {
-        _msg = "Pressure Sensor Fault!";
-        errorScreen(_msg);
-    }
-
     // Initialize seal thermocouple sensor
+    msg = " - Seal TC sensor initialized";
     _seal_fault = !_sealTempSensor.begin(_SEAL_TC_ADDR);
-    if (_seal_fault) _msg = "Seal TC Sensor Fault!";
+    if (_seal_fault) {
+        msg = "Seal TC Sensor Fault!";
+        Serial.println(msg);
+        errorScreen(msg, 5);
+    }
     _sealTempSensor.setAmbientResolution(RES_ZERO_POINT_25);
     _sealTempSensor.setThermocoupleResolution(RES_14_BIT);
-    Serial.println(" - Seal TC sensor initialized");
+    Serial.println(msg);
     delay(100);
 
     // Initialize sump thermocouple sensor
+    msg = " - Sump TC sensor initialized";
     _sump_fault = !_sumpTempSensor.begin(_SUMP_TC_ADDR);
-    if (_sump_fault) _msg = "Sump TC Sensor Fault!";
+    if (_sump_fault) {
+        msg = "Sump TC Sensor Fault!";
+        Serial.println(msg);
+        errorScreen(msg);
+    } 
     _sumpTempSensor.setAmbientResolution(RES_ZERO_POINT_25);
     _sumpTempSensor.setThermocoupleResolution(RES_14_BIT);
-    Serial.println(" - Sump TC sensor initialized");
+    Serial.println(msg);
     delay(100);
-
-    Serial.println(_msg);
+    
+    // Initialize pressure sensor
+    msg = " - Pressure sensor initialized";
+    _press_fault = !_pressSensor.begin();
+    if (_press_fault) {
+        msg = "Pressure Sensor Fault!";
+        Serial.println(msg);
+        errorScreen(msg);
+    }
+    Serial.println(msg);
+    delay(100);
+    Serial.print("Pressure: ");
+    Serial.println(_pressSensor.readPressure());
 
     // Initialize the Run / Reset Switch
     if (_runSwitch == NULL) {
@@ -125,8 +158,8 @@ void DisplayController::begin() {
     _resetSwitch->interval(100);
 }
 
-void DisplayController::computeHeaterOutput() {
-    if (_PIDTimer > 100) {
+void DisplayController::computeHeaterOutput(const unsigned int& interval) {
+    if (_PIDTimer > interval) {
         _input = _sump_temp;
         _heaterPIDControl.Compute();
         analogWrite(_output_pin, _output);
@@ -151,12 +184,14 @@ void DisplayController::update() {
     _resetSwitch->update();
 }
 
-void DisplayController::setPressureOffset() {
+void DisplayController::setPressureOffset(const byte& num_meas) {
+
+    // NEED TO IMPLEMENT PRESSURE OPEN TO ATMOS FOR THIS //
     String status, msg = "Determining zero offset for pressure sensor:";
     elapsedMillis avgPressTimer, sampleTimer;
     messageScreen(msg);
     int sample_count = 0;
-    while (avgPressTimer <= PRESS_AVG_TIME) {
+    while (avgPressTimer <= (num_meas * 1000)) {
         if (sampleTimer > 1000) {
             update();
             _press_offset += _pressure;
@@ -167,8 +202,8 @@ void DisplayController::setPressureOffset() {
         }
     }
     _press_offset /= sample_count;
-    Serial.println(" - pressure sensor initialized");
     status = "offset by " + String(_press_offset) + " psi";
+    Serial.println("Pressure " + status);
     messageScreen(msg, false, status);
 }
 
@@ -186,7 +221,6 @@ void DisplayController::readTorque() {
             _ccw_torque = torque;
         }
     }
-
 }
 
 double DisplayController::getSealTemp() {
@@ -198,7 +232,10 @@ double DisplayController::getSumpTemp() {
 }
 
 double DisplayController::getPressure() {
-    return _pressure;
+    if (_press_offset) {
+        return _pressure - _press_offset;
+    }
+    else return _pressure;
 }
 
 bool DisplayController::getRunSwitch() {
@@ -214,83 +251,82 @@ bool DisplayController::getResetSwitch() {
 void DisplayController::messageScreen(const String& msg,
                                       const bool& cls,
                                       const String& status) {
-    /* Function takes both a main message and a status update and displays the main
-   * message on the LCD screen, left justified with text wrapping. The status
-   * message is displayed in the lower right corner and is right justified.
-   * 
-   * The function can be called to clear the screen (default) prior to displaying 
-   * message. Setting this to false helps prevent flicker during multiple calls
-   * of function while updating only the status_msg.
-  */
-
-  if (cls) {
-    lcd.clear();
-  }
-
-  // Print the message with line wrapping
-  int startPos = 0;
-  int endPos = 0;
-  int numLines = 0;
-  int messageLength = msg.length();
-
-  while (startPos < messageLength) {
-    // Calculate the end position for the line
-    endPos = startPos + MAX_CHARS_PER_LINE - 1;
-
-    // Check if the end position goes beyond the message length
-    if (endPos >= messageLength) {
-      endPos = messageLength - 1;
+    if (cls) {
+        lcd.clear();
     }
-    else {
-      // Find the last space character within the line's range
-      while (endPos > startPos && msg[endPos] != ' ') {
-        endPos--;
-      }
-      // adjust end pos to max limit if no space found
-      if (endPos == startPos) {
+
+    // Print the message with line wrapping
+    int startPos = 0;
+    int endPos = 0;
+    int numLines = 0;
+    int messageLength = msg.length();
+
+    while (startPos < messageLength) {
+        // Calculate the end position for the line
         endPos = startPos + MAX_CHARS_PER_LINE - 1;
-      }
-    }
 
-    lcd.setCursor(0, numLines);
-    lcd.print(msg.substring(startPos, endPos + 1));
-    numLines++;
-    startPos = endPos + 1;
-    }
+        // Check if the end position goes beyond the message length
+        if (endPos >= messageLength) {
+        endPos = messageLength - 1;
+        }
+        else {
+        // Find the last space character within the line's range
+        while (endPos > startPos && msg[endPos] != ' ') {
+            endPos--;
+        }
+        // adjust end pos to max limit if no space found
+        if (endPos == startPos) {
+            endPos = startPos + MAX_CHARS_PER_LINE - 1;
+        }
+        }
 
-    lcd.setCursor(0, 3);
-    if (status != "") {
-        lcd.print(rightJustifiedString(status));
-    }
+        lcd.setCursor(0, numLines);
+        lcd.print(msg.substring(startPos, endPos + 1));
+        numLines++;
+        startPos = endPos + 1;
+        }
+
+        lcd.setCursor(0, 3);
+        if (status != "") {
+            lcd.print(rightJustifiedString(status));
+        }
 }
 
-void DisplayController::errorScreen(const String& msg) {
-    /* Function displays an error message on the LCD
-    * and flashes the backlight red. It contains an 
-    * infinite while loop so the only way to clear
-    * the error is the restart the controller 
-    */
+void DisplayController::errorScreen(const String& msg, const int& time) {
     bool flasher = true;
     elapsedMillis _errorTimer;
     messageScreen(msg);
-    for (int x=ERROR_SCREEN_DURATION; x>0; x--) {
-        //update();
+    if (time==0) {
+        while (true) {
+            if (_errorTimer >= 1000) {
+                if (flasher) {
+                    lcd.setBacklight(RGB_RED);
+                }
+                else {
+                    lcd.setBacklight(RGB_WHITE);
+                }
+                flasher = !flasher;
+                _errorTimer = 0;
+            }
+        }
+    }
+    else {
+        for (int x=time; x>0; x--) {
         if (_errorTimer >= 1000) {
             if (flasher) {
                 lcd.setBacklight(RGB_RED);
             }
-            else lcd.setBacklight(RGB_WHITE);
+            else {
+                lcd.setBacklight(RGB_WHITE);
+            }
             flasher = !flasher;
             _errorTimer = 0;
             messageScreen(msg, false, "continue in " + String(x) + "s");
-            /* if (getResetSwitch()) {
-                x = 0;
-            } */
         }
         delay(1000);
-        
     }
     lcd.setBacklight(RGB_WHITE);
+    }
 }
 
 String DisplayController::rightJustifiedString(const String& str) {
@@ -308,9 +344,6 @@ String DisplayController::rightJustifiedString(const String& str) {
 void DisplayController::printFourColumnRow(const int& row, const String& str1,
                                            const String& str2, const String& str3, 
                                            const String& str4) {
-    /* Prints four strings on a row of the LCD screen,
-    * equally spaced apart.
-    */
     int width = MAX_CHARS_PER_LINE / 2;
     printRowPair(0, row, width, str1, str2);
     printRowPair(width, row, width, str3, str4);
@@ -319,11 +352,6 @@ void DisplayController::printFourColumnRow(const int& row, const String& str1,
 void DisplayController::printRowPair(const int& col, const int& row,
                                      const int& width, const String& str1,
                                      const String& str2) {
-    /* Takes two strings and prints 'str1' left justified 
-    * and 'str2' right justified on the specified 'row' 
-    * between a distance, specified by width and a start
-    * location specified by 'col' on the lcd screen.
-    */
     lcd.setCursor(col, row);
     lcd.print(str1);
     lcd.setCursor(str1.length()+col, row);
@@ -333,10 +361,6 @@ void DisplayController::printRowPair(const int& col, const int& row,
 String DisplayController::padBetweenChars(const int& num_chars, 
                                           const String& str1,
                                           const String& str2) {
-    /* Function calculates the correct amount of padding 
-    * and pre-pends str2 with " " characters and returns
-    * paddedStr.
-    */
     unsigned int space = num_chars - (str1).length();
     String paddedStr = str2;
     while (paddedStr.length() < space) {
@@ -347,10 +371,6 @@ String DisplayController::padBetweenChars(const int& num_chars,
 
 String DisplayController::tempToStr(const double& temp,
                                     const bool& unit) {
-  /* Returns a String with correct suffix for farenheit
-   * by default. Pass 'true' after temp to set units to
-   * celcius.
-   */
   if (unit) {
     return String(temp, 0) + String((char)223) + "C";
   }
@@ -367,7 +387,7 @@ void DisplayController::updateLCD(const String& test_status_str,
     String pressure = String((_pressure - _press_offset));
 
     /**** DEBUGGING ONLY!!! ****/
-    pressure = "12.3";
+    //pressure = "12.3";
     double _cw_torque = 1.26;
     double _ccw_torque = -0.98;
     /***************************/

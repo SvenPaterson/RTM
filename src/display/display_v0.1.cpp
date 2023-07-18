@@ -53,16 +53,13 @@ void torquePinRisingEdge();
 /* ----------------------------- INTIAL SETUP ----------------------------- */
 void setup() {
   /****** DEBUGGING *******/
-  // Get source file information
-  String source_file = srcfile_details();
-  Serial.println();
-  Serial.println(source_file);
 
   displayController.setHeaterPins(HEAT_SAFETY_PIN, HEAT_OUTPUT_PIN);
   displayController.setSwitchPins(RUN_SW_PIN, RESET_SW_PIN);
-  displayController.setBusPins(PRGM_RUN_BUS_PIN, RESET_BUS_PIN,
-                               TORQ_FLAG_BUS_PIN, LOOP_BUS_PIN);
-  displayController.setTorquePin(MOTOR_HLFB_PIN);
+  displayController.setTestBusPins(PRGM_RUN_BUS_PIN, RESET_BUS_PIN, LOOP_BUS_PIN);
+  displayController.setTorquePins(MOTOR_HLFB_PIN, TORQ_FLAG_BUS_PIN);
+  displayController.setAirPins(AIR_SUPPLY_BUS_PIN, AIR_DUMP_BUS_PIN,
+                               AIR_SUPPLY_PIN, AIR_DUMP_PIN);
 
   displayController.begin();
 
@@ -70,6 +67,11 @@ void setup() {
   setSyncProvider(getTeensyTime);
 
   // Display source file version on LCD
+    // Get source file information
+  String source_file = srcfile_details();
+  Serial.println();
+  Serial.println(source_file);
+  Serial.println();
   displayController.messageScreen(source_file);
   delay(5000);
 
@@ -89,9 +91,6 @@ void setup() {
   pinMode(TORQ_FLAG_BUS_PIN, INPUT_PULLDOWN);
   attachInterrupt(digitalPinToInterrupt(LOOP_BUS_PIN), loopPinRisingEdge, RISING);
   attachInterrupt(digitalPinToInterrupt(TORQ_FLAG_BUS_PIN), torquePinRisingEdge, RISING);
-
-  // Initialize Motor PWM pin for reading torque
-  pinMode(MOTOR_HLFB_PIN, INPUT_PULLUP);
   
   // Clear screen to begin test protocol
   displayController.lcd.clear();
