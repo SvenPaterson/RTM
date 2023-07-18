@@ -23,7 +23,7 @@ class DisplayController {
          * @param safety_pin pin 7, typical
          * @param output_pin pin 6, typical
          */
-        void setHeaterPins(const byte& saftey_pin, const byte& output_pin);
+        void setHeaterPins(const uint8_t& saftey_pin, const uint8_t& output_pin);
 
         /**  
          * Set rocker switch run and reset control i/o pins and 
@@ -31,7 +31,7 @@ class DisplayController {
          * @param run_pin pin 16, typical
          * @param reset_pin pin 17, typical
          */
-        void setSwitchPins(const byte& run_pin, const byte& reset_pin);
+        void setSwitchPins(const uint8_t& run_pin, const uint8_t& reset_pin);
 
         /**  
          * Set the heater control setpoint temperature and display message
@@ -48,16 +48,16 @@ class DisplayController {
          * @param reset_bus_pin pin 20, typical
          * @param loop_bus_pin pin 1, typical
          */
-        void setTestBusPins(const byte& run_bus_pin, 
-                            const byte& reset_bus_pin,
-                            const byte& loop_bus_pin);
+        void setTestBusPins(const uint8_t& run_bus_pin, 
+                            const uint8_t& reset_bus_pin,
+                            const uint8_t& loop_bus_pin);
         
         /**  
          * Set motor PWM torque measurement pin and initialize pinMode
          * @param torque_pin pin 2, typical
          * @param read_torque_bus_pin pin 11, typical
          */
-        void setTorquePins(const byte& torque_pin, const byte& torque_bus_pin);
+        void setTorquePins(const uint8_t& torque_pin, const uint8_t& torque_bus_pin);
 
         /**  
          * Set i/o bus pins air supply and dump valves as well as bus pins for
@@ -67,8 +67,8 @@ class DisplayController {
          * @param supply_valve_pin pin 8, typical
          * @param dump_valve_pin pin 9, typical
          */
-        void setAirPins(const byte& supply_bus_pin, const byte& dump_bus_pin,
-                        const byte& supply_valve_pin, const byte& dump_valve_pin);
+        void setAirPins(const uint8_t& supply_bus_pin, const uint8_t& dump_bus_pin,
+                        const uint8_t& supply_valve_pin, const uint8_t& dump_valve_pin);
         /**  
          * Begin serial, wire, and lcd objects. Begin temp and pressure
          * sensors and handle any errors. Begin rocker switch bounce
@@ -82,11 +82,12 @@ class DisplayController {
          * to set the pressure offset.
          * @param num_meas default: 10 measurements
          */
-        void setPressureOffset(const byte& num_meas=10);
+        void setPressureOffset(const uint8_t& num_meas=10);
 
         /**  
          * Take measurements from all attached i/o, except torque and
-         * update variables.
+         * update variables. Will also read air supply and dump states
+         * from motor controller and set corresponding valve outputs.
          */
         void update();
 
@@ -96,6 +97,21 @@ class DisplayController {
          * updates variables.
          */
         void readTorque();
+
+        /**
+         * @brief Send signal to motor controller to run test loop
+         */
+        void runProgram();
+
+        /**
+         * @brief Send signal to motor controller to stop test loop
+         */
+        void stopProgram();
+
+        /**
+         * @brief Send signal to motor controller to reset test loop
+         */
+        void resetProgram();
 
         /**  
          * @return returns value of _seal_temp
@@ -142,6 +158,17 @@ class DisplayController {
                            const String& status="");
 
         /**  
+         * @brief Displays a 'test completed' screen which includes the
+         * total loops completed as well as test duration
+         * @param loop_count this is the current loop count
+         * @param total_loops this is the total number of loops from test spec
+         * @param cls clear screen is set to 'true' by default.
+         *            Will reduce flickering if set to 'false' 
+         *            while updating a 'status' only.
+         */
+        void testDoneScreen(const uint8_t& loop_count, const uint8_t total_loops);
+        
+        /**  
          * @brief Updates the main test loop LCD status screen with all
          * pertinent test information including current status,
          * temp setpoint, measured torque, seal and oil temp, and
@@ -186,7 +213,7 @@ class DisplayController {
         void turnOffHeaters();
 
     private:
-    
+
         // SENSORS
         bool _temp_units; // false for farenheit, true for celcius
         char _SEAL_TC_ADDR = MCP9600_DEFAULT_ADDR_ONE;
@@ -207,27 +234,28 @@ class DisplayController {
 
         // HEATER
         elapsedMillis _PIDTimer;
-        byte _safety_pin, _output_pin;
+        uint8_t _safety_pin, _output_pin;
         double _setpoint_temp, _input, _output;
         double _Kp = 60, _Ki = 40, _Kd = 25;
         PID _heaterPIDControl;
 
         // SWITCH
-        byte _run_pin, _reset_pin;
+        uint8_t _run_pin, _reset_pin;
         Bounce *_runSwitch;
         Bounce *_resetSwitch;
 
         // BUS PINS
-        byte _run_bus_pin, _reset_bus_pin;
-        byte _loop_bus_pin, _read_torque_bus_pin;
-        byte _supply_bus_pin, _dump_bus_pin;
+        uint8_t _run_bus_pin, _reset_bus_pin;
+        uint8_t _loop_bus_pin, _read_torque_bus_pin;
+        uint8_t _supply_bus_pin, _dump_bus_pin;
 
         // AIR VALVES
-        byte _supply_valve_pin, _dump_valve_pin;
+        uint8_t _supply_valve_pin, _dump_valve_pin;
 
         // LCD SCREEN
-        elapsedMillis _screenTimer;
-        bool _isScreenUpdate = true;
+        elapsedMillis_h
+        elapsedMillis _screenTimer, _errorTimer, _completeTimer;
+        bool _flasher, _isScreenUpdate = true;
 
         /**  
          * Prints a row on the lcd screen using four strings, they will 

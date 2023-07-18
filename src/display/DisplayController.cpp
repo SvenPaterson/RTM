@@ -4,6 +4,7 @@
 #define SCREEN_REFRESH_INTERVAL 2000
 #define RGB_WHITE 255, 255, 255
 #define RGB_RED 255, 0, 0
+#define RGB_GREEN 0, 255, 0
 #define MAX_CHARS_PER_LINE 20
 #define ERROR_SCREEN_DURATION 5
 
@@ -20,8 +21,8 @@ DisplayController::DisplayController() : _heaterPIDControl(&_input, &_output, &_
     _resetSwitch = NULL;
 }
 
-void DisplayController::setHeaterPins(const byte& safety_pin,
-                                      const byte& output_pin) {
+void DisplayController::setHeaterPins(const uint8_t& safety_pin,
+                                      const uint8_t& output_pin) {
     _safety_pin = safety_pin;
     _output_pin = output_pin;
     pinMode(_safety_pin, OUTPUT);
@@ -30,17 +31,17 @@ void DisplayController::setHeaterPins(const byte& safety_pin,
     digitalWrite(_output_pin, LOW);
 }
 
-void DisplayController::setSwitchPins(const byte& run_pin,
-                                      const byte& reset_pin) {
+void DisplayController::setSwitchPins(const uint8_t& run_pin,
+                                      const uint8_t& reset_pin) {
     _run_pin = run_pin;
     _reset_pin = reset_pin;
     pinMode(_run_pin, INPUT_PULLDOWN);
     pinMode(_reset_pin, INPUT_PULLDOWN);
 }
 
-void DisplayController::setTestBusPins(const byte& run_bus_pin,
-                                       const byte& reset_bus_pin,
-                                       const byte& loop_bus_pin) {
+void DisplayController::setTestBusPins(const uint8_t& run_bus_pin,
+                                       const uint8_t& reset_bus_pin,
+                                       const uint8_t& loop_bus_pin) {
     _run_bus_pin = run_bus_pin;
     _reset_bus_pin = reset_bus_pin;
     _loop_bus_pin = loop_bus_pin;
@@ -51,8 +52,8 @@ void DisplayController::setTestBusPins(const byte& run_bus_pin,
 
 }
 
-void DisplayController::setTorquePins(const byte& torque_pin,
-                                     const byte& torque_bus_pin) {
+void DisplayController::setTorquePins(const uint8_t& torque_pin,
+                                     const uint8_t& torque_bus_pin) {
     _read_torque_bus_pin = torque_bus_pin;
     _torque_pin = torque_pin;
 
@@ -60,10 +61,10 @@ void DisplayController::setTorquePins(const byte& torque_pin,
     pinMode(_read_torque_bus_pin, INPUT_PULLDOWN);
 }
 
-void DisplayController::setAirPins(const byte& supply_bus_pin,
-                                   const byte& dump_bus_pin,
-                                   const byte& supply_valve_pin,
-                                   const byte& dump_valve_pin) {
+void DisplayController::setAirPins(const uint8_t& supply_bus_pin,
+                                   const uint8_t& dump_bus_pin,
+                                   const uint8_t& supply_valve_pin,
+                                   const uint8_t& dump_valve_pin) {
     _supply_bus_pin = supply_bus_pin;
     _dump_bus_pin = dump_bus_pin;
     _supply_valve_pin = supply_valve_pin;
@@ -182,17 +183,22 @@ void DisplayController::update() {
     _rel_pressure = _abs_pressure - _press_offset;
     _runSwitch->update();
     _resetSwitch->update();
+    bool sup_state = digitalRead(_supply_bus_pin) ? HIGH : LOW;
+    digitalWrite(_supply_valve_pin, sup_state);
+    bool dump_state = digitalRead(_dump_bus_pin) ? HIGH : LOW;
+    digitalWrite(_dump_valve_pin, dump_state);
 }
 
-void DisplayController::setPressureOffset(const byte& num_meas) {
+void DisplayController::setPressureOffset(const uint8_t& num_meas) {
 
     // NEED TO IMPLEMENT PRESSURE OPEN TO ATMOS FOR THIS //
     String status, msg = "Determining zero offset for pressure sensor:";
     Serial.println("- " + msg);
     elapsedMillis avgPressTimer, sampleTimer;
     messageScreen(msg);
-    int sample_count = 0;
-    while (avgPressTimer <= ((num_meas + 1) * 1000)) {
+    uint8_t sample_count = 0;
+    unsigned int duration = (num_meas + 1) * 1000;
+    while (avgPressTimer <= duration) {
         if (sampleTimer > 1000) {
             update();
             _press_offset += _abs_pressure;
@@ -225,6 +231,18 @@ void DisplayController::readTorque() {
     }
 }
 
+void DisplayController::runProgram() {
+    digitalWrite(_run_bus_pin, HIGH);
+}
+
+void DisplayController::stopProgram() {
+    digitalWrite(_run_bus_pin, LOW);
+}
+
+void DisplayController::resetProgram() {
+    digitalWrite(_reset_bus_pin, HIGH);
+}
+
 double DisplayController::getSealTemp() {
     return _seal_temp;
 }
@@ -244,6 +262,8 @@ bool DisplayController::getRunSwitch() {
 bool DisplayController::getResetSwitch() {
     return _resetSwitch->read();
 }
+
+/////////////// IMPLEMENT SD CARD FUNCTIONALITY HERE!!! /////////////
 
 /****** LCD SCREEN FUNCTION DEFINITIONS ******/
 
@@ -291,20 +311,37 @@ void DisplayController::messageScreen(const String& msg,
         }
 }
 
+void DisplayController::testDoneScreen(const uint8_t& loop_count,
+                                       const uint8_t total_loops) {
+    //String status = "Total hours ran: " + String(_run_hours);
+    if (_completeTimer >= 10000) {
+        lcd.clear();
+    }
+    if (_completeTimer >= 1000) {
+        messageScreen("[TEST COMPLETED]", true);
+        if (_flasher) {
+            lcd.setBacklight(RGB_GREEN);
+        }
+        else {
+            lcd.setBacklight(RGB_WHITE);
+        }
+        _flasher = !_flasher;
+        _completeTimer = 0;
+    }
+}
+
 void DisplayController::errorScreen(const String& msg, const int& time) {
-    bool flasher = true;
-    elapsedMillis _errorTimer;
     messageScreen(msg);
     if (time==0) {
         while (true) {
             if (_errorTimer >= 1000) {
-                if (flasher) {
+                if (_flasher) {
                     lcd.setBacklight(RGB_RED);
                 }
                 else {
                     lcd.setBacklight(RGB_WHITE);
                 }
-                flasher = !flasher;
+                _flasher = !_flasher;
                 _errorTimer = 0;
             }
         }
@@ -312,13 +349,13 @@ void DisplayController::errorScreen(const String& msg, const int& time) {
     else {
         for (int x=time; x>0; x--) {
         if (_errorTimer >= 1000) {
-            if (flasher) {
+            if (_flasher) {
                 lcd.setBacklight(RGB_RED);
             }
             else {
                 lcd.setBacklight(RGB_WHITE);
             }
-            flasher = !flasher;
+            _flasher = !_flasher;
             _errorTimer = 0;
             messageScreen(msg, false, "continue in " + String(x) + "s");
         }
@@ -327,6 +364,8 @@ void DisplayController::errorScreen(const String& msg, const int& time) {
     lcd.setBacklight(RGB_WHITE);
     }
 }
+
+//unsigned long DisplayController::
 
 String DisplayController::rightJustifiedString(const String& str) {
     /* Function returns a String with enough padding
