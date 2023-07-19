@@ -22,7 +22,7 @@
 #define RESET_SW_PIN 17
 #define SDA0_PIN 18
 #define SDL0_PIN 19
-#define RESET_BUS_PIN 20
+#define PRGM_RESET_BUS_PIN 20
 
 // Initialize DisplayController
 DisplayController displayController;
@@ -30,7 +30,7 @@ DisplayController displayController;
 // TEST CONTROL
 String msg, test_status_str = "READY";
 uint8_t loop_count = 0;
-uint8_t total_loops = 1;
+uint8_t total_loops = 10;
 double temp_setpoint = 90.0; // will be set by SD card file
 bool temp_units = false; // 'false' for farenheit, 'true' for celcius
 
@@ -38,6 +38,7 @@ bool temp_units = false; // 'false' for farenheit, 'true' for celcius
 bool hasTestStarted = false;
 bool isPreHeated = false;
 bool torqueRequested = false;
+bool isSDCardInserted = false;
 
 // INTERRUPT VOLITILE VARIABLES
 volatile unsigned long start_micros = 0;
@@ -50,18 +51,44 @@ String srcfile_details();
 void loopPinRisingEdge();
 void loopPinFallingEdge();
 void torquePinRisingEdge();
+void beginSDCard();
 
 /* ----------------------------- INTIAL SETUP ----------------------------- */
 void setup() {
   /****** DEBUGGING *******/
-  displayController.setHeaterPins(HEAT_SAFETY_PIN, HEAT_OUTPUT_PIN);
-  displayController.setSwitchPins(RUN_SW_PIN, RESET_SW_PIN);
-  displayController.setTestBusPins(PRGM_RUN_BUS_PIN, RESET_BUS_PIN, LOOP_BUS_PIN);
-  displayController.setTorquePins(MOTOR_HLFB_PIN, TORQ_FLAG_BUS_PIN);
-  displayController.setAirPins(AIR_SUPPLY_BUS_PIN, AIR_DUMP_BUS_PIN,
-                               AIR_SUPPLY_PIN, AIR_DUMP_PIN);
 
-  displayController.begin();
+  // pin mappings
+  std::map<String, uint8_t> pinMappings = {
+    {"SD_DETECT_PIN", SD_DETECT_PIN},
+    {"LOOP_BUS_PIN", LOOP_BUS_PIN},
+    {"MOTOR_HLFB_PIN", MOTOR_HLFB_PIN},
+    {"HEAT_OUTPUT_PIN", HEAT_OUTPUT_PIN},
+    {"HEAT_SAFETY_PIN", HEAT_SAFETY_PIN}, 
+    {"AIR_SUPPLY_PIN", AIR_SUPPLY_PIN}, 
+    {"AIR_DUMP_PIN", AIR_DUMP_PIN}, 
+    {"PRGM_RUN_BUS_PIN", PRGM_RUN_BUS_PIN}, 
+    {"TORQ_FLAG_BUS_PIN", TORQ_FLAG_BUS_PIN}, 
+    {"AIR_SUPPLY_BUS_PIN", AIR_SUPPLY_BUS_PIN}, 
+    {"AIR_DUMP_BUS_PIN", AIR_DUMP_BUS_PIN}, 
+    {"RUN_SW_PIN", RUN_SW_PIN},
+    {"RESET_SW_PIN", RESET_SW_PIN},
+    {"SDA0_PIN", SDA0_PIN}, 
+    {"SDL0_PIN", SDL0_PIN},
+    {"PRGM_RESET_BUS_PIN", PRGM_RESET_BUS_PIN}
+  };
+
+  // Initialize bus pins and attach interrupts
+  pinMode(LOOP_BUS_PIN, INPUT_PULLDOWN);
+  pinMode(TORQ_FLAG_BUS_PIN, INPUT_PULLDOWN);
+  pinMode(SD_DETECT_PIN, INPUT_PULLDOWN);
+  attachInterrupt(digitalPinToInterrupt(LOOP_BUS_PIN), loopPinRisingEdge, RISING);
+  attachInterrupt(digitalPinToInterrupt(TORQ_FLAG_BUS_PIN), torquePinRisingEdge, RISING);
+  attachInterrupt(digitalPinToInterrupt(SD_DETECT_PIN), beginSDCard, RISING);
+  // does beginSDcard even need to be an interrupt if I am updating the 
+  // displayController._isSDCardInserted bool every loop????
+
+  // Initialize the displayController
+  displayController.begin(pinMappings, isSDCardInserted);
 
   // Initialize Teensy Board Time
   setSyncProvider(getTeensyTime);
@@ -82,16 +109,6 @@ void setup() {
   // Initialize the heater band PID loop
   displayController.setTempSetpoint(temp_setpoint, temp_units);
 
-  // Initialize the Run and Reset switch and bus pins
-  pinMode(PRGM_RUN_BUS_PIN, OUTPUT);
-  pinMode(RESET_BUS_PIN, OUTPUT);
-
-  // Initialize bus pins and attach interrupts
-  pinMode(LOOP_BUS_PIN, INPUT_PULLDOWN);
-  pinMode(TORQ_FLAG_BUS_PIN, INPUT_PULLDOWN);
-  attachInterrupt(digitalPinToInterrupt(LOOP_BUS_PIN), loopPinRisingEdge, RISING);
-  attachInterrupt(digitalPinToInterrupt(TORQ_FLAG_BUS_PIN), torquePinRisingEdge, RISING);
-  
   // Clear screen to begin test protocol
   Serial.println("Test Status: " + test_status_str);
   displayController.lcd.clear();
@@ -143,7 +160,6 @@ void loop() {
         // END OF PROFILE LOGIC
 
       }
-      
     }
     else {
     } // END OF RUN LOGIC
@@ -176,9 +192,9 @@ void loop() {
         hasTestStarted = false;
         displayController.lcd.clear();
         displayController.turnOffHeaters();
-        digitalWrite(RESET_BUS_PIN, HIGH);
+        digitalWrite(PRGM_RESET_BUS_PIN, HIGH); // this can be a class method
         delay(10);
-        digitalWrite(RESET_BUS_PIN, LOW);
+        digitalWrite(PRGM_RESET_BUS_PIN, LOW);
         msg = "Test has been successfully RESET!";
         delay(4000);
         displayController.messageScreen(srcfile_details());
@@ -255,7 +271,6 @@ int pgm_lastIndexOf(uint8_t c, const char *p) {
 }
 
 
-
 /****** INTERRUPT FUNCTIONS ******/
 
 void loopPinRisingEdge() {
@@ -274,4 +289,8 @@ void loopPinFallingEdge() {
 
 void torquePinRisingEdge() {
   torqueRequested = true;
+}
+
+void beginSDCard() {
+  isSDCardInserted = true;
 }

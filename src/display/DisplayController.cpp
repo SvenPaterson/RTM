@@ -21,60 +21,6 @@ DisplayController::DisplayController() : _heaterPIDControl(&_input, &_output, &_
     _resetSwitch = NULL;
 }
 
-void DisplayController::setHeaterPins(const uint8_t& safety_pin,
-                                      const uint8_t& output_pin) {
-    _safety_pin = safety_pin;
-    _output_pin = output_pin;
-    pinMode(_safety_pin, OUTPUT);
-    pinMode(_output_pin, OUTPUT);
-    digitalWrite(_safety_pin, LOW);
-    digitalWrite(_output_pin, LOW);
-}
-
-void DisplayController::setSwitchPins(const uint8_t& run_pin,
-                                      const uint8_t& reset_pin) {
-    _run_pin = run_pin;
-    _reset_pin = reset_pin;
-    pinMode(_run_pin, INPUT_PULLDOWN);
-    pinMode(_reset_pin, INPUT_PULLDOWN);
-}
-
-void DisplayController::setTestBusPins(const uint8_t& run_bus_pin,
-                                       const uint8_t& reset_bus_pin,
-                                       const uint8_t& loop_bus_pin) {
-    _run_bus_pin = run_bus_pin;
-    _reset_bus_pin = reset_bus_pin;
-    _loop_bus_pin = loop_bus_pin;
-
-    pinMode(_run_bus_pin, OUTPUT);
-    pinMode(_reset_bus_pin, OUTPUT);
-    pinMode(_loop_bus_pin, INPUT_PULLDOWN);
-
-}
-
-void DisplayController::setTorquePins(const uint8_t& torque_pin,
-                                     const uint8_t& torque_bus_pin) {
-    _read_torque_bus_pin = torque_bus_pin;
-    _torque_pin = torque_pin;
-
-    pinMode(_torque_pin, INPUT_PULLUP);
-    pinMode(_read_torque_bus_pin, INPUT_PULLDOWN);
-}
-
-void DisplayController::setAirPins(const uint8_t& supply_bus_pin,
-                                   const uint8_t& dump_bus_pin,
-                                   const uint8_t& supply_valve_pin,
-                                   const uint8_t& dump_valve_pin) {
-    _supply_bus_pin = supply_bus_pin;
-    _dump_bus_pin = dump_bus_pin;
-    _supply_valve_pin = supply_valve_pin;
-    _dump_valve_pin = dump_valve_pin;
-
-    pinMode(_supply_bus_pin, INPUT_PULLDOWN);
-    pinMode(_dump_bus_pin, INPUT_PULLDOWN);
-    pinMode(_supply_valve_pin, OUTPUT);
-    pinMode(_dump_valve_pin, OUTPUT);
-}
 
 void DisplayController::setTempSetpoint(const double& setpoint,
                                         const bool& units) {
@@ -90,7 +36,65 @@ void DisplayController::setTempSetpoint(const double& setpoint,
     delay(3000);
 }
 
-void DisplayController::begin() {
+/* void DisplayController::setDetectSDPin(const uint8_t& SD_detect_pin) {
+} */
+
+void DisplayController::begin(const std::map<String, uint8_t>& pinMappings,
+                              const bool& SD_detect) {
+
+    /*
+    {"SD_DETECT_PIN", SD_DETECT_PIN},
+    {"LOOP_BUS_PIN", LOOP_BUS_PIN},
+    {"MOTOR_HLFB_PIN", MOTOR_HLFB_PIN},
+    {"HEAT_OUTPUT_PIN", HEAT_OUTPUT_PIN},
+    {"HEAT_SAFETY_PIN", HEAT_SAFETY_PIN}, 
+    {"AIR_SUPPLY_PIN", AIR_SUPPLY_PIN}, 
+    {"AIR_DUMP_PIN", AIR_DUMP_PIN}, 
+    {"PRGM_RUN_BUS_PIN", PRGM_RUN_BUS_PIN}, 
+    {"TORQ_FLAG_BUS_PIN", TORQ_FLAG_BUS_PIN}, 
+    {"AIR_SUPPLY_BUS_PIN", AIR_SUPPLY_BUS_PIN}, 
+    {"AIR_DUMP_BUS_PIN", AIR_DUMP_BUS_PIN}, 
+    {"RUN_SW_PIN", RUN_SW_PIN},
+    {"RESET_SW_PIN", RESET_SW_PIN},
+    {"SDA0_PIN", SDA0_PIN}, 
+    {"SDL0_PIN", SDL0_PIN},
+    {"PRGM_RESET_BUS_PIN", RESET_BUS_PIN}
+    */
+
+    _isSDCardInserted = SD_detect;
+
+    _SD_detect_pin = pinMappings.at("SD_DETECT_PIN");
+    _supply_bus_pin = pinMappings.at("AIR_SUPPLY_BUS_PIN");
+    _dump_bus_pin = pinMappings.at("AIR_DUMP_BUS_PIN");
+    _supply_valve_pin = pinMappings.at("AIR_SUPPLY_PIN");
+    _dump_valve_pin = pinMappings.at("AIR_DUMP_PIN");
+    //_read_torque_bus_pin = pinMappings.at("TORQ_FLAG_BUS_PIN");
+    _torque_pin = pinMappings.at("MOTOR_HLFB_PIN");
+    _run_bus_pin = pinMappings.at("PRGM_RUN_BUS_PIN");
+    _reset_bus_pin = pinMappings.at("PRGM_RESET_BUS_PIN");
+    _loop_bus_pin = pinMappings.at("LOOP_BUS_PIN");
+    _run_pin = pinMappings.at("RUN_SW_PIN");
+    _reset_pin = pinMappings.at("RESET_SW_PIN");
+    _safety_pin = pinMappings.at("HEAT_SAFETY_PIN");
+    _output_pin = pinMappings.at("HEAT_OUTPUT_PIN");
+    
+    //pinMode(_SD_detect_pin, INPUT_PULLDOWN);
+    pinMode(_supply_bus_pin, INPUT_PULLDOWN);
+    pinMode(_dump_bus_pin, INPUT_PULLDOWN);
+    pinMode(_supply_valve_pin, OUTPUT);
+    pinMode(_dump_valve_pin, OUTPUT);
+    pinMode(_torque_pin, INPUT_PULLUP);
+    //pinMode(_read_torque_bus_pin, INPUT_PULLDOWN);
+    pinMode(_run_bus_pin, OUTPUT);
+    pinMode(_reset_bus_pin, OUTPUT);
+    pinMode(_loop_bus_pin, INPUT_PULLDOWN);
+    pinMode(_run_pin, INPUT_PULLDOWN);
+    pinMode(_reset_pin, INPUT_PULLDOWN);
+    pinMode(_safety_pin, OUTPUT);
+    pinMode(_output_pin, OUTPUT);
+    digitalWrite(_safety_pin, LOW);
+    digitalWrite(_output_pin, LOW);
+
     String msg;
     Serial.begin(115200);
     while (!Serial && (millis() < 4000)) {
@@ -108,13 +112,32 @@ void DisplayController::begin() {
     lcd.clear();
     Serial.println(" - lcd screen initialized");
 
+    // Initialize the SD Card
+    msg = "No SD Card Inserted. Data will not be saved";
+    _isSDCardInserted = digitalRead(_SD_detect_pin);
+    if (_isSDCardInserted) {
+        msg = " - SD card initialized";
+        _SD_fault = !SD.begin(BUILTIN_SDCARD);
+        if (_SD_fault) {
+            msg = "SD Card initialization fault!";
+            Serial.println(msg);
+            errorScreen(msg);
+        }
+        Serial.println(msg);
+    }
+    else {
+        Serial.println(msg);
+        messageScreen(msg);
+        delay(10000);
+    }
+
     // Initialize seal thermocouple sensor
     msg = " - Seal TC sensor initialized";
     _seal_fault = !_sealTempSensor.begin(_SEAL_TC_ADDR);
     if (_seal_fault) {
-        msg = "Seal TC Sensor Fault!";
+        msg = "Seal TC Sensor Fault on i2c bus at 0x" + String(_SEAL_TC_ADDR, HEX);
         Serial.println(msg);
-        errorScreen(msg, 5);
+        errorScreen(msg);
     }
     _sealTempSensor.setAmbientResolution(RES_ZERO_POINT_25);
     _sealTempSensor.setThermocoupleResolution(RES_14_BIT);
@@ -125,7 +148,7 @@ void DisplayController::begin() {
     msg = " - Sump TC sensor initialized";
     _sump_fault = !_sumpTempSensor.begin(_SUMP_TC_ADDR);
     if (_sump_fault) {
-        msg = "Sump TC Sensor Fault!";
+        msg = "Sump TC Sensor Fault on i2c bus at 0x" + String(_SUMP_TC_ADDR, HEX);
         Serial.println(msg);
         errorScreen(msg);
     } 
@@ -138,7 +161,7 @@ void DisplayController::begin() {
     msg = " - Pressure sensor initialized";
     _press_fault = !_pressSensor.begin();
     if (_press_fault) {
-        msg = "Pressure Sensor Fault!";
+        msg = "Pressure Sensor Fault on i2c bus!";
         Serial.println(msg);
         errorScreen(msg);
     }
@@ -187,6 +210,7 @@ void DisplayController::update() {
     digitalWrite(_supply_valve_pin, sup_state);
     bool dump_state = digitalRead(_dump_bus_pin) ? HIGH : LOW;
     digitalWrite(_dump_valve_pin, dump_state);
+    _isSDCardInserted = digitalRead(_SD_detect_pin);
 }
 
 void DisplayController::setPressureOffset(const uint8_t& num_meas) {

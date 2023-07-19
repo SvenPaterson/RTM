@@ -2,6 +2,7 @@
 #define DC_h
 
 #include <Arduino.h>
+#include <map>
 #include <SparkFun_MCP9600.h>
 #include <SparkFun_MicroPressure.h>
 #include <Wire.h>
@@ -9,6 +10,8 @@
 #include <PID_v1.h>
 #include <Bounce2.h>
 #include <TimeLib.h>
+#include <SD.h>
+#include <SPI.h>
 
 #define MCP9600_DEFAULT_ADDR_ONE 0x60
 #define MCP9600_DEFAULT_ADDR_TWO 0x67
@@ -18,20 +21,10 @@ class DisplayController {
         DisplayController();
 
         /**  
-         * Set heater control i/o pins, initialize pinMode and
-         * write outputs as low for safety.
-         * @param safety_pin pin 7, typical
-         * @param output_pin pin 6, typical
+         * Assign pins, initialize devices and handle any errors. 
          */
-        void setHeaterPins(const uint8_t& saftey_pin, const uint8_t& output_pin);
-
-        /**  
-         * Set rocker switch run and reset control i/o pins and 
-         * initialize pinMode.
-         * @param run_pin pin 16, typical
-         * @param reset_pin pin 17, typical
-         */
-        void setSwitchPins(const uint8_t& run_pin, const uint8_t& reset_pin);
+        void begin(const std::map<String, uint8_t>& pinMappings,
+                   const bool& SD_detect);
 
         /**  
          * Set the heater control setpoint temperature and display message
@@ -41,41 +34,6 @@ class DisplayController {
          */
         void setTempSetpoint(const double& setpoint, const bool& units=false);
         
-        /**  
-         * Set i/o bus pins for comms between motor and display controller
-         *  i/o pins and initialize pinMode
-         * @param run_bus_pin pin 10, typical
-         * @param reset_bus_pin pin 20, typical
-         * @param loop_bus_pin pin 1, typical
-         */
-        void setTestBusPins(const uint8_t& run_bus_pin, 
-                            const uint8_t& reset_bus_pin,
-                            const uint8_t& loop_bus_pin);
-        
-        /**  
-         * Set motor PWM torque measurement pin and initialize pinMode
-         * @param torque_pin pin 2, typical
-         * @param read_torque_bus_pin pin 11, typical
-         */
-        void setTorquePins(const uint8_t& torque_pin, const uint8_t& torque_bus_pin);
-
-        /**  
-         * Set i/o bus pins air supply and dump valves as well as bus pins for
-         * supply and dump commands from motor controller
-         * @param supply_bus_pin pin 14, typical
-         * @param dump_bus_pin pin 15, typical
-         * @param supply_valve_pin pin 8, typical
-         * @param dump_valve_pin pin 9, typical
-         */
-        void setAirPins(const uint8_t& supply_bus_pin, const uint8_t& dump_bus_pin,
-                        const uint8_t& supply_valve_pin, const uint8_t& dump_valve_pin);
-        /**  
-         * Begin serial, wire, and lcd objects. Begin temp and pressure
-         * sensors and handle any errors. Begin rocker switch bounce
-         * objects.
-         */
-        void begin();
-
         /**  
          * Take a number of pressure measurements at 1sec intervals with
          * rig head open to atmosphere and averaged them. Use this value 
@@ -216,8 +174,8 @@ class DisplayController {
 
         // SENSORS
         bool _temp_units; // false for farenheit, true for celcius
-        char _SEAL_TC_ADDR = MCP9600_DEFAULT_ADDR_ONE;
-        char _SUMP_TC_ADDR = MCP9600_DEFAULT_ADDR_TWO;
+        uint8_t _SEAL_TC_ADDR = MCP9600_DEFAULT_ADDR_ONE;
+        uint8_t _SUMP_TC_ADDR = MCP9600_DEFAULT_ADDR_TWO;
         MCP9600 _sealTempSensor, _sumpTempSensor;
         double _seal_temp, _sump_temp;
 
@@ -246,7 +204,7 @@ class DisplayController {
 
         // BUS PINS
         uint8_t _run_bus_pin, _reset_bus_pin;
-        uint8_t _loop_bus_pin, _read_torque_bus_pin;
+        uint8_t _loop_bus_pin; //_read_torque_bus_pin;
         uint8_t _supply_bus_pin, _dump_bus_pin;
 
         // AIR VALVES
@@ -256,6 +214,11 @@ class DisplayController {
         elapsedMillis_h
         elapsedMillis _screenTimer, _errorTimer, _completeTimer;
         bool _flasher, _isScreenUpdate = true;
+
+        // SD CARD AND FILES
+        File _restartFile, _dataFile, _logFile;
+        bool _SD_fault, _isSDCardInserted;
+        uint8_t _SD_detect_pin;
 
         /**  
          * Prints a row on the lcd screen using four strings, they will 
