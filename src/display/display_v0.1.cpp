@@ -45,7 +45,6 @@ volatile unsigned long start_micros = 0;
 volatile unsigned long end_micros = 0;
 
 // FUNCTION DECLARATIONS
-time_t getTeensyTime();
 int pgm_lastIndexOf(uint8_t c, const char *p);
 String srcfile_details();
 void loopPinRisingEdge();
@@ -80,7 +79,7 @@ void setup() {
   // Initialize bus pins and attach interrupts
   pinMode(LOOP_BUS_PIN, INPUT_PULLDOWN);
   pinMode(TORQ_FLAG_BUS_PIN, INPUT_PULLDOWN);
-  pinMode(SD_DETECT_PIN, INPUT_PULLDOWN);
+  //pinMode(SD_DETECT_PIN, INPUT_PULLDOWN);
   attachInterrupt(digitalPinToInterrupt(LOOP_BUS_PIN), loopPinRisingEdge, RISING);
   attachInterrupt(digitalPinToInterrupt(TORQ_FLAG_BUS_PIN), torquePinRisingEdge, RISING);
   attachInterrupt(digitalPinToInterrupt(SD_DETECT_PIN), beginSDCard, RISING);
@@ -88,23 +87,17 @@ void setup() {
   // displayController._isSDCardInserted bool every loop????
 
   // Initialize the displayController
-  displayController.begin(pinMappings, isSDCardInserted);
-
-  // Initialize Teensy Board Time
-  setSyncProvider(getTeensyTime);
+  displayController.begin(pinMappings);
 
   // Display source file version on LCD
     // Get source file information
   String source_file = srcfile_details();
-  Serial.println();
-  Serial.println(source_file);
-  Serial.println();
   displayController.messageScreen(source_file);
+  displayController.writeToLog(source_file, "INFO");
   delay(5000);
 
   // measure ambient lab pressure and automatically set offset
   displayController.setPressureOffset();
-  delay(3000);
 
   // Initialize the heater band PID loop
   displayController.setTempSetpoint(temp_setpoint, temp_units);
@@ -190,18 +183,9 @@ void loop() {
       if (displayController.getResetSwitch()) {
         loop_count = 0;
         hasTestStarted = false;
-        displayController.lcd.clear();
-        displayController.turnOffHeaters();
-        digitalWrite(PRGM_RESET_BUS_PIN, HIGH); // this can be a class method
-        delay(10);
-        digitalWrite(PRGM_RESET_BUS_PIN, LOW);
-        msg = "Test has been successfully RESET!";
-        delay(4000);
+        displayController.resetTest();
         displayController.messageScreen(srcfile_details());
-        delay(2000);
-        displayController.setPressureOffset();
-        delay(3000);
-        displayController.update();
+        delay(4000);
       }
     } // END RESET LOGIC
   }
@@ -210,10 +194,6 @@ void loop() {
 
 ///////////////////////////////////////////////////////////////////////////////////
 // FUNCTION DEFINITIONS //
-
-time_t getTeensyTime() {
-  return Teensy3Clock.get();
-}
 
 String srcfile_details() { 
   /* Function fetches the source file filename
@@ -241,9 +221,6 @@ String srcfile_details() {
       break;
     }
   }
-  String d = day();
-  String mo = month();
-  String y = year();
 
   msg += " - compiled on: ";
   msg += __DATE__;
@@ -269,7 +246,6 @@ int pgm_lastIndexOf(uint8_t c, const char *p) {
   }
   return last_index;
 }
-
 
 /****** INTERRUPT FUNCTIONS ******/
 

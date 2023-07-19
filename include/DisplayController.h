@@ -23,8 +23,7 @@ class DisplayController {
         /**  
          * Assign pins, initialize devices and handle any errors. 
          */
-        void begin(const std::map<String, uint8_t>& pinMappings,
-                   const bool& SD_detect);
+        void begin(const std::map<String, uint8_t>& pinMappings);
 
         /**  
          * Set the heater control setpoint temperature and display message
@@ -148,6 +147,14 @@ class DisplayController {
          */
         void errorScreen(const String& msg, const int& time=0);
 
+        /**  
+         * Write an entry to the log file. Writes one line per execution
+         * @param msg line to be logged
+         */ 
+        void writeToLog(const String& msg, const String& type="LOG",
+                        const bool& first=false);
+
+
         // Heater PID Loop //
 
         /**  
@@ -170,7 +177,15 @@ class DisplayController {
          */ 
         void turnOffHeaters();
 
+        /**
+         * @brief Runs the reset test code. loop_count will be set to
+         * zero and the pressure offset routine will run again. 
+         */
+        void resetTest();
+
     private:
+        // TIME
+        static time_t _getTeensyTime();
 
         // SENSORS
         bool _temp_units; // false for farenheit, true for celcius
@@ -199,8 +214,7 @@ class DisplayController {
 
         // SWITCH
         uint8_t _run_pin, _reset_pin;
-        Bounce *_runSwitch;
-        Bounce *_resetSwitch;
+        Bounce *_runSwitch, *_resetSwitch;
 
         // BUS PINS
         uint8_t _run_bus_pin, _reset_bus_pin;
@@ -214,11 +228,6 @@ class DisplayController {
         elapsedMillis_h
         elapsedMillis _screenTimer, _errorTimer, _completeTimer;
         bool _flasher, _isScreenUpdate = true;
-
-        // SD CARD AND FILES
-        File _restartFile, _dataFile, _logFile;
-        bool _SD_fault, _isSDCardInserted;
-        uint8_t _SD_detect_pin;
 
         /**  
          * Prints a row on the lcd screen using four strings, they will 
@@ -248,12 +257,22 @@ class DisplayController {
                           const String& str1, const String& str2);
 
         /**
-         * Returns a String with correct suffix for temperature by default.
+         * Returns a String with correct suffix for temperature. 
+         * ASCII for LCD screen.
          * Pass 'true' after temp to set units to celcius.
          * @param temp temperature to be converted to string
          * @param unit true for celcius, false for farenheit
          */
-        String tempToStr(const double& temp, const bool& unit);
+        String tempToStrLCD(const double& temp, const bool& unit);
+
+        /**
+         * Returns a String with correct suffix for temperature. 
+         * ASCII for log file.
+         * Pass 'true' after temp to set units to celcius.
+         * @param temp temperature to be converted to string
+         * @param unit true for celcius, false for farenheit
+         */
+        String tempToStrLog(const double& temp, const bool& unit);
 
         /**  
          * Calculates the correct amount of padding to space two strings apart
@@ -272,7 +291,30 @@ class DisplayController {
          * @return padded string
          */ 
         String rightJustifiedString(const String& str);
+
+        // END LCD SCREEN //
+
+        // SD CARD AND FILES
+        File _restartFile, _dataFile, _logFile;
+        bool _isSDCardInserted, _isSDCardActive;
+        uint8_t _SD_detect_pin;
+
+        /**  
+         * Returns the current time as a string in 24-hr format
+         * @return str in hh:mm:ss
+         */
+        String getTimeStr();
+
+        /**  
+         * Retrun the current date as a string
+         * @return str in mm:dd:yyyy
+         */
+        String getDateStr();
+
+
 };
+
+
 
 
 #endif // DC_h
