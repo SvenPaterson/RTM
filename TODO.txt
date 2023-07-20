@@ -1,0 +1,4 @@
+# verify that the air_valve_pin matches the state of the supply_pus_pin with led
+also make sure that the logic preventing writing to pin every loop is working
+
+# reset needs to reset the stored loops in the recovery file

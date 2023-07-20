@@ -46,7 +46,7 @@ class DisplayController {
          * update variables. Will also read air supply and dump states
          * from motor controller and set corresponding valve outputs.
          */
-        void update();
+        void update(const uint32_t& loop_count);
 
         /**  
          * Take a measurement from the motor high level feedback pin
@@ -123,7 +123,7 @@ class DisplayController {
          *            Will reduce flickering if set to 'false' 
          *            while updating a 'status' only.
          */
-        void testDoneScreen(const uint8_t& loop_count, const uint8_t total_loops);
+        void testDoneScreen(const uint8_t& loop_count);
         
         /**  
          * @brief Updates the main test loop LCD status screen with all
@@ -133,8 +133,7 @@ class DisplayController {
          * @param test_status current status of test to be displayed
          * @param loop_count current loop count
          */
-        void updateLCD(const String& test_status, 
-                       const unsigned int& loop_count);
+        void updateLCD(const String& test_status);
 
         /**
          * @brief Interrupts with a red flashing error screen and
@@ -154,6 +153,15 @@ class DisplayController {
         void writeToLog(const String& msg, const String& type="LOG",
                         const bool& first=false);
 
+        /**  
+         * Will write an entry to the test data file
+         */ 
+        void writeToDataFile();
+
+        /**  
+         * Will update the state file
+         */ 
+        void writeToStateFile();
 
         // Heater PID Loop //
 
@@ -186,6 +194,7 @@ class DisplayController {
     private:
         // TIME
         static time_t _getTeensyTime();
+        uint32_t _loop_count;
 
         // SENSORS
         bool _temp_units; // false for farenheit, true for celcius
@@ -207,13 +216,14 @@ class DisplayController {
 
         // HEATER
         elapsedMillis _PIDTimer;
-        uint8_t _safety_pin, _output_pin;
+        uint8_t _heat_safety_pin, _heat_output_pin;
         double _setpoint_temp, _input, _output;
         double _Kp = 60, _Ki = 40, _Kd = 25;
         PID _heaterPIDControl;
+        bool _areHeatersArmed;
 
         // SWITCH
-        uint8_t _run_pin, _reset_pin;
+        uint8_t _run_sw_pin, _reset_sw_pin;
         Bounce *_runSwitch, *_resetSwitch;
 
         // BUS PINS
@@ -223,6 +233,13 @@ class DisplayController {
 
         // AIR VALVES
         uint8_t _supply_valve_pin, _dump_valve_pin;
+        bool _isPressureApplied;
+
+        // SD CARD AND FILES
+        File _restartFile, _dataFile, _logFile;
+        bool _isSDCardInserted, _isSDCardActive;
+        bool _hasHeaderBeenWritten;
+        uint8_t _SD_detect_pin;
 
         // LCD SCREEN
         elapsedMillis_h
@@ -291,13 +308,6 @@ class DisplayController {
          * @return padded string
          */ 
         String rightJustifiedString(const String& str);
-
-        // END LCD SCREEN //
-
-        // SD CARD AND FILES
-        File _restartFile, _dataFile, _logFile;
-        bool _isSDCardInserted, _isSDCardActive;
-        uint8_t _SD_detect_pin;
 
         /**  
          * Returns the current time as a string in 24-hr format

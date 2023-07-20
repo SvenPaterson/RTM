@@ -26,7 +26,7 @@ void DisplayController::setTempSetpoint(const double& setpoint,
                                         const bool& units) {
     _setpoint_temp = setpoint;
     _temp_units = units;
-    update();
+    update(0); // this needs to be verified when test restart or powerloss!
     String msg = "Heater PID control initialized";
     messageScreen(msg);
     writeToLog(msg);
@@ -37,9 +37,6 @@ void DisplayController::setTempSetpoint(const double& setpoint,
     writeToLog("Setpoint: " + setpoint_str_log, "INFO");
     delay(3000);
 }
-
-/* void DisplayController::setDetectSDPin(const uint8_t& SD_detect_pin) {
-} */
 
 void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
 
@@ -75,10 +72,10 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     _run_bus_pin = pinMappings.at("PRGM_RUN_BUS_PIN");
     _reset_bus_pin = pinMappings.at("PRGM_RESET_BUS_PIN");
     _loop_bus_pin = pinMappings.at("LOOP_BUS_PIN");
-    _run_pin = pinMappings.at("RUN_SW_PIN");
-    _reset_pin = pinMappings.at("RESET_SW_PIN");
-    _safety_pin = pinMappings.at("HEAT_SAFETY_PIN");
-    _output_pin = pinMappings.at("HEAT_OUTPUT_PIN");
+    _run_sw_pin = pinMappings.at("RUN_SW_PIN");
+    _reset_sw_pin = pinMappings.at("RESET_SW_PIN");
+    _heat_safety_pin = pinMappings.at("HEAT_SAFETY_PIN");
+    _heat_output_pin = pinMappings.at("HEAT_OUTPUT_PIN");
     
     pinMode(_SD_detect_pin, INPUT_PULLDOWN);
     pinMode(_supply_bus_pin, INPUT_PULLDOWN);
@@ -90,12 +87,19 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     pinMode(_run_bus_pin, OUTPUT);
     pinMode(_reset_bus_pin, OUTPUT);
     pinMode(_loop_bus_pin, INPUT_PULLDOWN);
-    pinMode(_run_pin, INPUT_PULLDOWN);
-    pinMode(_reset_pin, INPUT_PULLDOWN);
-    pinMode(_safety_pin, OUTPUT);
-    pinMode(_output_pin, OUTPUT);
-    digitalWrite(_safety_pin, LOW);
-    digitalWrite(_output_pin, LOW);
+    pinMode(_run_sw_pin, INPUT_PULLDOWN);
+    pinMode(_reset_sw_pin, INPUT_PULLDOWN);
+    pinMode(_heat_safety_pin, OUTPUT);
+    pinMode(_heat_output_pin, OUTPUT);
+
+    digitalWrite(_heat_safety_pin, LOW);
+    digitalWrite(_heat_output_pin, LOW);
+    digitalWrite(_reset_bus_pin, LOW);
+    digitalWrite(_run_bus_pin, LOW);
+    digitalWrite(_dump_valve_pin, LOW);
+    digitalWrite(_supply_valve_pin, LOW);
+    digitalWrite(_heat_output_pin, LOW);
+    digitalWrite(_heat_safety_pin, LOW);
 
     String msg ="\nInitializing display controller...";
     Serial.begin(115200);
@@ -127,7 +131,7 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
            // Create log file entry header
         msg = "\n\n-----------------------------------------";
         msg += "\nSystem start: " + getDateStr() + ", ";
-        msg += getTimeStr() + "\nBegin Log:" + "\n---";
+        msg += getTimeStr() + "\nBegin Log:" + "---\n";
         writeToLog(msg, true);
     }
     else {
@@ -182,9 +186,9 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     if (_resetSwitch == NULL) {
         _resetSwitch = new Bounce();
     }
-    _runSwitch->attach(_run_pin);
+    _runSwitch->attach(_run_sw_pin);
     _runSwitch->interval(100);
-    _resetSwitch->attach(_reset_pin);
+    _resetSwitch->attach(_reset_sw_pin);
     _resetSwitch->interval(100);
     writeToLog(msg);
 }
@@ -193,32 +197,39 @@ void DisplayController::computeHeaterOutput(const unsigned int& interval) {
     if (_PIDTimer > interval) {
         _input = _sump_temp;
         _heaterPIDControl.Compute();
-        analogWrite(_output_pin, _output);
+        analogWrite(_heat_output_pin, _output);
         _PIDTimer = 0;
     }
 }
 
 void DisplayController::turnOffHeaters() {
-    analogWrite(_output_pin, 0);
-    digitalWrite(_safety_pin, LOW);
+    if (_areHeatersArmed) {
+        digitalWrite(_heat_output_pin, LOW);
+        digitalWrite(_heat_safety_pin, LOW);
+    } 
 }
 
 void DisplayController::armHeaters() {
-    digitalWrite(_safety_pin, HIGH);
+    if (!_areHeatersArmed) {
+        _areHeatersArmed = true;
+        digitalWrite(_heat_safety_pin, HIGH);
+    }
 }
 
-void DisplayController::update() {
+void DisplayController::update(const uint32_t& loop_count) {
+    _loop_count = loop_count;
     _seal_temp = _sealTempSensor.getThermocoupleTemp(_temp_units);
     _sump_temp = _sumpTempSensor.getThermocoupleTemp(_temp_units);
     _abs_pressure = _pressSensor.readPressure();
     _rel_pressure = _abs_pressure - _press_offset;
     _runSwitch->update();
     _resetSwitch->update();
-    bool sup_state = digitalRead(_supply_bus_pin) ? HIGH : LOW;
-    digitalWrite(_supply_valve_pin, sup_state);
+    bool askingForPressure = digitalRead(_supply_bus_pin) ? HIGH : LOW;
+    digitalWrite(_supply_valve_pin, askingForPressure);
+
     bool dump_state = digitalRead(_dump_bus_pin) ? HIGH : LOW;
     digitalWrite(_dump_valve_pin, dump_state);
-    //_isSDCardInserted = digitalRead(_SD_detect_pin);
+    _isSDCardInserted = digitalRead(_SD_detect_pin);
 }
 
 void DisplayController::setPressureOffset(const uint8_t& num_meas) {
@@ -232,7 +243,7 @@ void DisplayController::setPressureOffset(const uint8_t& num_meas) {
     unsigned int duration = (num_meas + 1) * 1000;
     while (avgPressTimer <= duration) {
         if (sampleTimer > 1000) {
-            update();
+            update(0);
             _press_offset += _abs_pressure;
             sample_count++;  
             sampleTimer = 0;
@@ -336,6 +347,50 @@ void DisplayController::writeToLog(const String& msg, const String& type,
     }
 }
 
+void DisplayController::writeToDataFile() {
+    _isSDCardInserted = digitalRead(_SD_detect_pin);
+    String error = "SD Card Error! ";
+    String unit = "F";
+    if (_temp_units) unit = "C";
+
+    if (_isSDCardInserted && !_isSDCardActive) {
+        _isSDCardActive = SD.begin(BUILTIN_SDCARD);
+    }
+    
+    if (_isSDCardActive) {
+        String msg = "Writing data to test_data.csv";
+        _dataFile = SD.open("test_data.csv", FILE_WRITE);
+        if (_dataFile) {
+            if (!_hasHeaderBeenWritten) {
+                String header = "Datetime,Loop,Press(psi),";
+                header += "SealTemp(\xB0" + unit + "),SumpTemp(\xB0";
+                header += unit + "),CW_Torque(Nm),CCW_Torque(Nm)";
+                _dataFile.println(header);
+                _hasHeaderBeenWritten = true;
+            }
+            String data = getDateStr() + " " + getTimeStr() + ",";
+            data += String(_loop_count) + "," + String(_rel_pressure);
+            data += "," + String(_seal_temp) + "," + String(_sump_temp);
+            data += "," + String(_cw_torque) + "," + String(_ccw_torque);
+            _dataFile.println(data);
+            writeToLog("data logged to test_data.csv", "LOG");
+            _dataFile.close();
+        }
+        else {
+            error = "Error writing to test_data.txt";
+            errorScreen(error, 5);
+        } 
+    }
+
+    else {
+        errorScreen(error, 5);
+    }
+}
+
+void DisplayController::writeToStateFile() {
+    _isSDCardInserted = digitalRead(_SD_detect_pin);
+}
+
 /****** LCD SCREEN FUNCTION DEFINITIONS ******/
 
 void DisplayController::messageScreen(const String& msg,
@@ -382,8 +437,7 @@ void DisplayController::messageScreen(const String& msg,
         }
 }
 
-void DisplayController::testDoneScreen(const uint8_t& loop_count,
-                                       const uint8_t total_loops) {
+void DisplayController::testDoneScreen(const uint8_t& loop_count) {
     //String status = "Total hours ran: " + String(_run_hours);
     if (_completeTimer >= 10000) {
         lcd.clear();
@@ -493,9 +547,8 @@ String DisplayController::tempToStrLog(const double& temp,
 }
 
 
-void DisplayController::updateLCD(const String& test_status_str,
-                                  const unsigned int& loop_count) {
-    String loops_str = loop_count;
+void DisplayController::updateLCD(const String& test_status_str) {
+    String loops_str = _loop_count;
     String seal_temp_str = tempToStrLCD(_seal_temp, _temp_units);
     String sump_temp_str = tempToStrLCD(_sump_temp, _temp_units);
     String pressure = String(_rel_pressure);
