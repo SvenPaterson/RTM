@@ -2,3 +2,5 @@
 also make sure that the logic preventing writing to pin every loop is working
 
 # reset needs to reset the stored loops in the recovery file
+
+# when reset occurs the writeToDataFile needs to handle writing a new header line

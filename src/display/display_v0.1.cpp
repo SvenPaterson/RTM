@@ -28,9 +28,9 @@
 DisplayController displayController;
 
 // TEST CONTROL
-String msg, test_status_str = "READY";
+String msg, test_status_str = "STANDBY";
 uint32_t loop_count = 0;
-uint32_t total_loops = 4;
+uint32_t total_loops = 30;
 double temp_setpoint = 90.0; // will be set by SD card file
 bool temp_units = false; // 'false' for farenheit, 'true' for celcius
 
@@ -40,6 +40,16 @@ bool hasTestFinished = false;
 bool isPreHeated = false;
 bool torqueRequested = false;
 bool isSDCardInserted = false;
+
+enum ProgramState {
+  STATE_STANDBY,
+  STATE_HEATING,
+  STATE_RUNNING,
+  STATE_PAUSED,
+  STATE_TEST_COMPLETED,
+  STATE_RESET_REQUESTED,
+};
+ProgramState currentState = STATE_STANDBY;
 
 // INTERRUPT VOLITILE VARIABLES
 volatile unsigned long start_micros = 0;
@@ -110,89 +120,121 @@ void setup() {
 
 /* -------------------------------- MAIN LOOP -------------------------------- */
 void loop() {
-  // TEST COMPLETED LOGIC //
-  if (loop_count >= total_loops && !hasTestFinished) {
-    displayController.writeToLog("Test has completed!", "INFO");
-    hasTestFinished = true;
-  }
-  Serial.println(displayController.getResetSwitch());
-  if (hasTestFinished && !displayController.getResetSwitch()) {
-    displayController.testDoneScreen(loop_count);
-  }
+  displayController.update(loop_count);
 
-  else {
-    displayController.update(loop_count);
-    displayController.updateLCD(test_status_str);
-  }
+  switch (currentState) {
+    case STATE_STANDBY:
+      if (displayController.getRunSwitch()) {
+        currentState = STATE_HEATING;
+        test_status_str = "HEATING";
+      }
+      else if (displayController.getResetSwitch()) {
+        currentState = STATE_RESET_REQUESTED;
+        test_status_str = "RESETTING";
+      }
+      else {
+        displayController.updateLCD(test_status_str);
+        displayController.turnOffHeaters();
+      }
+      break;
+    
+    case STATE_HEATING:
+      if (displayController.getSumpTemp() < temp_setpoint) {
+        displayController.stopProgram();
+        displayController.updateLCD(test_status_str);
+        displayController.armHeaters();
+        displayController.computeHeaterOutput();
+      }
+      else if (!displayController.getRunSwitch()) {
+        test_status_str = "STANDBY";
+        currentState = STATE_STANDBY;
+      }
+      else {
+        currentState = STATE_RUNNING;
+        test_status_str = "RUNNING";
+      }
+      break;
 
-  // PRE-TEST LOGIC //
-  if (!displayController.getRunSwitch() && !hasTestStarted) {
-    test_status_str = "READY";
-    displayController.turnOffHeaters();
-  } // END PRE-TEST LOGIC
-
-  // RUN LOGIC //
-  if (displayController.getRunSwitch()) {
-    if (!isPreHeated && displayController.getSumpTemp() < temp_setpoint) {
-      test_status_str = "HEATING";
-      displayController.armHeaters();
-      displayController.stopProgram();
-    }
-    else { // TEST HAS PRE-HEATED AND NOW RUNNING //
-      isPreHeated = true;
-      test_status_str = "RUNNING";
-      hasTestStarted = true;
-      displayController.runProgram();
-
-      if (torqueRequested) {
-        torqueRequested = !torqueRequested;
+    case STATE_RUNNING:
+      displayController.updateLCD(test_status_str);
+      if(torqueRequested) {
+        torqueRequested = false;
         displayController.readTorque();
-        delay(100);
+        //delay(100);
       }
-
       displayController.computeHeaterOutput();
-
-      // PROFILE LOGIC GOES HERE //
-      // loop_pin from motor is looping every 10s for debugging.
-      // END OF PROFILE LOGIC
-
-    }
-  }
-  else {
-  } // END OF RUN LOGIC
-
-  // PAUSED LOGIC //
-  if (!displayController.getRunSwitch() && hasTestStarted) {
-    test_status_str = "PAUSED";
-    isPreHeated = false; // test may have cooled off
-    displayController.turnOffHeaters();
-    displayController.stopProgram();
-  } // END OF PAUSED LOGIC
-
-  // RESET LOGIC //
-  if (displayController.getResetSwitch()) {
-    displayController.turnOffHeaters();
-    displayController.stopProgram();
-    msg = "Test will be RESET in:";
-    displayController.messageScreen(msg);
-    for (int i = 10; i > 0; i--) {
-      displayController.messageScreen(msg, false, String(i)+" seconds");
-      delay(1000);
-      displayController.update(loop_count);
-      if (!displayController.getResetSwitch()) {
-        i = 0; // kick out of reset loop
-        displayController.lcd.clear();
+      if (loop_count >= total_loops) {
+        currentState = STATE_TEST_COMPLETED;
+        test_status_str = "TEST DONE";
       }
-    }
-    if (displayController.getResetSwitch()) {
-      loop_count = 0;
-      hasTestStarted = false;
-      displayController.resetTest();
-      displayController.messageScreen(srcfile_details());
-      delay(4000);
-    }
-  } // END RESET LOGIC
+      if (!displayController.getRunSwitch()) {
+        currentState = STATE_PAUSED;
+        test_status_str = "PAUSED";
+      }
+      break;
+
+    case STATE_PAUSED:
+      displayController.updateLCD(test_status_str);
+      displayController.stopProgram();
+      displayController.turnOffHeaters();
+      if (displayController.getRunSwitch()) {
+        currentState = STATE_HEATING;
+        test_status_str = "HEATING";
+      }
+      else if (displayController.getResetSwitch()) {
+        currentState = STATE_RESET_REQUESTED;
+        test_status_str = "RESETTING";
+      }
+      break;
+
+    case STATE_TEST_COMPLETED:
+      displayController.updateLCD(test_status_str);
+      displayController.lcd.setBacklight(0,255,0);
+      displayController.turnOffHeaters();
+      displayController.stopProgram();
+      if(displayController.getResetSwitch()) {
+        test_status_str = "RESETTING";
+        currentState = STATE_RESET_REQUESTED;
+      }
+      break;
+
+    case STATE_RESET_REQUESTED:
+      displayController.lcd.setBacklight(255,255,255);
+      if (!displayController.getResetSwitch() && loop_count < total_loops) {
+        test_status_str = "STANDBY";
+        currentState = STATE_STANDBY;
+      }
+      else if (!displayController.getResetSwitch() && loop_count >= total_loops) {
+        test_status_str = "TEST DONE";
+        displayController.lcd.setBacklight(0,255,0);
+        currentState = STATE_TEST_COMPLETED;
+      }
+      else {
+        displayController.updateLCD(test_status_str);
+        displayController.turnOffHeaters();
+        displayController.stopProgram();
+        msg = "Test will be RESET in:";
+        displayController.messageScreen(msg);
+        for (int i = 10; i > 0; i--) {
+          displayController.messageScreen(msg, false, String(i) + " seconds");
+          delay(1000);
+          displayController.update(loop_count);
+          if (!displayController.getResetSwitch()) {
+            i = 0; // kick out of reset loop
+            displayController.lcd.clear();
+          }
+        }
+        if (displayController.getResetSwitch()) {
+          loop_count = 0;
+          displayController.resetTest();
+          displayController.messageScreen(srcfile_details());
+          delay(4000);
+        }
+      }
+      break;
+  }
 }
+
 
 ///////////////////////////////////////////////////////////////////////////////////
 // FUNCTION DEFINITIONS //

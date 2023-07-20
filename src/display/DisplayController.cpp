@@ -226,7 +226,6 @@ void DisplayController::update(const uint32_t& loop_count) {
     _resetSwitch->update();
     bool askingForPressure = digitalRead(_supply_bus_pin) ? HIGH : LOW;
     digitalWrite(_supply_valve_pin, askingForPressure);
-
     bool dump_state = digitalRead(_dump_bus_pin) ? HIGH : LOW;
     digitalWrite(_dump_valve_pin, dump_state);
     _isSDCardInserted = digitalRead(_SD_detect_pin);
@@ -280,13 +279,14 @@ void DisplayController::runProgram() {
 }
 
 void DisplayController::resetTest() {
+    _loop_count = 0;
     lcd.clear();
     delay(2000);
-    turnOffHeaters();
     digitalWrite(_reset_bus_pin, HIGH);
     delay(10);
     digitalWrite(_reset_bus_pin, LOW);
-    writeToLog("Test has been successfully reset", "RESET");    
+    writeToLog("Test has been successfully reset", "RESET");
+    //writeToDataFile();
     setPressureOffset();
 }
 
