@@ -1,0 +1,18 @@
+# verify that the air_valve_pin matches the state of the supply_pus_pin with led
+also make sure that the logic preventing writing to pin every loop is working
+
+# Build the startup/recovery file, reset needs to reset the stored loops in the recovery file
+
+DONE # error screen should run with timer defined in class, can be cleared by resetting
+error screen should be a STATE_ERROR. Boom!! Note: handled with Reset switch in class
+
+# when reset occurs the writeToDataFile needs to handle writing a new header line
+
+# add duration in hrs to 2nd line left column and move Pressure to third line,
+move setpoint to SP on 2nd column of 3rd line
+
+# implement record data function. will also need a set record interval method
+during setup()
+
+DONE # handle heater system error i.e. if theres a delta of X between setpoint and sump temp
+and it's been 30mins then turn off the heater _heat_safety_pin.
