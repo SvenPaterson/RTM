@@ -569,15 +569,15 @@ void DisplayController::updateLCD(const String& test_status_str) {
         if (_isScreenUpdate) {
             _isScreenUpdate = !_isScreenUpdate;
             printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status_str);
-            printRowPair(0, 1, MAX_CHARS_PER_LINE, "Setpoint:", set_point_str);
-            printFourColumnRow(2, "P:", pressure +"psi", " Loop:", loops_str);
-            printFourColumnRow(3, "Seal:", seal_temp_str, " Sump:", sump_temp_str);
+            printFourColumnRow(1, "P:", pressure +"psi", " Loop:", loops_str);
+            printRowPair(0, 2, MAX_CHARS_PER_LINE, "Setpoint:", set_point_str);
+            printFourColumnRow(3, "Seal:", seal_temp_str, " Sump:", sump_temp_str);         
         }
         else {
             _isScreenUpdate = !_isScreenUpdate;
             // printRowPair(0, 0, MAX_CHARS_PER_LINE, "Date:", dateTimeStr());
             // print the remaining test time here
-            printRowPair(0, 1, MAX_CHARS_PER_LINE, "Torque:", torques_str);
+            printRowPair(0, 2, MAX_CHARS_PER_LINE, "Torque:", torques_str);
         }
     }
 }

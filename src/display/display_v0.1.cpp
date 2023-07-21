@@ -139,15 +139,21 @@ void loop() {
       break;
     
     case STATE_HEATING:
-      if (displayController.getSumpTemp() < temp_setpoint) {
+      displayController.updateLCD(test_status_str);
+      displayController.computeHeaterOutput();
+      if (!displayController.getRunSwitch()) {
+        test_status_str = "PAUSED";
+        currentState = STATE_PAUSED;
+      }
+      else if (displayController.getSumpTemp() < temp_setpoint) {
         displayController.stopProgram();
         displayController.updateLCD(test_status_str);
         displayController.armHeaters();
         displayController.computeHeaterOutput();
       }
-      else if (!displayController.getRunSwitch()) {
-        test_status_str = "STANDBY";
-        currentState = STATE_STANDBY;
+      else if (displayController.getResetSwitch()) {
+        test_status_str = "RESETTING";
+        currentState = STATE_RESET_REQUESTED;
       }
       else {
         currentState = STATE_RUNNING;
@@ -157,15 +163,19 @@ void loop() {
 
     case STATE_RUNNING:
       displayController.updateLCD(test_status_str);
-      if(torqueRequested) {
-        torqueRequested = false;
-        displayController.readTorque();
-        //delay(100);
-      }
       displayController.computeHeaterOutput();
       if (loop_count >= total_loops) {
         currentState = STATE_TEST_COMPLETED;
         test_status_str = "TEST DONE";
+      }
+      else if(torqueRequested) {
+        torqueRequested = false;
+        displayController.readTorque();
+        //delay(100);
+      }
+      else if (displayController.getResetSwitch()) {
+        test_status_str = "RESETTING";
+        currentState = STATE_RESET_REQUESTED;
       }
       if (!displayController.getRunSwitch()) {
         currentState = STATE_PAUSED;
@@ -195,18 +205,17 @@ void loop() {
       if(displayController.getResetSwitch()) {
         test_status_str = "RESETTING";
         currentState = STATE_RESET_REQUESTED;
+        displayController.lcd.setBacklight(255,255,255);
       }
       break;
 
     case STATE_RESET_REQUESTED:
-      displayController.lcd.setBacklight(255,255,255);
       if (!displayController.getResetSwitch() && loop_count < total_loops) {
         test_status_str = "STANDBY";
         currentState = STATE_STANDBY;
       }
       else if (!displayController.getResetSwitch() && loop_count >= total_loops) {
         test_status_str = "TEST DONE";
-        displayController.lcd.setBacklight(0,255,0);
         currentState = STATE_TEST_COMPLETED;
       }
       else {
