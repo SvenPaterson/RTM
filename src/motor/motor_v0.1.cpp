@@ -22,15 +22,25 @@ void setup() {
   Serial.begin(112500);
   Wire.begin();
   pinMode(LOOP_BUS_PIN, OUTPUT);
-  
+  pinMode(PRGM_RUN_BUS_PIN, INPUT_PULLDOWN);
+  pinMode(TORQ_FLAG_BUS_PIN, OUTPUT);
 }
 
 void loop() {
-  if (test > 10000) {
+  if (digitalRead(PRGM_RUN_BUS_PIN)) {
+    if (test > 2000) {
     // simulate a 10 second loop
     digitalWrite(LOOP_BUS_PIN, HIGH);
     delay(1);
     digitalWrite(LOOP_BUS_PIN, LOW);
     test = 0;
+    }
+    if (test > 4000) {
+      digitalWrite(TORQ_FLAG_BUS_PIN, HIGH);
+      delay(10);
+      digitalWrite(TORQ_FLAG_BUS_PIN, LOW);
+    }
   }
+
+  
 }

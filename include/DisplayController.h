@@ -12,6 +12,9 @@
 #include <TimeLib.h>
 #include <SD.h>
 #include <SPI.h>
+#include <cmath>
+#include <avr/wdt.h>
+#include <map>
 
 #define MCP9600_DEFAULT_ADDR_ONE 0x60
 #define MCP9600_DEFAULT_ADDR_TWO 0x67
@@ -29,9 +32,11 @@ class DisplayController {
          * Set the heater control setpoint temperature and display message
          * stating that heater control has been initialized.
          * @param setpoint temperature setpoint
+         * @param deltaT_safety the allowed delta above setpoint 
          * @param units false for farenheit, true for celcius
          */
-        void setTempSetpoint(const double& setpoint, const bool& units=false);
+        void setTempSetpoint(const double& setpoint, const double& deltaT_safety=25,
+                             const bool& units=false);
         
         /**  
          * Take a number of pressure measurements at 1sec intervals with
@@ -192,6 +197,9 @@ class DisplayController {
         void resetTest();
 
     private:
+        // PIN MAPPINGS
+        std::map<String, uint8_t> _pinMappings;
+
         // TIME
         static time_t _getTeensyTime();
         uint32_t _loop_count;
@@ -215,10 +223,11 @@ class DisplayController {
         double _cw_torque, _ccw_torque;
 
         // HEATER
-        elapsedMillis _PIDTimer;
+        elapsedMillis _PIDTimer, _heatSafetyTimer;
         uint8_t _heat_safety_pin, _heat_output_pin;
         double _setpoint_temp, _input, _output;
         double _Kp = 60, _Ki = 40, _Kd = 25;
+        double _deltaT_safety;
         PID _heaterPIDControl;
         bool _areHeatersArmed;
 

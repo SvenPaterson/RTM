@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <string.h>
-#include <SerLCD.h>
 #include <TimeLib.h>
 #include <Bounce2.h>
 
@@ -30,9 +29,13 @@ DisplayController displayController;
 // TEST CONTROL
 String msg, test_status_str = "STANDBY";
 uint32_t loop_count = 0;
-uint32_t total_loops = 30;
-double temp_setpoint = 90.0; // will be set by SD card file
+
+// TEST PARAMETERS
+// will eventually be set by SD card
+double temp_setpoint = 75.0; // will be set by SD card file
 bool temp_units = false; // 'false' for farenheit, 'true' for celcius
+double detlaT_safety = 10.0; // Max temp limit for seal = deltaT_safety+temp_setpoint
+uint32_t total_loops = 30;
 
 // TEST LOGIC
 bool hasTestStarted = false;
@@ -111,22 +114,26 @@ void setup() {
   displayController.setPressureOffset();
 
   // Initialize the heater band PID loop
-  displayController.setTempSetpoint(temp_setpoint, temp_units);
+  displayController.setTempSetpoint(temp_setpoint, detlaT_safety, temp_units);
 
   // Clear screen to begin test protocol
   Serial.println("Test Status: " + test_status_str);
+  displayController.writeToLog("Display Controller initialized", "STATUS");
   displayController.lcd.clear();
 }
 
 /* -------------------------------- MAIN LOOP -------------------------------- */
 void loop() {
-  displayController.update(loop_count);
+  if (loop_count <= total_loops) {
+    displayController.update(loop_count);
+  }
 
   switch (currentState) {
     case STATE_STANDBY:
       if (displayController.getRunSwitch()) {
         currentState = STATE_HEATING;
         test_status_str = "HEATING";
+        displayController.writeToLog(test_status_str, "STATUS");
       }
       else if (displayController.getResetSwitch()) {
         currentState = STATE_RESET_REQUESTED;
@@ -144,6 +151,7 @@ void loop() {
       if (!displayController.getRunSwitch()) {
         test_status_str = "PAUSED";
         currentState = STATE_PAUSED;
+        displayController.writeToLog(test_status_str, "STATUS");
       }
       else if (displayController.getSumpTemp() < temp_setpoint) {
         displayController.stopProgram();
@@ -158,15 +166,19 @@ void loop() {
       else {
         currentState = STATE_RUNNING;
         test_status_str = "RUNNING";
+        displayController.writeToLog(test_status_str, "STATUS");
       }
       break;
 
     case STATE_RUNNING:
       displayController.updateLCD(test_status_str);
+      displayController.runProgram();
       displayController.computeHeaterOutput();
       if (loop_count >= total_loops) {
         currentState = STATE_TEST_COMPLETED;
         test_status_str = "TEST DONE";
+        displayController.writeToLog(test_status_str, "STATUS");
+
       }
       else if(torqueRequested) {
         torqueRequested = false;
@@ -180,6 +192,7 @@ void loop() {
       if (!displayController.getRunSwitch()) {
         currentState = STATE_PAUSED;
         test_status_str = "PAUSED";
+        displayController.writeToLog(test_status_str, "STATUS");
       }
       break;
 
@@ -190,6 +203,7 @@ void loop() {
       if (displayController.getRunSwitch()) {
         currentState = STATE_HEATING;
         test_status_str = "HEATING";
+        displayController.writeToLog(test_status_str, "STATUS");
       }
       else if (displayController.getResetSwitch()) {
         currentState = STATE_RESET_REQUESTED;
@@ -211,12 +225,14 @@ void loop() {
 
     case STATE_RESET_REQUESTED:
       if (!displayController.getResetSwitch() && loop_count < total_loops) {
-        test_status_str = "STANDBY";
-        currentState = STATE_STANDBY;
+        test_status_str = "PAUSED";
+        currentState = STATE_PAUSED;
+        displayController.writeToLog(test_status_str, "STATUS");
       }
       else if (!displayController.getResetSwitch() && loop_count >= total_loops) {
         test_status_str = "TEST DONE";
         currentState = STATE_TEST_COMPLETED;
+        displayController.writeToLog(test_status_str, "STATUS");
       }
       else {
         displayController.updateLCD(test_status_str);
@@ -235,9 +251,12 @@ void loop() {
         }
         if (displayController.getResetSwitch()) {
           loop_count = 0;
+          displayController.writeToLog("RESET", "STATUS");
           displayController.resetTest();
           displayController.messageScreen(srcfile_details());
           delay(4000);
+          test_status_str = "STANDBY";
+          currentState = STATE_STANDBY;
         }
       }
       break;

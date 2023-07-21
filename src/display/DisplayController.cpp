@@ -1,4 +1,5 @@
 #include "DisplayController.h"
+#include <avr/wdt.h>
 
 // LCD screen parameters
 #define SCREEN_REFRESH_INTERVAL 2000
@@ -23,9 +24,19 @@ DisplayController::DisplayController() : _heaterPIDControl(&_input, &_output, &_
 
 
 void DisplayController::setTempSetpoint(const double& setpoint,
+                                        const double& deltaT_safety,
                                         const bool& units) {
+    _deltaT_safety = deltaT_safety;                                        
     _setpoint_temp = setpoint;
     _temp_units = units;
+    if (_setpoint_temp > 250.0 && !_temp_units) {
+        String err = "setpoint set too high! must be 250F/120C or less";
+        errorScreen(err);
+    }
+    if (_setpoint_temp > 120.0 && _temp_units) {
+        String err = "setpoint set too high! must be 250F/120C or less";
+        errorScreen(err);
+    }
     update(0); // this needs to be verified when test restart or powerloss!
     String msg = "Heater PID control initialized";
     messageScreen(msg);
@@ -39,7 +50,6 @@ void DisplayController::setTempSetpoint(const double& setpoint,
 }
 
 void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
-
     /*
     {"SD_DETECT_PIN", SD_DETECT_PIN},
     {"LOOP_BUS_PIN", LOOP_BUS_PIN},
@@ -56,18 +66,18 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     {"RESET_SW_PIN", RESET_SW_PIN},
     {"SDA0_PIN", SDA0_PIN}, 
     {"SDL0_PIN", SDL0_PIN},
-    {"PRGM_RESET_BUS_PIN", RESET_BUS_PIN}
+    {"PRGM_RESET_BUS_PIN", PRGM_RESET_BUS_PIN}
     */
 
     // Initialize the teensy board time
     setSyncProvider(_getTeensyTime);    
 
+    _pinMappings = pinMappings;
     _SD_detect_pin = pinMappings.at("SD_DETECT_PIN");
     _supply_bus_pin = pinMappings.at("AIR_SUPPLY_BUS_PIN");
     _dump_bus_pin = pinMappings.at("AIR_DUMP_BUS_PIN");
     _supply_valve_pin = pinMappings.at("AIR_SUPPLY_PIN");
     _dump_valve_pin = pinMappings.at("AIR_DUMP_PIN");
-    //_read_torque_bus_pin = pinMappings.at("TORQ_FLAG_BUS_PIN");
     _torque_pin = pinMappings.at("MOTOR_HLFB_PIN");
     _run_bus_pin = pinMappings.at("PRGM_RUN_BUS_PIN");
     _reset_bus_pin = pinMappings.at("PRGM_RESET_BUS_PIN");
@@ -83,7 +93,6 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     pinMode(_supply_valve_pin, OUTPUT);
     pinMode(_dump_valve_pin, OUTPUT);
     pinMode(_torque_pin, INPUT_PULLUP);
-    //pinMode(_read_torque_bus_pin, INPUT_PULLDOWN);
     pinMode(_run_bus_pin, OUTPUT);
     pinMode(_reset_bus_pin, OUTPUT);
     pinMode(_loop_bus_pin, INPUT_PULLDOWN);
@@ -135,10 +144,9 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
         writeToLog(msg, true);
     }
     else {
-        msg = "No SD Card Inserted. Data will not be saved";
+        msg = "No SD Card!    Insert and hit RESET switch";
         Serial.println(msg);
-        messageScreen(msg);
-        delay(10000);
+        errorScreen(msg);
     }
     
     // Initialize seal thermocouple sensor
@@ -194,6 +202,13 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
 }
 
 void DisplayController::computeHeaterOutput(const unsigned int& interval) {
+    double deltaT = _sump_temp - _setpoint_temp;
+    if (_PIDTimer > 3600000 && deltaT < -5) {
+        errorScreen("Sump temp not rising, check heaters");
+    }
+    if (deltaT > _deltaT_safety) {
+        errorScreen("Thermal runaway!");
+    }
     if (_PIDTimer > interval) {
         _input = _sump_temp;
         _heaterPIDControl.Compute();
@@ -229,6 +244,9 @@ void DisplayController::update(const uint32_t& loop_count) {
     bool dump_state = digitalRead(_dump_bus_pin) ? HIGH : LOW;
     digitalWrite(_dump_valve_pin, dump_state);
     _isSDCardInserted = digitalRead(_SD_detect_pin);
+    if (!_isSDCardInserted) {
+        _isSDCardActive = false;
+    }
 }
 
 void DisplayController::setPressureOffset(const uint8_t& num_meas) {
@@ -272,6 +290,7 @@ void DisplayController::readTorque() {
             _ccw_torque = torque;
         }
     }
+    Serial.println("torque measured!");
 }
 
 void DisplayController::runProgram() {
@@ -285,7 +304,6 @@ void DisplayController::resetTest() {
     digitalWrite(_reset_bus_pin, HIGH);
     delay(10);
     digitalWrite(_reset_bus_pin, LOW);
-    writeToLog("Test has been successfully reset", "RESET");
     //writeToDataFile();
     setPressureOffset();
 }
@@ -326,11 +344,10 @@ void DisplayController::writeToLog(const String& msg, const String& type,
     if (_isSDCardInserted && !_isSDCardActive) {
         _isSDCardActive = SD.begin(BUILTIN_SDCARD);
     }
-
     if (!_isSDCardInserted && Serial) {
-        Serial.println(" - " + msg);
+        errorScreen("No SD Card!    Insert and hit RESET switch");
+        Serial.println(" - [INTENDED FOR LOGFILE] " + msg);
     }
-
     if (_isSDCardActive) {
         _logFile = SD.open("log.txt", FILE_WRITE);
         if (_logFile) {
@@ -343,20 +360,18 @@ void DisplayController::writeToLog(const String& msg, const String& type,
         }
         else {
             errorScreen(error, 5);
-        } 
+        }
     }
 }
 
 void DisplayController::writeToDataFile() {
     _isSDCardInserted = digitalRead(_SD_detect_pin);
-    String error = "SD Card Error! ";
+    String error = "No SD Card!    Insert and hit RESET switch";
     String unit = "F";
     if (_temp_units) unit = "C";
-
     if (_isSDCardInserted && !_isSDCardActive) {
         _isSDCardActive = SD.begin(BUILTIN_SDCARD);
     }
-    
     if (_isSDCardActive) {
         String msg = "Writing data to test_data.csv";
         _dataFile = SD.open("test_data.csv", FILE_WRITE);
@@ -381,9 +396,8 @@ void DisplayController::writeToDataFile() {
             errorScreen(error, 5);
         } 
     }
-
     else {
-        errorScreen(error, 5);
+        errorScreen(error);
     }
 }
 
@@ -457,9 +471,16 @@ void DisplayController::testDoneScreen(const uint8_t& loop_count) {
 
 void DisplayController::errorScreen(const String& msg, const int& time) {
     messageScreen(msg);
+    if (_isSDCardActive && _isSDCardInserted) {
+        writeToLog(msg, "ERROR");
+    }
     if (time==0) {
         while (true) {
             if (_errorTimer >= 1000) {
+                if (digitalRead(_reset_sw_pin)) {
+                    begin(_pinMappings);
+                    break;
+                }
                 if (_flasher) {
                     lcd.setBacklight(RGB_RED);
                 }
