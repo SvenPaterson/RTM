@@ -3,4 +3,5 @@ also make sure that the logic preventing writing to pin every loop is working
 
 # reset needs to reset the stored loops in the recovery file
 
-# when reset occurs the writeToDataFile needs to handle writing a new header line
+# error screen should run with timer defined in class, can be cleared by resetting
+error screen should be a STATE_ERROR. Boom!!
