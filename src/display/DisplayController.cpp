@@ -364,6 +364,9 @@ void DisplayController::writeToLog(const String& msg, const String& type,
     }
 }
 
+void DisplayController::setRecordInterval(const uint8_t& interval) {
+    _record_interval = interval;
+}
 void DisplayController::writeToDataFile() {
     _isSDCardInserted = digitalRead(_SD_detect_pin);
     String error = "No SD Card!    Insert and hit RESET switch";
@@ -383,13 +386,15 @@ void DisplayController::writeToDataFile() {
                 _dataFile.println(header);
                 _hasHeaderBeenWritten = true;
             }
-            String data = getDateStr() + " " + getTimeStr() + ",";
-            data += String(_loop_count) + "," + String(_rel_pressure);
-            data += "," + String(_seal_temp) + "," + String(_sump_temp);
-            data += "," + String(_cw_torque) + "," + String(_ccw_torque);
-            _dataFile.println(data);
-            writeToLog("data logged to test_data.csv", "LOG");
-            _dataFile.close();
+            if ((_record_interval*1000) > _dataLoggerTimer) {
+                String data = getDateStr() + " " + getTimeStr() + ",";
+                data += String(_loop_count) + "," + String(_rel_pressure);
+                data += "," + String(_seal_temp) + "," + String(_sump_temp);
+                data += "," + String(_cw_torque) + "," + String(_ccw_torque);
+                _dataFile.println(data);
+                writeToLog("data logged to test_data.csv", "LOG");
+                _dataFile.close();
+            }
         }
         else {
             error = "Error writing to test_data.txt";
