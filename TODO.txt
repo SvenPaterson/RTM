@@ -13,3 +13,5 @@ move setpoint to SP on 2nd column of 3rd line
 VERIFY THE IMPLEMENTATION NOW WORKS!! 
 # implement record data function. will also need a set record interval method
 during setup()
+
+use return; instead of break; in switch case to jump back to start of loop()
