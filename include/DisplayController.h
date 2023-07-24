@@ -153,10 +153,20 @@ class DisplayController {
 
         /**  
          * Write an entry to the log file. Writes one line per execution
-         * @param msg line to be logged
+         * @param msg msg to be logged
+         * @param type type of message, e.g. INFO, LOG, ERROR
+         * @param first if first is true, then it will print msg without 
+         *              any formatting
+         * 
          */ 
         void writeToLog(const String& msg, const String& type="LOG",
                         const bool& first=false);
+
+        /**  
+         * Write an entry to the the data file after a defined interval.
+         * @param interval interval in seconds that data should be logged
+         */ 
+        void setRecordInterval(const uint8_t& interval);
 
         /**  
          * Will write an entry to the test data file
@@ -166,7 +176,7 @@ class DisplayController {
         /**  
          * Will update the state file
          */ 
-        void writeToStateFile();
+        void writeToSpecFile();
 
         // Heater PID Loop //
 
@@ -210,15 +220,12 @@ class DisplayController {
         uint8_t _SUMP_TC_ADDR = MCP9600_DEFAULT_ADDR_TWO;
         MCP9600 _sealTempSensor, _sumpTempSensor;
         double _seal_temp, _sump_temp;
-
         SparkFun_MicroPressure _pressSensor;
         double _abs_pressure, _rel_pressure;
         double _press_offset=0.0;
-
         bool _seal_fault = false;
         bool _sump_fault = false;
         bool _press_fault = false;
-
         char _torque_pin;
         double _cw_torque, _ccw_torque;
 
@@ -246,6 +253,8 @@ class DisplayController {
 
         // SD CARD AND FILES
         File _restartFile, _dataFile, _logFile;
+        elapsedMillis _dataLoggerTimer;
+        uint8_t _record_interval;
         bool _isSDCardInserted, _isSDCardActive;
         bool _hasHeaderBeenWritten;
         uint8_t _SD_detect_pin;

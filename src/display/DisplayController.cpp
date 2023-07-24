@@ -364,6 +364,9 @@ void DisplayController::writeToLog(const String& msg, const String& type,
     }
 }
 
+void DisplayController::setRecordInterval(const uint8_t& interval) {
+    _record_interval = interval;
+}
 void DisplayController::writeToDataFile() {
     _isSDCardInserted = digitalRead(_SD_detect_pin);
     String error = "No SD Card!    Insert and hit RESET switch";
@@ -383,13 +386,16 @@ void DisplayController::writeToDataFile() {
                 _dataFile.println(header);
                 _hasHeaderBeenWritten = true;
             }
-            String data = getDateStr() + " " + getTimeStr() + ",";
-            data += String(_loop_count) + "," + String(_rel_pressure);
-            data += "," + String(_seal_temp) + "," + String(_sump_temp);
-            data += "," + String(_cw_torque) + "," + String(_ccw_torque);
-            _dataFile.println(data);
-            writeToLog("data logged to test_data.csv", "LOG");
-            _dataFile.close();
+            else if (_dataLoggerTimer > (_record_interval*1000)) {
+                String data = getDateStr() + " " + getTimeStr() + ",";
+                data += String(_loop_count) + "," + String(_rel_pressure);
+                data += "," + String(_seal_temp) + "," + String(_sump_temp);
+                data += "," + String(_cw_torque) + "," + String(_ccw_torque);
+                _dataFile.println(data);
+                writeToLog("data logged to test_data.csv", "LOG");
+                _dataFile.close();
+                _dataLoggerTimer = 0;
+            }
         }
         else {
             error = "Error writing to test_data.txt";
@@ -401,7 +407,7 @@ void DisplayController::writeToDataFile() {
     }
 }
 
-void DisplayController::writeToStateFile() {
+void DisplayController::writeToSpecFile() {
     _isSDCardInserted = digitalRead(_SD_detect_pin);
 }
 
@@ -584,7 +590,6 @@ void DisplayController::updateLCD(const String& test_status_str) {
     String set_point_str = tempToStrLCD(_setpoint_temp, _temp_units);
     String date = String(month()) + "/" + String(day());
     String time = String(hour()) + ":" + String(minute(), 2);
-    
     if (_screenTimer > SCREEN_REFRESH_INTERVAL) {
         _screenTimer = 0;
         if (_isScreenUpdate) {
@@ -592,14 +597,12 @@ void DisplayController::updateLCD(const String& test_status_str) {
             printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status_str);
             printFourColumnRow(1, "P:", pressure +"psi", " Loop:", loops_str);
             printRowPair(0, 2, MAX_CHARS_PER_LINE, "Setpoint:", set_point_str);
-            printFourColumnRow(3, "Seal:", seal_temp_str, " Sump:", sump_temp_str);         
+            printFourColumnRow(3, "Seal:", seal_temp_str, " Sump:", sump_temp_str); 
         }
         else {
             _isScreenUpdate = !_isScreenUpdate;
-            // printRowPair(0, 0, MAX_CHARS_PER_LINE, "Date:", dateTimeStr());
-            // print the remaining test time here
             printRowPair(0, 2, MAX_CHARS_PER_LINE, "Torque:", torques_str);
-        }
+            }
     }
 }
 
