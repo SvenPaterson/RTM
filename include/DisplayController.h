@@ -176,7 +176,7 @@ class DisplayController {
         /**  
          * Will update the state file
          */ 
-        void writeToStateFile();
+        void writeToSpecFile();
 
         // Heater PID Loop //
 

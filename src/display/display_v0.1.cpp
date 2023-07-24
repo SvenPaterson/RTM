@@ -104,7 +104,6 @@ void setup() {
   displayController.begin(pinMappings);
 
   // Display source file version on LCD
-    // Get source file information
   String source_file = srcfile_details();
   displayController.messageScreen(source_file);
   displayController.writeToLog(source_file, "INFO");
@@ -112,6 +111,9 @@ void setup() {
 
   // measure ambient lab pressure and automatically set offset
   displayController.setPressureOffset();
+
+  // set recording interval, in seconds
+  displayController.setRecordInterval(5);
 
   // Initialize the heater band PID loop
   displayController.setTempSetpoint(temp_setpoint, detlaT_safety, temp_units);
@@ -143,11 +145,13 @@ void loop() {
         displayController.updateLCD(test_status_str);
         displayController.turnOffHeaters();
       }
-      break;
-    
+      // break;
+      return;
+
     case STATE_HEATING:
       displayController.updateLCD(test_status_str);
       displayController.computeHeaterOutput();
+      // displayController.writeToDataFile();
       if (!displayController.getRunSwitch()) {
         test_status_str = "PAUSED";
         currentState = STATE_PAUSED;
@@ -168,12 +172,14 @@ void loop() {
         test_status_str = "RUNNING";
         displayController.writeToLog(test_status_str, "STATUS");
       }
-      break;
+      // break;
+      return;
 
     case STATE_RUNNING:
       displayController.updateLCD(test_status_str);
       displayController.runProgram();
       displayController.computeHeaterOutput();
+      displayController.writeToDataFile();
       if (loop_count >= total_loops) {
         currentState = STATE_TEST_COMPLETED;
         test_status_str = "TEST DONE";
@@ -194,7 +200,8 @@ void loop() {
         test_status_str = "PAUSED";
         displayController.writeToLog(test_status_str, "STATUS");
       }
-      break;
+      // break;
+      return;  
 
     case STATE_PAUSED:
       displayController.updateLCD(test_status_str);
@@ -209,7 +216,8 @@ void loop() {
         currentState = STATE_RESET_REQUESTED;
         test_status_str = "RESETTING";
       }
-      break;
+      // break;
+      return;
 
     case STATE_TEST_COMPLETED:
       displayController.updateLCD(test_status_str);
@@ -221,7 +229,8 @@ void loop() {
         currentState = STATE_RESET_REQUESTED;
         displayController.lcd.setBacklight(255,255,255);
       }
-      break;
+      // break;
+      return;
 
     case STATE_RESET_REQUESTED:
       if (!displayController.getResetSwitch() && loop_count < total_loops) {
@@ -259,7 +268,8 @@ void loop() {
           currentState = STATE_STANDBY;
         }
       }
-      break;
+      // break;
+      return;
   }
 }
 
