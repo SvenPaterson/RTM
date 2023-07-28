@@ -31,11 +31,11 @@ void setup() {
 void loop() {
   if (digitalRead(PRGM_RUN_BUS_PIN)) {
     if (debugTimer > 10000) {
-    // simulate a 10 second loop
-    digitalWrite(LOOP_BUS_PIN, HIGH);
-    delay(1);
-    digitalWrite(LOOP_BUS_PIN, LOW);
-    debugTimer = 0;
+      // simulate a 10 second loop
+      digitalWrite(LOOP_BUS_PIN, HIGH);
+      delay(1);
+      digitalWrite(LOOP_BUS_PIN, LOW);
+      debugTimer = 0;
     }
     if (debugTimer > 4000) {
       digitalWrite(TORQ_FLAG_BUS_PIN, HIGH);

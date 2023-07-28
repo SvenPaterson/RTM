@@ -378,17 +378,17 @@ bool DisplayController::getResetSwitch() {
 
 void DisplayController::writeToLog(const String& msg, const String& type,
                                    const bool& first) {
-    String log, error = "Error writing to log file! Check SD card health";
+    String log, error = "No SD Card! Can't write to log file";
     _isSDCardInserted = digitalRead(_SD_detect_pin);
 
     if (_isSDCardInserted && !_isSDCardActive) {
         _isSDCardActive = SD.begin(BUILTIN_SDCARD);
     }
     if (!_isSDCardInserted && Serial) {
-        errorScreen("No SD Card!    Insert and hit RESET switch");
+        errorScreen(msg, 2);
         Serial.println(" - [INTENDED FOR LOGFILE] " + msg);
     }
-    if (_isSDCardActive) {
+    else if (_isSDCardActive) {
         _logFile = SD.open("log.txt", FILE_WRITE);
         if (_logFile) {
             if (first) log = msg;
@@ -399,32 +399,31 @@ void DisplayController::writeToLog(const String& msg, const String& type,
             Serial.println(" - " + msg);
         }
         else {
-            errorScreen(error, 5);
+            errorScreen(msg, 2);
         }
     }
 }
 
 void DisplayController::writeToDataFile() {
-    _isSDCardInserted = digitalRead(_SD_detect_pin);
-    String error = "No SD Card Inserted! Data wont be saved";
-    String unit = "F";
-    if (_temp_units) unit = "C";
-    if (_isSDCardInserted && !_isSDCardActive) {
-        _isSDCardActive = SD.begin(BUILTIN_SDCARD);
-    }
-    if (_isSDCardActive) {
-        String msg = "Writing data to test_data.csv";
-        _dataFile = SD.open("test_data.csv", FILE_WRITE);
-        if (_dataFile) {
-            if (!_hasHeaderBeenWritten) {
-                String header_str = "Datetime,Loop,Press(psi),";
-                header_str += "SealTemp(\xB0" + unit + "),SumpTemp(\xB0";
-                header_str += unit + "),CW_Torque(Nm),CCW_Torque(Nm)";
-                _dataFile.println(header_str);
-                writeToLog("data logging to test_data.csv started", "LOG");
-                _hasHeaderBeenWritten = true;
-            }
-            if (_dataLoggerTimer > (_record_interval*1000)) {
+    if (_dataLoggerTimer > (_record_interval*1000)) {
+        _isSDCardInserted = digitalRead(_SD_detect_pin);
+        String error = "No SD Card! Can't write to data file";
+        String unit = "F";
+        if (_temp_units) unit = "C";
+        if (_isSDCardInserted && !_isSDCardActive) {
+            _isSDCardActive = SD.begin(BUILTIN_SDCARD);
+        }
+        if (_isSDCardActive) {
+            _dataFile = SD.open("test_data.csv", FILE_WRITE);
+            if (_dataFile) {
+                if (!_hasHeaderBeenWritten) {
+                    String header_str = "Datetime,Loop,Press(psi),";
+                    header_str += "SealTemp(\xB0" + unit + "),SumpTemp(\xB0";
+                    header_str += unit + "),CW_Torque(Nm),CCW_Torque(Nm)";
+                    _dataFile.println(header_str);
+                    writeToLog("data logging to test_data.csv started", "LOG");
+                    _hasHeaderBeenWritten = true;
+                }
                 String data_str = getDateStr() + " " + getTimeStr() + ",";
                 data_str += String(_current_loop_count) + "," + String(_rel_pressure);
                 data_str += "," + String(_seal_temp) + "," + String(_sump_temp);
@@ -432,21 +431,23 @@ void DisplayController::writeToDataFile() {
                 _dataFile.println(data_str);
                 _dataFile.close();
                 _dataLoggerTimer = 0;
+                
             }
+            else {
+                errorScreen(error, 2);
+                _dataLoggerTimer = 0;
+            } 
         }
         else {
-            error = "Error writing to test_data.txt";
-            errorScreen(error, 5);
-        } 
-    }
-    else {
-        messageScreen(error, 5);
-    }
+            errorScreen(error, 2);
+            _dataLoggerTimer = 0;
+        }
+    } 
 }
 
 void DisplayController::writeToConfigFile() {
     _isSDCardInserted = digitalRead(_SD_detect_pin);
-    String error = "No SD Card!    Insert and hit RESET switch";
+    String error = "No SD Card! Can't write to config file";
     if (_isSDCardInserted && !_isSDCardActive) {
         _isSDCardActive = SD.begin(BUILTIN_SDCARD);
     }
@@ -472,7 +473,9 @@ void DisplayController::writeToConfigFile() {
             fileContent = fileContent.substring(0, lastColonPosition);
         }
         else {
-            errorScreen("config_file.txt incorrectly formatted or does not exist!");
+            error = "config_file.txt incorrectly formatted or does not exist!";
+            error += "recreate config file and restart test";
+            errorScreen(error);
         }
 
         SD.remove("config_file.txt");
@@ -484,16 +487,16 @@ void DisplayController::writeToConfigFile() {
             _restartFile.close();
         } else {
             error = "Error writing to config_file.txt";
-            errorScreen(error);
+            errorScreen(error, 2);
         }
     } else {
-        errorScreen(error);
+        errorScreen(error, 2);
     }
 }
 
 void DisplayController::readConfigFile() {
     _isSDCardInserted = digitalRead(_SD_detect_pin);
-    String error = "No SD Card!    Insert and hit RESET switch";
+    String error = "No SD Card! Can't read config file";
     if (_isSDCardInserted && !_isSDCardActive) {
         _isSDCardActive = SD.begin(BUILTIN_SDCARD);
     }
@@ -536,8 +539,8 @@ void DisplayController::readConfigFile() {
             _restartFile.close();
         }
         else {
-            error = "Error writing to config_file.txt";
-            errorScreen(error, 5);
+            error = "Error reading config_file.txt file";
+            errorScreen(error);
         }
     }
     else {
@@ -575,7 +578,10 @@ void DisplayController::updateLCD(const String& test_status_str) {
         }
         else {
             _isScreenUpdate = !_isScreenUpdate;
+            printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status_str);
+            printFourColumnRow(1, "P:", pressure +"psi", " Loop:", loops_str);
             printRowPair(0, 2, MAX_CHARS_PER_LINE, "Torque:", torques_str);
+            printFourColumnRow(3, "Seal:", seal_temp_str, " Sump:", sump_temp_str);
             }
     }
 }
