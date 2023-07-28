@@ -33,8 +33,6 @@ uint32_t current_loop_count = 0;
 uint32_t requested_loops = 0;
 bool torqueRequested = false;
 
-elapsedMillis airValveTimer;
-
 enum ProgramState {
   STATE_STANDBY,
   STATE_HEATING,
@@ -130,13 +128,11 @@ void loop() {
         rtm.updateLCD(test_status_str);
         rtm.turnOffHeaters();
       }
-      // break;
       return;
 
     case STATE_HEATING:
       rtm.updateLCD(test_status_str);
       rtm.computeHeaterOutput();
-      // rtm.writeToDataFile();
       if (!rtm.getRunSwitch()) {
         test_status_str = "PAUSED";
         currentState = STATE_PAUSED;
@@ -157,7 +153,6 @@ void loop() {
         test_status_str = "RUNNING";
         rtm.writeToLog(test_status_str, "STATUS");
       }
-      // break;
       return;
 
     case STATE_RUNNING:
@@ -174,7 +169,6 @@ void loop() {
       else if(torqueRequested) {
         torqueRequested = false;
         rtm.readTorque();
-        //delay(100);
       }
       else if (rtm.getResetSwitch()) {
         test_status_str = "RESETTING";
@@ -185,7 +179,6 @@ void loop() {
         test_status_str = "PAUSED";
         rtm.writeToLog(test_status_str, "STATUS");
       }
-      // break;
       return;  
 
     case STATE_PAUSED:
@@ -253,7 +246,6 @@ void loop() {
           currentState = STATE_STANDBY;
         }
       }
-      // break;
       return;
   }
 }

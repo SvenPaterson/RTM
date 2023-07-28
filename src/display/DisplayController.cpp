@@ -22,7 +22,8 @@ DisplayController::DisplayController() : _heaterPIDControl(&_input, &_output, &_
     _resetSwitch = NULL;
 }
 
-// INIT FUNCTIONS
+
+
 void DisplayController::setTempSetpoint(const double& setpoint,
                                         const double& deltaT_safety,
                                         const bool& units) {
@@ -238,7 +239,8 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
 }
 
 
-// TEST PROGRAM LOGIC
+
+
 void DisplayController::update(const uint32_t& loop_count) {
     if (loop_count != _current_loop_count) {
         _current_loop_count = loop_count;
@@ -294,7 +296,9 @@ uint32_t DisplayController::getCurrentLoopCount() {
     return _current_loop_count;
 }
 
-// HEATING //
+
+
+
 void DisplayController::computeHeaterOutput(const unsigned int& interval) {
     double deltaT = _sump_temp - _setpoint_temp;
     if (_PIDTimer > 3600000 && deltaT < -5) {
@@ -329,7 +333,9 @@ double DisplayController::getSetpointTemp() {
     return _setpoint_temp;
 }
 
-// SENSORS
+
+
+
 void DisplayController::readTorque() {
     uint32_t pwm_high_val = pulseIn(_torque_pin, HIGH, 100000);
     uint32_t pwm_low_val = pulseIn(_torque_pin, LOW, 100000);
@@ -368,7 +374,8 @@ bool DisplayController::getResetSwitch() {
 }
 
 
-// LOGGING TO SD
+
+
 void DisplayController::writeToLog(const String& msg, const String& type,
                                    const bool& first) {
     String log, error = "Error writing to log file! Check SD card health";
@@ -399,7 +406,7 @@ void DisplayController::writeToLog(const String& msg, const String& type,
 
 void DisplayController::writeToDataFile() {
     _isSDCardInserted = digitalRead(_SD_detect_pin);
-    String error = "No SD Card!    Insert and hit RESET switch";
+    String error = "No SD Card Inserted! Data wont be saved";
     String unit = "F";
     if (_temp_units) unit = "C";
     if (_isSDCardInserted && !_isSDCardActive) {
@@ -433,7 +440,7 @@ void DisplayController::writeToDataFile() {
         } 
     }
     else {
-        errorScreen(error);
+        messageScreen(error, 5);
     }
 }
 
@@ -539,7 +546,8 @@ void DisplayController::readConfigFile() {
 }
 
 
-// LCD SCREEN
+
+
 void DisplayController::updateLCD(const String& test_status_str) {
     String loops_str = _current_loop_count;
     String seal_temp_str = tempToStrLCD(_seal_temp, _temp_units);
@@ -677,7 +685,8 @@ void DisplayController::errorScreen(const String& msg, const int& time) {
 }
 
 
-// HELPER FUNCTIONS
+
+
 String DisplayController::rightJustifiedString(const String& str) {
     /* Function returns a String with enough padding
     * prepended for the LCD screen to right justify the text
