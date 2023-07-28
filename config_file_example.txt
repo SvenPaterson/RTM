@@ -1,0 +1,22 @@
+NOTES: This is the config file for the RTM display controller.
+The controller will read in the config and update certain 
+parameters for the program to run. The controller will also
+update the file with the number of loops run so that the test 
+can be restored after a power interruption.
+
+The 'deltaT safety' is the allowable temperature above the
+setpoint i.e. the seal is generating heat and overheating 
+the chamber. It is not advisable to set this number lower 
+than 5degF or 3degC otherwise your test will be interrupted
+with a "Heater Runaway" warning.
+
+DO NOT CHANGE THE TEXT PRECEEDING THE ':'!!!
+
+
+Required number of loops: 20
+Record data at interval(secs) of: 5
+Temperature setpoint: 85
+deltaT safety: 25
+Temp units (1 -> degC, 0 -> degF): 0
+
+Test currently on loop: 0

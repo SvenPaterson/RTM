@@ -3,6 +3,7 @@
 #include <TimeLib.h>
 #include <Bounce2.h>
 
+#include <avr/wdt.h>
 #include "DisplayController.h"
 
 // define the board I/O pin numbers
@@ -24,25 +25,15 @@
 #define PRGM_RESET_BUS_PIN 20
 
 // Initialize DisplayController
-DisplayController displayController;
+DisplayController rtm;
 
 // TEST CONTROL
 String msg, test_status_str = "STANDBY";
-uint32_t loop_count = 0;
-
-// TEST PARAMETERS
-// will eventually be set by SD card
-double temp_setpoint = 75.0; // will be set by SD card file
-bool temp_units = false; // 'false' for farenheit, 'true' for celcius
-double detlaT_safety = 10.0; // Max temp limit for seal = deltaT_safety+temp_setpoint
-uint32_t total_loops = 30;
-
-// TEST LOGIC
-bool hasTestStarted = false;
-bool hasTestFinished = false;
-bool isPreHeated = false;
+uint32_t current_loop_count = 0;
+uint32_t requested_loops = 0;
 bool torqueRequested = false;
-bool isSDCardInserted = false;
+
+elapsedMillis airValveTimer;
 
 enum ProgramState {
   STATE_STANDBY,
@@ -54,7 +45,7 @@ enum ProgramState {
 };
 ProgramState currentState = STATE_STANDBY;
 
-// INTERRUPT VOLITILE VARIABLES
+// INTERRUPT VOLATILE VARIABLES
 volatile unsigned long start_micros = 0;
 volatile unsigned long end_micros = 0;
 
@@ -64,7 +55,8 @@ String srcfile_details();
 void loopPinRisingEdge();
 void loopPinFallingEdge();
 void torquePinRisingEdge();
-void beginSDCard();
+
+String source_file = srcfile_details();
 
 /* ----------------------------- INTIAL SETUP ----------------------------- */
 void setup() {
@@ -93,177 +85,170 @@ void setup() {
   // Initialize bus pins and attach interrupts
   pinMode(LOOP_BUS_PIN, INPUT_PULLDOWN);
   pinMode(TORQ_FLAG_BUS_PIN, INPUT_PULLDOWN);
-  //pinMode(SD_DETECT_PIN, INPUT_PULLDOWN);
   attachInterrupt(digitalPinToInterrupt(LOOP_BUS_PIN), loopPinRisingEdge, RISING);
   attachInterrupt(digitalPinToInterrupt(TORQ_FLAG_BUS_PIN), torquePinRisingEdge, RISING);
-  attachInterrupt(digitalPinToInterrupt(SD_DETECT_PIN), beginSDCard, RISING);
-  // does beginSDcard even need to be an interrupt if I am updating the 
-  // displayController._isSDCardInserted bool every loop????
 
-  // Initialize the displayController
-  displayController.begin(pinMappings);
+  // Initialize the rtm
+  rtm.begin(pinMappings);
 
   // Display source file version on LCD
-  String source_file = srcfile_details();
-  displayController.messageScreen(source_file);
-  displayController.writeToLog(source_file, "INFO");
+  rtm.messageScreen(source_file);
+  rtm.writeToLog(source_file, "INFO");
   delay(5000);
 
   // measure ambient lab pressure and automatically set offset
-  displayController.setPressureOffset();
+  rtm.setPressureOffset();
 
-  // set recording interval, in seconds
-  displayController.setRecordInterval(5);
-
-  // Initialize the heater band PID loop
-  displayController.setTempSetpoint(temp_setpoint, detlaT_safety, temp_units);
 
   // Clear screen to begin test protocol
   Serial.println("Test Status: " + test_status_str);
-  displayController.writeToLog("Display Controller initialized", "STATUS");
-  displayController.lcd.clear();
+  rtm.writeToLog("Display Controller initialized", "STATUS");
+  rtm.lcd.clear();
+
+  requested_loops = rtm.getRequestedNumberOfLoops();
+  current_loop_count = rtm.getCurrentLoopCount();
 }
 
 /* -------------------------------- MAIN LOOP -------------------------------- */
 void loop() {
-  if (loop_count <= total_loops) {
-    displayController.update(loop_count);
+  if (current_loop_count <= requested_loops) {
+    rtm.update(current_loop_count);
   }
 
   switch (currentState) {
     case STATE_STANDBY:
-      if (displayController.getRunSwitch()) {
+      if (rtm.getRunSwitch()) {
         currentState = STATE_HEATING;
         test_status_str = "HEATING";
-        displayController.writeToLog(test_status_str, "STATUS");
+        rtm.writeToLog(test_status_str, "STATUS");
       }
-      else if (displayController.getResetSwitch()) {
+      else if (rtm.getResetSwitch()) {
         currentState = STATE_RESET_REQUESTED;
         test_status_str = "RESETTING";
       }
       else {
-        displayController.updateLCD(test_status_str);
-        displayController.turnOffHeaters();
+        rtm.updateLCD(test_status_str);
+        rtm.turnOffHeaters();
       }
       // break;
       return;
 
     case STATE_HEATING:
-      displayController.updateLCD(test_status_str);
-      displayController.computeHeaterOutput();
-      // displayController.writeToDataFile();
-      if (!displayController.getRunSwitch()) {
+      rtm.updateLCD(test_status_str);
+      rtm.computeHeaterOutput();
+      // rtm.writeToDataFile();
+      if (!rtm.getRunSwitch()) {
         test_status_str = "PAUSED";
         currentState = STATE_PAUSED;
-        displayController.writeToLog(test_status_str, "STATUS");
+        rtm.writeToLog(test_status_str, "STATUS");
       }
-      else if (displayController.getSumpTemp() < temp_setpoint) {
-        displayController.stopProgram();
-        displayController.updateLCD(test_status_str);
-        displayController.armHeaters();
-        displayController.computeHeaterOutput();
+      else if (rtm.getSumpTemp() < rtm.getSetpointTemp()) {
+        rtm.stopProgram();
+        rtm.updateLCD(test_status_str);
+        rtm.armHeaters();
+        rtm.computeHeaterOutput();
       }
-      else if (displayController.getResetSwitch()) {
+      else if (rtm.getResetSwitch()) {
         test_status_str = "RESETTING";
         currentState = STATE_RESET_REQUESTED;
       }
       else {
         currentState = STATE_RUNNING;
         test_status_str = "RUNNING";
-        displayController.writeToLog(test_status_str, "STATUS");
+        rtm.writeToLog(test_status_str, "STATUS");
       }
       // break;
       return;
 
     case STATE_RUNNING:
-      displayController.updateLCD(test_status_str);
-      displayController.runProgram();
-      displayController.computeHeaterOutput();
-      displayController.writeToDataFile();
-      if (loop_count >= total_loops) {
+      rtm.updateLCD(test_status_str);
+      rtm.runProgram();
+      rtm.computeHeaterOutput();
+      rtm.writeToDataFile();
+      if (current_loop_count >= requested_loops) {
         currentState = STATE_TEST_COMPLETED;
         test_status_str = "TEST DONE";
-        displayController.writeToLog(test_status_str, "STATUS");
+        rtm.writeToLog(test_status_str, "STATUS");
 
       }
       else if(torqueRequested) {
         torqueRequested = false;
-        displayController.readTorque();
+        rtm.readTorque();
         //delay(100);
       }
-      else if (displayController.getResetSwitch()) {
+      else if (rtm.getResetSwitch()) {
         test_status_str = "RESETTING";
         currentState = STATE_RESET_REQUESTED;
       }
-      if (!displayController.getRunSwitch()) {
+      if (!rtm.getRunSwitch()) {
         currentState = STATE_PAUSED;
         test_status_str = "PAUSED";
-        displayController.writeToLog(test_status_str, "STATUS");
+        rtm.writeToLog(test_status_str, "STATUS");
       }
       // break;
       return;  
 
     case STATE_PAUSED:
-      displayController.updateLCD(test_status_str);
-      displayController.stopProgram();
-      displayController.turnOffHeaters();
-      if (displayController.getRunSwitch()) {
+      rtm.updateLCD(test_status_str);
+      rtm.stopProgram();
+      rtm.turnOffHeaters();
+      if (rtm.getRunSwitch()) {
         currentState = STATE_HEATING;
         test_status_str = "HEATING";
-        displayController.writeToLog(test_status_str, "STATUS");
+        rtm.writeToLog(test_status_str, "STATUS");
       }
-      else if (displayController.getResetSwitch()) {
+      else if (rtm.getResetSwitch()) {
         currentState = STATE_RESET_REQUESTED;
         test_status_str = "RESETTING";
       }
-      // break;
       return;
 
     case STATE_TEST_COMPLETED:
-      displayController.updateLCD(test_status_str);
-      displayController.lcd.setBacklight(0,255,0);
-      displayController.turnOffHeaters();
-      displayController.stopProgram();
-      if(displayController.getResetSwitch()) {
+      rtm.updateLCD(test_status_str);
+      rtm.lcd.setBacklight(0,255,0);
+      rtm.turnOffHeaters();
+      rtm.stopProgram();
+      if(rtm.getResetSwitch()) {
         test_status_str = "RESETTING";
         currentState = STATE_RESET_REQUESTED;
-        displayController.lcd.setBacklight(255,255,255);
+        rtm.lcd.setBacklight(255,255,255);
       }
-      // break;
       return;
 
     case STATE_RESET_REQUESTED:
-      if (!displayController.getResetSwitch() && loop_count < total_loops) {
+      Serial.print("requested_loops: ");
+      Serial.println(requested_loops);
+      if (!rtm.getResetSwitch() && current_loop_count < requested_loops) {
         test_status_str = "PAUSED";
         currentState = STATE_PAUSED;
-        displayController.writeToLog(test_status_str, "STATUS");
+        rtm.writeToLog(test_status_str, "STATUS");
       }
-      else if (!displayController.getResetSwitch() && loop_count >= total_loops) {
+      else if (!rtm.getResetSwitch() && current_loop_count >= requested_loops) {
         test_status_str = "TEST DONE";
         currentState = STATE_TEST_COMPLETED;
-        displayController.writeToLog(test_status_str, "STATUS");
+        rtm.writeToLog(test_status_str, "STATUS");
       }
       else {
-        displayController.updateLCD(test_status_str);
-        displayController.turnOffHeaters();
-        displayController.stopProgram();
+        rtm.updateLCD(test_status_str);
+        rtm.turnOffHeaters();
+        rtm.stopProgram();
         msg = "Test will be RESET in:";
-        displayController.messageScreen(msg);
+        rtm.messageScreen(msg);
         for (int i = 10; i > 0; i--) {
-          displayController.messageScreen(msg, false, String(i) + " seconds");
+          rtm.messageScreen(msg, false, String(i) + " seconds");
           delay(1000);
-          displayController.update(loop_count);
-          if (!displayController.getResetSwitch()) {
+          rtm.update(current_loop_count);
+          if (!rtm.getResetSwitch()) {
             i = 0; // kick out of reset loop
-            displayController.lcd.clear();
+            rtm.lcd.clear();
           }
         }
-        if (displayController.getResetSwitch()) {
-          loop_count = 0;
-          displayController.writeToLog("RESET", "STATUS");
-          displayController.resetTest();
-          displayController.messageScreen(srcfile_details());
+        if (rtm.getResetSwitch()) {
+          current_loop_count = 0;
+          rtm.resetTest();
+          rtm.messageScreen(source_file);
           delay(4000);
+          rtm.lcd.clear();
           test_status_str = "STANDBY";
           currentState = STATE_STANDBY;
         }
@@ -340,7 +325,7 @@ void loopPinFallingEdge() {
   end_micros = micros();
   volatile unsigned long duration = (end_micros - start_micros);
    if ((duration >= 990 && duration < 1010)) {
-    loop_count++;
+    current_loop_count++;
   }
   attachInterrupt(digitalPinToInterrupt(LOOP_BUS_PIN), loopPinRisingEdge, RISING);
 }
@@ -349,6 +334,7 @@ void torquePinRisingEdge() {
   torqueRequested = true;
 }
 
-void beginSDCard() {
-  isSDCardInserted = true;
+void resetFunc() {
+  wdt_enable(WDTO_15MS);
+  while (true) {}
 }

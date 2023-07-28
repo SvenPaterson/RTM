@@ -1,14 +1,13 @@
 TODO LIST:
 
-# verify that the air_valve_pin matches the state of the supply_pus_pin with led
-also make sure that the logic preventing writing to pin every loop is working.
-
-# Build the startup/recovery file, reset needs to reset the stored loops in the recovery file
 
 # add duration in hrs to 2nd line left column and move Pressure to third line,
 move setpoint to SP on 2nd column of 3rd line
 
 
 ---- WORKING ON ----- 
-
-# when reset occurs the writeToDataFile needs to handle writing a new header line
+# Build the startup/recovery file, reset needs to reset the stored loops in the recovery file
+    -   functionality built
+    -   need to test the loop count is saving to file
+    -   need to test if loop_count will be restored on power up
+    

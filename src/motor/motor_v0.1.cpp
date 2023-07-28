@@ -15,8 +15,9 @@
 #define SDL0_PIN 19
 #define RESET_BUS_PIN 20
 
-elapsedMillis test;
+elapsedMillis test, air;
 String str = "test";
+bool air_flip = true; 
 
 void setup() {
   Serial.begin(112500);
@@ -24,6 +25,9 @@ void setup() {
   pinMode(LOOP_BUS_PIN, OUTPUT);
   pinMode(PRGM_RUN_BUS_PIN, INPUT_PULLDOWN);
   pinMode(TORQ_FLAG_BUS_PIN, OUTPUT);
+  pinMode(AIR_DUMP_BUS_PIN, OUTPUT);
+  pinMode(AIR_SUPPLY_BUS_PIN, OUTPUT);
+  pinMode(LED_BUILTIN, OUTPUT);
 }
 
 void loop() {
@@ -41,6 +45,13 @@ void loop() {
       digitalWrite(TORQ_FLAG_BUS_PIN, LOW);
     }
   }
-
+  
+  if (air > 1000) {
+    air = 0;
+    digitalWrite(AIR_SUPPLY_BUS_PIN, air_flip);
+    air_flip = !air_flip;
+    digitalWrite(AIR_DUMP_BUS_PIN, air_flip);
+    digitalWrite(LED_BUILTIN, air_flip);
+  }
   
 }

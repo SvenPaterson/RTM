@@ -22,7 +22,7 @@ DisplayController::DisplayController() : _heaterPIDControl(&_input, &_output, &_
     _resetSwitch = NULL;
 }
 
-
+// INIT FUNCTIONS
 void DisplayController::setTempSetpoint(const double& setpoint,
                                         const double& deltaT_safety,
                                         const bool& units) {
@@ -49,6 +49,38 @@ void DisplayController::setTempSetpoint(const double& setpoint,
     delay(3000);
 }
 
+void DisplayController::setRecordInterval(const uint8_t& interval) {
+    _record_interval = interval;
+}
+
+void DisplayController::setPressureOffset(const uint8_t& num_meas) {
+    digitalWrite(_supply_valve_pin, LOW);
+    digitalWrite(_dump_valve_pin, HIGH);
+    String status, msg = "Determining zero offset for pressure sensor:";
+    writeToLog(msg);
+    elapsedMillis avgPressTimer, sampleTimer;
+    messageScreen(msg);
+    uint8_t sample_count = 0;
+    _press_offset = 0;
+    unsigned int duration = (num_meas + 1) * 1000;
+    while (avgPressTimer <= duration) {
+        if (sampleTimer > 1000) {
+            update(0);
+            _press_offset += _abs_pressure;
+            sample_count++;  
+            sampleTimer = 0;
+            status = "please wait... " + String(sample_count) + "s";
+            Serial.println("    " + status);
+            messageScreen(msg, false, status);
+        }
+    }
+    _press_offset /= sample_count;
+    status = "offset by " + String(_press_offset) + " psi";
+    writeToLog("Pressure " + status, "INFO");
+    messageScreen(msg, false, status);
+    delay(3000);
+}
+
 void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     /*
     {"SD_DETECT_PIN", SD_DETECT_PIN},
@@ -67,10 +99,10 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     {"SDA0_PIN", SDA0_PIN}, 
     {"SDL0_PIN", SDL0_PIN},
     {"PRGM_RESET_BUS_PIN", PRGM_RESET_BUS_PIN}
-    */
+    */   
 
     // Initialize the teensy board time
-    setSyncProvider(_getTeensyTime);    
+    setSyncProvider(_getTeensyTime); 
 
     _pinMappings = pinMappings;
     _SD_detect_pin = pinMappings.at("SD_DETECT_PIN");
@@ -100,6 +132,7 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     pinMode(_reset_sw_pin, INPUT_PULLDOWN);
     pinMode(_heat_safety_pin, OUTPUT);
     pinMode(_heat_output_pin, OUTPUT);
+    pinMode(LED_BUILTIN, OUTPUT);
 
     digitalWrite(_heat_safety_pin, LOW);
     digitalWrite(_heat_output_pin, LOW);
@@ -118,14 +151,14 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
 
     // Initialize the I2C bus
     Wire.begin();
-    Serial.println("i2c bus initialized");
+    Serial.println(" - i2c bus initialized");
 
     // Initialize the LCD screen
     lcd.begin(Wire);
     lcd.setBacklight(RGB_WHITE);
     lcd.setContrast(5);
     lcd.clear();
-    Serial.println("lcd screen initialized");
+    Serial.println(" - lcd screen initialized");
 
     // Initialize the SD Card
     _isSDCardInserted = digitalRead(_SD_detect_pin);
@@ -149,6 +182,9 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
         errorScreen(msg);
     }
     
+    // Read program file to get test parameters 
+    readConfigFile();
+
     // Initialize seal thermocouple sensor
     msg = "Seal TC sensor initialized";
     _seal_fault = !_sealTempSensor.begin(_SEAL_TC_ADDR);
@@ -201,6 +237,64 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     writeToLog(msg);
 }
 
+
+// TEST PROGRAM LOGIC
+void DisplayController::update(const uint32_t& loop_count) {
+    if (loop_count != _current_loop_count) {
+        _current_loop_count = loop_count;
+        writeToConfigFile();
+    }
+    _seal_temp = _sealTempSensor.getThermocoupleTemp(_temp_units);
+    _sump_temp = _sumpTempSensor.getThermocoupleTemp(_temp_units);
+    _abs_pressure = _pressSensor.readPressure();
+    _rel_pressure = _abs_pressure - _press_offset;
+    _runSwitch->update();
+    _resetSwitch->update();
+    bool askingForPressure = digitalRead(_supply_bus_pin) ? HIGH : LOW;
+    digitalWrite(_supply_valve_pin, askingForPressure);
+    bool dump_state = digitalRead(_dump_bus_pin) ? HIGH : LOW;
+    digitalWrite(_dump_valve_pin, dump_state);
+    _isSDCardInserted = digitalRead(_SD_detect_pin);
+    if (!_isSDCardInserted) {
+        _isSDCardActive = false;
+    }
+}
+
+void DisplayController::runProgram() {
+    digitalWrite(_run_bus_pin, HIGH);
+}
+
+void DisplayController::resetTest() {
+    readConfigFile();
+    _current_loop_count = 0;
+    writeToConfigFile();
+    writeToLog("RESET", "STATUS");
+    lcd.clear();
+    digitalWrite(_reset_bus_pin, HIGH);
+    delay(10);
+    digitalWrite(_reset_bus_pin, LOW);
+    _hasHeaderBeenWritten = false;
+    //writeToDataFile();
+    setPressureOffset();
+}
+
+void DisplayController::stopProgram() {
+    digitalWrite(_run_bus_pin, LOW);
+}
+
+void DisplayController::resetProgram() {
+    digitalWrite(_reset_bus_pin, HIGH);
+}
+
+uint32_t DisplayController::getRequestedNumberOfLoops() {
+    return _requested_loops;
+}
+
+uint32_t DisplayController::getCurrentLoopCount() {
+    return _current_loop_count;
+}
+
+// HEATING //
 void DisplayController::computeHeaterOutput(const unsigned int& interval) {
     double deltaT = _sump_temp - _setpoint_temp;
     if (_PIDTimer > 3600000 && deltaT < -5) {
@@ -231,51 +325,11 @@ void DisplayController::armHeaters() {
     }
 }
 
-void DisplayController::update(const uint32_t& loop_count) {
-    _loop_count = loop_count;
-    _seal_temp = _sealTempSensor.getThermocoupleTemp(_temp_units);
-    _sump_temp = _sumpTempSensor.getThermocoupleTemp(_temp_units);
-    _abs_pressure = _pressSensor.readPressure();
-    _rel_pressure = _abs_pressure - _press_offset;
-    _runSwitch->update();
-    _resetSwitch->update();
-    bool askingForPressure = digitalRead(_supply_bus_pin) ? HIGH : LOW;
-    digitalWrite(_supply_valve_pin, askingForPressure);
-    bool dump_state = digitalRead(_dump_bus_pin) ? HIGH : LOW;
-    digitalWrite(_dump_valve_pin, dump_state);
-    _isSDCardInserted = digitalRead(_SD_detect_pin);
-    if (!_isSDCardInserted) {
-        _isSDCardActive = false;
-    }
+double DisplayController::getSetpointTemp() {
+    return _setpoint_temp;
 }
 
-void DisplayController::setPressureOffset(const uint8_t& num_meas) {
-    digitalWrite(_supply_valve_pin, LOW);
-    digitalWrite(_dump_valve_pin, HIGH);
-    String status, msg = "Determining zero offset for pressure sensor:";
-    writeToLog(msg);
-    elapsedMillis avgPressTimer, sampleTimer;
-    messageScreen(msg);
-    uint8_t sample_count = 0;
-    unsigned int duration = (num_meas + 1) * 1000;
-    while (avgPressTimer <= duration) {
-        if (sampleTimer > 1000) {
-            update(0);
-            _press_offset += _abs_pressure;
-            sample_count++;  
-            sampleTimer = 0;
-            status = "please wait... " + String(sample_count) + "s";
-            Serial.println("    " + status);
-            messageScreen(msg, false, status);
-        }
-    }
-    _press_offset /= sample_count;
-    status = "offset by " + String(_press_offset) + " psi";
-    writeToLog("Pressure " + status, "INFO");
-    messageScreen(msg, false, status);
-    delay(3000);
-}
-
+// SENSORS
 void DisplayController::readTorque() {
     uint32_t pwm_high_val = pulseIn(_torque_pin, HIGH, 100000);
     uint32_t pwm_low_val = pulseIn(_torque_pin, LOW, 100000);
@@ -291,29 +345,6 @@ void DisplayController::readTorque() {
         }
     }
     Serial.println("torque measured!");
-}
-
-void DisplayController::runProgram() {
-    digitalWrite(_run_bus_pin, HIGH);
-}
-
-void DisplayController::resetTest() {
-    _loop_count = 0;
-    lcd.clear();
-    delay(2000);
-    digitalWrite(_reset_bus_pin, HIGH);
-    delay(10);
-    digitalWrite(_reset_bus_pin, LOW);
-    //writeToDataFile();
-    setPressureOffset();
-}
-
-void DisplayController::stopProgram() {
-    digitalWrite(_run_bus_pin, LOW);
-}
-
-void DisplayController::resetProgram() {
-    digitalWrite(_reset_bus_pin, HIGH);
 }
 
 double DisplayController::getSealTemp() {
@@ -336,6 +367,8 @@ bool DisplayController::getResetSwitch() {
     return _resetSwitch->read();
 }
 
+
+// LOGGING TO SD
 void DisplayController::writeToLog(const String& msg, const String& type,
                                    const bool& first) {
     String log, error = "Error writing to log file! Check SD card health";
@@ -364,9 +397,6 @@ void DisplayController::writeToLog(const String& msg, const String& type,
     }
 }
 
-void DisplayController::setRecordInterval(const uint8_t& interval) {
-    _record_interval = interval;
-}
 void DisplayController::writeToDataFile() {
     _isSDCardInserted = digitalRead(_SD_detect_pin);
     String error = "No SD Card!    Insert and hit RESET switch";
@@ -380,19 +410,19 @@ void DisplayController::writeToDataFile() {
         _dataFile = SD.open("test_data.csv", FILE_WRITE);
         if (_dataFile) {
             if (!_hasHeaderBeenWritten) {
-                String header = "Datetime,Loop,Press(psi),";
-                header += "SealTemp(\xB0" + unit + "),SumpTemp(\xB0";
-                header += unit + "),CW_Torque(Nm),CCW_Torque(Nm)";
-                _dataFile.println(header);
+                String header_str = "Datetime,Loop,Press(psi),";
+                header_str += "SealTemp(\xB0" + unit + "),SumpTemp(\xB0";
+                header_str += unit + "),CW_Torque(Nm),CCW_Torque(Nm)";
+                _dataFile.println(header_str);
+                writeToLog("data logging to test_data.csv started", "LOG");
                 _hasHeaderBeenWritten = true;
             }
-            else if (_dataLoggerTimer > (_record_interval*1000)) {
-                String data = getDateStr() + " " + getTimeStr() + ",";
-                data += String(_loop_count) + "," + String(_rel_pressure);
-                data += "," + String(_seal_temp) + "," + String(_sump_temp);
-                data += "," + String(_cw_torque) + "," + String(_ccw_torque);
-                _dataFile.println(data);
-                writeToLog("data logged to test_data.csv", "LOG");
+            if (_dataLoggerTimer > (_record_interval*1000)) {
+                String data_str = getDateStr() + " " + getTimeStr() + ",";
+                data_str += String(_current_loop_count) + "," + String(_rel_pressure);
+                data_str += "," + String(_seal_temp) + "," + String(_sump_temp);
+                data_str += "," + String(_cw_torque) + "," + String(_ccw_torque);
+                _dataFile.println(data_str);
                 _dataFile.close();
                 _dataLoggerTimer = 0;
             }
@@ -407,11 +437,140 @@ void DisplayController::writeToDataFile() {
     }
 }
 
-void DisplayController::writeToSpecFile() {
+void DisplayController::writeToConfigFile() {
     _isSDCardInserted = digitalRead(_SD_detect_pin);
+    String error = "No SD Card!    Insert and hit RESET switch";
+    if (_isSDCardInserted && !_isSDCardActive) {
+        _isSDCardActive = SD.begin(BUILTIN_SDCARD);
+    }
+    if (_isSDCardActive) {
+        _restartFile = SD.open("config_file.txt", FILE_READ);
+        String fileContent = "";
+        int lastColonPosition = -1; // Initialize the position to -1 (not found)
+        int currentPosition = 0;
+
+        while (_restartFile.available()) {
+            char c = _restartFile.read();
+            if (c == ':') {
+                lastColonPosition = currentPosition;
+            }
+            fileContent += c;
+            currentPosition++;
+        }
+        _restartFile.close();
+
+        // fileContent contains the entire content of the file
+        // lastColonPosition holds the index of the last colon found.
+        if (lastColonPosition != -1) {
+            fileContent = fileContent.substring(0, lastColonPosition);
+        }
+        else {
+            errorScreen("config_file.txt incorrectly formatted or does not exist!");
+        }
+
+        SD.remove("config_file.txt");
+        _restartFile = SD.open("config_file.txt", FILE_WRITE);
+        if (_restartFile) {
+            _restartFile.print(fileContent);
+            _restartFile.print(": ");
+            _restartFile.println(_current_loop_count);
+            _restartFile.close();
+        } else {
+            error = "Error writing to config_file.txt";
+            errorScreen(error);
+        }
+    } else {
+        errorScreen(error);
+    }
 }
 
-/****** LCD SCREEN FUNCTION DEFINITIONS ******/
+void DisplayController::readConfigFile() {
+    _isSDCardInserted = digitalRead(_SD_detect_pin);
+    String error = "No SD Card!    Insert and hit RESET switch";
+    if (_isSDCardInserted && !_isSDCardActive) {
+        _isSDCardActive = SD.begin(BUILTIN_SDCARD);
+    }
+    if (_isSDCardActive) {
+        _restartFile = SD.open("config_file.txt", FILE_READ);
+        if (_restartFile) {
+            // Read the lines and update the variables
+            while (_restartFile.available()) {
+                String line = _restartFile.readStringUntil('\n');
+                line.trim(); // Remove leading/trailing whitespaces
+
+                // Parse the line based on the delimiter ':'
+                int delimiterIndex = line.indexOf(':');
+                if (delimiterIndex >= 0) {
+                    String key = line.substring(0, delimiterIndex);
+                    String value = line.substring(delimiterIndex + 1);
+                    value.trim(); // Remove leading/trailing whitespaces
+                    
+                    // Update the corresponding variable based on the key
+                    if (key == "Required number of loops") {
+                        _requested_loops = value.toInt();
+                    }
+                    else if (key == "Record data at interval(secs) of") {
+                        _record_interval = value.toInt();
+                    }
+                    else if (key == "Temperature setpoint") {
+                        _setpoint_temp = value.toFloat();
+                    }
+                    else if (key == "deltaT safety") {
+                        _deltaT_safety = value.toFloat();
+                    }
+                    else if (key == "Temp units (1 -> degC, 0 -> degF)") {
+                        _temp_units = value.toInt();
+                    }
+                    else if (key == "Test currently on loop") {
+                        _current_loop_count = value.toInt();
+                    }
+                }
+            }
+            _restartFile.close();
+        }
+        else {
+            error = "Error writing to config_file.txt";
+            errorScreen(error, 5);
+        }
+    }
+    else {
+        errorScreen(error);
+    }
+}
+
+
+// LCD SCREEN
+void DisplayController::updateLCD(const String& test_status_str) {
+    String loops_str = _current_loop_count;
+    String seal_temp_str = tempToStrLCD(_seal_temp, _temp_units);
+    String sump_temp_str = tempToStrLCD(_sump_temp, _temp_units);
+    String pressure = String(_rel_pressure);
+
+    /**** DEBUGGING ONLY!!! ****/
+    //pressure = "12.3";
+    double _cw_torque = 1.26;
+    double _ccw_torque = -0.98;
+    /***************************/
+
+    String torques_str = String(_ccw_torque) + " / " + String(_cw_torque);
+    String set_point_str = tempToStrLCD(_setpoint_temp, _temp_units);
+    String date = String(month()) + "/" + String(day());
+    String time = String(hour()) + ":" + String(minute(), 2);
+    if (_screenTimer > SCREEN_REFRESH_INTERVAL) {
+        _screenTimer = 0;
+        if (_isScreenUpdate) {
+            _isScreenUpdate = !_isScreenUpdate;
+            printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status_str);
+            printFourColumnRow(1, "P:", pressure +"psi", " Loop:", loops_str);
+            printRowPair(0, 2, MAX_CHARS_PER_LINE, "Setpoint:", set_point_str);
+            printFourColumnRow(3, "Seal:", seal_temp_str, " Sump:", sump_temp_str); 
+        }
+        else {
+            _isScreenUpdate = !_isScreenUpdate;
+            printRowPair(0, 2, MAX_CHARS_PER_LINE, "Torque:", torques_str);
+            }
+    }
+}
 
 void DisplayController::messageScreen(const String& msg,
                                       const bool& cls,
@@ -517,6 +676,8 @@ void DisplayController::errorScreen(const String& msg, const int& time) {
     }
 }
 
+
+// HELPER FUNCTIONS
 String DisplayController::rightJustifiedString(const String& str) {
     /* Function returns a String with enough padding
     * prepended for the LCD screen to right justify the text
@@ -573,43 +734,6 @@ String DisplayController::tempToStrLog(const double& temp,
   else return String(temp, 0) + "\xB0" + "F";
 }
 
-
-void DisplayController::updateLCD(const String& test_status_str) {
-    String loops_str = _loop_count;
-    String seal_temp_str = tempToStrLCD(_seal_temp, _temp_units);
-    String sump_temp_str = tempToStrLCD(_sump_temp, _temp_units);
-    String pressure = String(_rel_pressure);
-
-    /**** DEBUGGING ONLY!!! ****/
-    //pressure = "12.3";
-    double _cw_torque = 1.26;
-    double _ccw_torque = -0.98;
-    /***************************/
-
-    String torques_str = String(_ccw_torque) + " / " + String(_cw_torque);
-    String set_point_str = tempToStrLCD(_setpoint_temp, _temp_units);
-    String date = String(month()) + "/" + String(day());
-    String time = String(hour()) + ":" + String(minute(), 2);
-    if (_screenTimer > SCREEN_REFRESH_INTERVAL) {
-        _screenTimer = 0;
-        if (_isScreenUpdate) {
-            _isScreenUpdate = !_isScreenUpdate;
-            printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status_str);
-            printFourColumnRow(1, "P:", pressure +"psi", " Loop:", loops_str);
-            printRowPair(0, 2, MAX_CHARS_PER_LINE, "Setpoint:", set_point_str);
-            printFourColumnRow(3, "Seal:", seal_temp_str, " Sump:", sump_temp_str); 
-        }
-        else {
-            _isScreenUpdate = !_isScreenUpdate;
-            printRowPair(0, 2, MAX_CHARS_PER_LINE, "Torque:", torques_str);
-            }
-    }
-}
-
-time_t DisplayController::_getTeensyTime() {
-  return Teensy3Clock.get();
-}
-
 String DisplayController::getTimeStr() {
     char timeBuffer[9];
     sprintf(timeBuffer, "%02d:%02d:%02d", hour(), minute(), second());
@@ -620,4 +744,8 @@ String DisplayController::getDateStr() {
     char dateBuffer[9];
     sprintf(dateBuffer, "%02d/%02d/%04d", month(), day(), year());
     return String(dateBuffer);
+}
+
+time_t DisplayController::_getTeensyTime() {
+  return Teensy3Clock.get();
 }
