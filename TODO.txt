@@ -1,13 +1,10 @@
 TODO LIST:
+# MOTOR build initial src file similar to Eric's old code.
 
-
-# add duration in hrs to 2nd line left column and move Pressure to third line,
+# DISPLAY add duration in hrs to 2nd line left column and move Pressure to third line,
 move setpoint to SP on 2nd column of 3rd line
 
 
 ---- WORKING ON ----- 
-# Build the startup/recovery file, reset needs to reset the stored loops in the recovery file
-    -   functionality built
-    -   need to test the loop count is saving to file
-    -   need to test if loop_count will be restored on power up
+
     

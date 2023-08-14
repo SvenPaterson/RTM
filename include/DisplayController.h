@@ -14,7 +14,6 @@
 #include <SPI.h>
 #include <cmath>
 #include <avr/wdt.h>
-#include <map>
 
 #define MCP9600_DEFAULT_ADDR_ONE 0x60
 #define MCP9600_DEFAULT_ADDR_TWO 0x67

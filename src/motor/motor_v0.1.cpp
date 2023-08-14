@@ -1,9 +1,7 @@
-#include <Arduino.h>
-#include <Wire.h>
+#include "MotorController.h"
 
 // define the board I/O pin numbers
 #define LOOP_BUS_PIN 1
-#define MOTOR_HLFB_PIN 2
 #define MOTOR_STEP_PIN 3
 #define MOTOR_DIR_PIN 4
 #define MOTOR_ENABLE_PIN 5
@@ -15,32 +13,47 @@
 #define SDL0_PIN 19
 #define RESET_BUS_PIN 20
 
+MotorController rtm;
+
 elapsedMillis debugTimer;
 
 void setup() {
-  Serial.begin(112500);
-  Wire.begin();
+  // pin mappings
+  std::map<String, uint8_t> pinMappings = {
+    {"LOOP_BUS_PIN", LOOP_BUS_PIN},
+    {"MOTOR_STEP_PIN", MOTOR_STEP_PIN},
+    {"MOTOR_DIR_PIN", MOTOR_DIR_PIN},
+    {"MOTOR_ENABLE_PIN", MOTOR_ENABLE_PIN},
+    {"PRGM_RUN_BUS_PIN", PRGM_RUN_BUS_PIN},
+    {"PRGM_RESET_BUS_PIN", PRGM_RUN_BUS_PIN}, 
+    {"TORQ_FLAG_BUS_PIN", TORQ_FLAG_BUS_PIN}, 
+    {"AIR_SUPPLY_BUS_PIN", AIR_SUPPLY_BUS_PIN}, 
+    {"AIR_DUMP_BUS_PIN", AIR_DUMP_BUS_PIN}, 
+    {"SDA0_PIN", SDA0_PIN}, 
+    {"SDL0_PIN", SDL0_PIN},
+  };
+
   pinMode(LOOP_BUS_PIN, OUTPUT);
-  pinMode(PRGM_RUN_BUS_PIN, INPUT_PULLDOWN);
-  pinMode(TORQ_FLAG_BUS_PIN, OUTPUT);
-  pinMode(AIR_DUMP_BUS_PIN, OUTPUT);
-  pinMode(AIR_SUPPLY_BUS_PIN, OUTPUT);
-  pinMode(LED_BUILTIN, OUTPUT);
+  
+  rtm.begin(pinMappings);
+  rtm.setMaxSpeed(3.0);
+  rtm.setSpeed(3.0);
+  rtm.enableMotor();
 }
 
 void loop() {
+
   if (digitalRead(PRGM_RUN_BUS_PIN)) {
+    rtm.runSpeed();
+    
+
+
     if (debugTimer > 10000) {
       // simulate a 10 second loop
       digitalWrite(LOOP_BUS_PIN, HIGH);
       delay(1);
       digitalWrite(LOOP_BUS_PIN, LOW);
       debugTimer = 0;
-    }
-    if (debugTimer > 4000) {
-      digitalWrite(TORQ_FLAG_BUS_PIN, HIGH);
-      delay(10);
-      digitalWrite(TORQ_FLAG_BUS_PIN, LOW);
     }
   }  
 }

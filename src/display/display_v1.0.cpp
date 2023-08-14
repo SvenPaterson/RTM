@@ -239,6 +239,7 @@ void loop() {
         if (rtm.getResetSwitch()) {
           current_loop_count = 0;
           rtm.resetTest();
+          requested_loops = rtm.getRequestedNumberOfLoops();
           rtm.messageScreen(source_file);
           delay(4000);
           rtm.lcd.clear();
