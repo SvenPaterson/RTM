@@ -167,6 +167,14 @@ class DisplayController {
         void updateLCD(const String& test_status);
 
         /**
+         * @brief Updates the screen with the current test status.
+         * Useful for when the run or reset switch is hit by the user
+         * and the screen reflects the change immediately.
+         * @param test_status_str current status of test to be displayed
+         */
+        void statusUpdate(const String& test_status);
+
+        /**
          * @brief Interrupts with a red flashing error screen and
          * displays the provided error message. Error screen will be
          * ignored after the ignore time provided, or will halt remaining

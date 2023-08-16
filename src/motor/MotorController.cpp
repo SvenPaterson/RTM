@@ -53,19 +53,19 @@ void MotorController::enableMotor() {
 }
 
 void MotorController::setMaxSpeed(const float& max_speed) {
-    _stepper.setMaxSpeed(max_speed * _PPR);
+    _stepper.setMaxSpeed(max_speed * _PPR / 60);
 }
 
 void MotorController::setSpeed(const float& speed) {
-    _stepper.setSpeed(speed * _PPR);
+    _stepper.setSpeed(speed * _PPR / 60);
 }
 
 void MotorController::setAcceleration(const float& accel) {
     _stepper.setAcceleration(accel * _PPR);
 }
 
-void MotorController::moveTo(const uint32_t& target_pos) {
-    _stepper.moveTo(target_pos * _PPR);
+void MotorController::moveTo(const float& target_pos) {
+    _stepper.moveTo((uint32_t) (target_pos * _PPR));
 }
 
 void MotorController::runSpeed() {

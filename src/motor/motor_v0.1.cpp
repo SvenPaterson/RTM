@@ -15,7 +15,7 @@
 
 MotorController rtm;
 
-elapsedMillis debugTimer;
+elapsedMillis debugTimer, profileTimer;
 
 void setup() {
   // pin mappings
@@ -36,24 +36,28 @@ void setup() {
   pinMode(LOOP_BUS_PIN, OUTPUT);
   
   rtm.begin(pinMappings);
-  rtm.setMaxSpeed(3.0);
-  rtm.setSpeed(3.0);
+  rtm.setMaxSpeed(60.0);
+  rtm.setSpeed(30.0);
   rtm.enableMotor();
 }
 
 void loop() {
 
   if (digitalRead(PRGM_RUN_BUS_PIN)) {
-    rtm.runSpeed();
-    
-
-
-    if (debugTimer > 10000) {
+    if (profileTimer < 4000) {
+      rtm.moveTo(-0.5);
+      rtm.setSpeed(30.0);
+    }
+    else if (profileTimer > 4000 && profileTimer < 8000) {
+      rtm.moveTo(0.5);
+      rtm.setSpeed(30.0);
+    }
+    else {
       // simulate a 10 second loop
       digitalWrite(LOOP_BUS_PIN, HIGH);
       delay(1);
       digitalWrite(LOOP_BUS_PIN, LOW);
-      debugTimer = 0;
+      profileTimer = 0;
     }
   }  
 }

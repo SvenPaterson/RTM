@@ -10,12 +10,15 @@ the chamber. It is not advisable to set this number lower
 than 5degF or 3degC otherwise your test will be interrupted
 with a "Heater Runaway" warning.
 
+If you do not wish to heat the rig head, set 'Temperature
+setpoint' to 0.
+
 DO NOT CHANGE THE TEXT PRECEEDING THE ':'!!!
 
 
-Required number of loops: 20
-Record data at interval(secs) of: 5
-Temperature setpoint: 85
+Required number of loops: 100
+Record data at interval(secs) of: 10
+Temperature setpoint: 0
 deltaT safety: 25
 Temp units (1 -> degC, 0 -> degF): 0
 

@@ -14,10 +14,22 @@ class MotorController {
         void begin(const std::map<String, uint8_t>& pinMappings);
 
         void enableMotor();
+        /**
+         * @brief Set the Max Speed in rpm
+         * 
+         * @param max_speed speed in rev per minute
+         */
         void setMaxSpeed(const float& max_speed);
+
+        /**
+         * @brief Set the current speed in rpm
+         * 
+         * @param speed speed in rev per minute
+         */
         void setSpeed(const float& speed);
+
         void setAcceleration(const float& accel);
-        void moveTo(const uint32_t& target_pos);
+        void moveTo(const float& target_pos);
         void runSpeed();
 
 

@@ -28,7 +28,7 @@
 DisplayController rtm;
 
 // TEST CONTROL
-String msg, test_status_str = "STANDBY";
+String msg, prev_status_str, test_status_str = "STANDBY";
 uint32_t current_loop_count = 0;
 uint32_t requested_loops = 0;
 bool torqueRequested = false;
@@ -113,6 +113,14 @@ void loop() {
     rtm.update(current_loop_count);
   }
 
+  if (test_status_str != prev_status_str) {
+    // force the screen to update whenever a switch is 
+    // pressed. Otherwise the screen will update at the 
+    // default update interval of every 2 seconds.
+    rtm.statusUpdate(test_status_str);
+  }
+  prev_status_str = test_status_str;
+
   switch (currentState) {
     case STATE_STANDBY:
       if (rtm.getRunSwitch()) {
@@ -122,7 +130,6 @@ void loop() {
       }
       else if (rtm.getResetSwitch()) {
         currentState = STATE_RESET_REQUESTED;
-        test_status_str = "RESETTING";
       }
       else {
         rtm.updateLCD(test_status_str);
@@ -209,8 +216,6 @@ void loop() {
       return;
 
     case STATE_RESET_REQUESTED:
-      Serial.print("requested_loops: ");
-      Serial.println(requested_loops);
       if (!rtm.getResetSwitch() && current_loop_count < requested_loops) {
         test_status_str = "PAUSED";
         currentState = STATE_PAUSED;

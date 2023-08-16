@@ -300,18 +300,21 @@ uint32_t DisplayController::getCurrentLoopCount() {
 
 
 void DisplayController::computeHeaterOutput(const unsigned int& interval) {
-    double deltaT = _sump_temp - _setpoint_temp;
-    if (_PIDTimer > 3600000 && deltaT < -5) {
-        errorScreen("Sump temp not rising, check heaters");
-    }
-    if (deltaT > _deltaT_safety) {
-        errorScreen("Thermal runaway!");
-    }
-    if (_PIDTimer > interval) {
-        _input = _sump_temp;
-        _heaterPIDControl.Compute();
-        analogWrite(_heat_output_pin, _output);
-        _PIDTimer = 0;
+    if (_setpoint_temp == 0) {
+    } else {
+        double deltaT = _sump_temp - _setpoint_temp;
+        if (_PIDTimer > 3600000 && deltaT < -5) {
+            errorScreen("Sump temp not rising, check heaters");
+        }
+        if (deltaT > _deltaT_safety) {
+            errorScreen("Thermal runaway!");
+        }
+        if (_PIDTimer > interval) {
+            _input = _sump_temp;
+            _heaterPIDControl.Compute();
+            analogWrite(_heat_output_pin, _output);
+            _PIDTimer = 0;
+        }
     }
 }
 
@@ -551,7 +554,7 @@ void DisplayController::readConfigFile() {
 
 
 
-void DisplayController::updateLCD(const String& test_status_str) {
+void DisplayController::updateLCD(const String& test_status) {
     String loops_str = _current_loop_count;
     String seal_temp_str = tempToStrLCD(_seal_temp, _temp_units);
     String sump_temp_str = tempToStrLCD(_sump_temp, _temp_units);
@@ -571,19 +574,23 @@ void DisplayController::updateLCD(const String& test_status_str) {
         _screenTimer = 0;
         if (_isScreenUpdate) {
             _isScreenUpdate = !_isScreenUpdate;
-            printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status_str);
+            printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status);
             printFourColumnRow(1, "P:", pressure +"psi", " Loop:", loops_str);
             printRowPair(0, 2, MAX_CHARS_PER_LINE, "Setpoint:", set_point_str);
             printFourColumnRow(3, "Seal:", seal_temp_str, " Sump:", sump_temp_str); 
         }
         else {
             _isScreenUpdate = !_isScreenUpdate;
-            printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status_str);
+            printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status);
             printFourColumnRow(1, "P:", pressure +"psi", " Loop:", loops_str);
             printRowPair(0, 2, MAX_CHARS_PER_LINE, "Torque:", torques_str);
             printFourColumnRow(3, "Seal:", seal_temp_str, " Sump:", sump_temp_str);
             }
     }
+}
+
+void DisplayController::statusUpdate(const String& test_status) {
+    printRowPair(0, 0, MAX_CHARS_PER_LINE, "Status:", test_status);
 }
 
 void DisplayController::messageScreen(const String& msg,

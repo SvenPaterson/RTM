@@ -4,7 +4,6 @@ TODO LIST:
 # DISPLAY add duration in hrs to 2nd line left column and move Pressure to third line,
 move setpoint to SP on 2nd column of 3rd line
 
-
 ---- WORKING ON ----- 
 
     
