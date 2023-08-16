@@ -232,9 +232,9 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
         _resetSwitch = new Bounce();
     }
     _runSwitch->attach(_run_sw_pin);
-    _runSwitch->interval(100);
+    _runSwitch->interval(10);
     _resetSwitch->attach(_reset_sw_pin);
-    _resetSwitch->interval(100);
+    _resetSwitch->interval(10);
     writeToLog(msg);
 }
 
