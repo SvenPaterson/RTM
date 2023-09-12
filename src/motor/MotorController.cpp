@@ -23,11 +23,13 @@ void MotorController::begin(const std::map<String, uint8_t>& pinMappings) {
     _motor_enable_pin = pinMappings.at("MOTOR_ENABLE_PIN");
     _motor_dir_pin = pinMappings.at("MOTOR_DIR_PIN");
     _torque_flag_bus_pin = pinMappings.at("TORQ_FLAG_BUS_PIN");
+    _LED_pin = pinMappings.at("LED_PIN");
 
     pinMode(_motor_enable_pin, OUTPUT);
     pinMode(_torque_flag_bus_pin, OUTPUT);
     pinMode(_run_bus_pin, OUTPUT);
     pinMode(_reset_bus_pin, OUTPUT);
+    pinMode(_LED_pin, OUTPUT);
 
     pinMode(_supply_bus_pin, INPUT_PULLDOWN);
     pinMode(_dump_bus_pin, INPUT_PULLDOWN);
@@ -38,6 +40,7 @@ void MotorController::begin(const std::map<String, uint8_t>& pinMappings) {
     digitalWrite(_torque_flag_bus_pin, LOW);
     digitalWrite(_run_bus_pin, LOW);
     digitalWrite(_reset_bus_pin, LOW);
+    digitalWrite(_LED_pin, LOW);
     
     _stepper = AccelStepper(1, _motor_step_pin, _motor_dir_pin);
     
@@ -70,4 +73,13 @@ void MotorController::moveTo(const float& target_pos) {
 
 void MotorController::runSpeed() {
     _stepper.runSpeed();
+}
+
+void MotorController::update() {
+    _runBus.update();
+    _running = _runBus.read();
+
+    _resetBus.update();
+    _rst_request = _resetBus.read();
+
 }

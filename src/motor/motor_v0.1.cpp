@@ -7,15 +7,26 @@
 #define MOTOR_ENABLE_PIN 5
 #define PRGM_RUN_BUS_PIN 10
 #define TORQ_FLAG_BUS_PIN 11
+#define LED_PIN 13
 #define AIR_SUPPLY_BUS_PIN 14
 #define AIR_DUMP_BUS_PIN 15
 #define SDA0_PIN 18
-#define SDL0_PIN 19
+#define SCL0_PIN 19
 #define RESET_BUS_PIN 20
 
 MotorController rtm;
 
 elapsedMillis debugTimer, profileTimer;
+
+enum ProgramState {
+  STATE_STANDBY,
+  STATE_HEATING,
+  STATE_RUNNING,
+  STATE_PAUSED,
+  STATE_TEST_COMPLETED,
+  STATE_RESET_REQUESTED,
+};
+ProgramState currentState = STATE_STANDBY;
 
 void setup() {
   // pin mappings
@@ -25,12 +36,13 @@ void setup() {
     {"MOTOR_DIR_PIN", MOTOR_DIR_PIN},
     {"MOTOR_ENABLE_PIN", MOTOR_ENABLE_PIN},
     {"PRGM_RUN_BUS_PIN", PRGM_RUN_BUS_PIN},
-    {"PRGM_RESET_BUS_PIN", PRGM_RUN_BUS_PIN}, 
-    {"TORQ_FLAG_BUS_PIN", TORQ_FLAG_BUS_PIN}, 
-    {"AIR_SUPPLY_BUS_PIN", AIR_SUPPLY_BUS_PIN}, 
-    {"AIR_DUMP_BUS_PIN", AIR_DUMP_BUS_PIN}, 
-    {"SDA0_PIN", SDA0_PIN}, 
-    {"SDL0_PIN", SDL0_PIN},
+    {"PRGM_RESET_BUS_PIN", PRGM_RUN_BUS_PIN},
+    {"TORQ_FLAG_BUS_PIN", TORQ_FLAG_BUS_PIN},
+    {"AIR_SUPPLY_BUS_PIN", AIR_SUPPLY_BUS_PIN},
+    {"AIR_DUMP_BUS_PIN", AIR_DUMP_BUS_PIN},
+    {"SDA0_PIN", SDA0_PIN},
+    {"SCL0_PIN", SCL0_PIN},
+    {"LED_PIN", LED_PIN},
   };
 
   pinMode(LOOP_BUS_PIN, OUTPUT);
@@ -42,6 +54,7 @@ void setup() {
 }
 
 void loop() {
+  rtm.update();
 
   if (digitalRead(PRGM_RUN_BUS_PIN)) {
     if (profileTimer < 4000) {
