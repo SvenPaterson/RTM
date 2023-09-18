@@ -7,6 +7,9 @@ move setpoint to SP on 2nd column of 3rd line
 # DISPLAY heater timer was running while test paused. change to start
 timer only when test is in running state
 
+#### DISPLAY wont exit test_done!!!!!
+
+
 ---- WORKING ON ----- 
 
     

@@ -562,8 +562,8 @@ void DisplayController::updateLCD(const String& test_status) {
 
     /**** DEBUGGING ONLY!!! ****/
     //pressure = "12.3";
-    double _cw_torque = 1.26;
-    double _ccw_torque = -0.98;
+    // double _cw_torque = 1.26;
+    // double _ccw_torque = -0.98;
     /***************************/
 
     String torques_str = String(_ccw_torque) + " / " + String(_cw_torque);

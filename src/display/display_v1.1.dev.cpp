@@ -109,9 +109,7 @@ void setup() {
 
 /* -------------------------------- MAIN LOOP -------------------------------- */
 void loop() {
-  if (current_loop_count <= requested_loops) {
-    rtm.update(current_loop_count);
-  }
+  rtm.update(current_loop_count);
 
   if (test_status_str != prev_status_str) {
     // force the screen to update whenever a switch is 
@@ -208,7 +206,7 @@ void loop() {
       rtm.lcd.setBacklight(0,255,0);
       rtm.turnOffHeaters();
       rtm.stopProgram();
-      if(rtm.getResetSwitch()) {
+      if (rtm.getResetSwitch()) {
         test_status_str = "RESETTING";
         currentState = STATE_RESET_REQUESTED;
         rtm.lcd.setBacklight(255,255,255);
