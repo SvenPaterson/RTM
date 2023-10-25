@@ -27,7 +27,7 @@ const uint8_t ResetPin = 20;  // This Pin is used
 
 // Define a stepper and the pins it will use
 FlexyStepper stepper;
-uint16_t PPR = (800 / 3);  // pulses per rev for motor
+uint16_t PPR = (200 / 3);  // pulses per rev for motor
 
 /****** TEST STEP PARAMS ******/
 struct Step {
@@ -41,7 +41,7 @@ Step steps[] = {
   {true,  2475,  2475/8,          18000},
   {true,  8500,  (8500-2475)/15,  15000},
   {true,  0,     8500/5,          5000},
-  {false, 0,     0,               60000}
+  {false, 0,     0,               120000}
 };
 bool break_loop, pause_requested;
 uint32_t sum_time = 0;

@@ -267,6 +267,7 @@ void DisplayController::runProgram() {
 }
 
 void DisplayController::resetTest() {
+    _PIDTimer = 0;
     readConfigFile();
     _current_loop_count = 0;
     writeToConfigFile();
@@ -301,13 +302,15 @@ uint32_t DisplayController::getCurrentLoopCount() {
 
 void DisplayController::computeHeaterOutput(const unsigned int& interval) {
     if (_setpoint_temp == 0) {
-    } else {
+    } 
+    else {
         double deltaT = _sump_temp - _setpoint_temp;
+        
         if (_PIDTimer > 3600000 && deltaT < -5) {
             errorScreen("Sump temp not rising, check heaters");
         }
         if (deltaT > _deltaT_safety) {
-            errorScreen("Thermal runaway!");
+            errorScreen("Thermal runaway!", 0);
         }
         if (_PIDTimer > interval) {
             _input = _sump_temp;
@@ -322,6 +325,7 @@ void DisplayController::turnOffHeaters() {
     if (_areHeatersArmed) {
         digitalWrite(_heat_output_pin, LOW);
         digitalWrite(_heat_safety_pin, LOW);
+        _areHeatersArmed = false;
     } 
 }
 
@@ -657,13 +661,17 @@ void DisplayController::testDoneScreen(const uint8_t& loop_count) {
 
 void DisplayController::errorScreen(const String& msg, const int& time) {
     messageScreen(msg);
+    delay(1000);
     if (_isSDCardActive && _isSDCardInserted) {
         writeToLog(msg, "ERROR");
     }
     if (time==0) {
+        turnOffHeaters();
+        stopProgram();
         while (true) {
             if (_errorTimer >= 1000) {
-                if (digitalRead(_reset_sw_pin)) {
+                update(_current_loop_count);
+                if (getResetSwitch()) {
                     begin(_pinMappings);
                     break;
                 }
