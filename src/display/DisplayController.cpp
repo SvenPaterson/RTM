@@ -87,6 +87,7 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     {"SD_DETECT_PIN", SD_DETECT_PIN},
     {"LOOP_BUS_PIN", LOOP_BUS_PIN},
     {"MOTOR_HLFB_PIN", MOTOR_HLFB_PIN},
+    {"HEAT_BUS_PIN", HEAT_BUS_PIN},
     {"HEAT_OUTPUT_PIN", HEAT_OUTPUT_PIN},
     {"HEAT_SAFETY_PIN", HEAT_SAFETY_PIN}, 
     {"AIR_SUPPLY_PIN", AIR_SUPPLY_PIN}, 
@@ -117,6 +118,7 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     _loop_bus_pin = pinMappings.at("LOOP_BUS_PIN");
     _run_sw_pin = pinMappings.at("RUN_SW_PIN");
     _reset_sw_pin = pinMappings.at("RESET_SW_PIN");
+    _heat_bus_pin = pinMappings.at("HEAT_BUS_PIN");
     _heat_safety_pin = pinMappings.at("HEAT_SAFETY_PIN");
     _heat_output_pin = pinMappings.at("HEAT_OUTPUT_PIN");
     
@@ -131,6 +133,7 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     pinMode(_loop_bus_pin, INPUT_PULLDOWN);
     pinMode(_run_sw_pin, INPUT_PULLDOWN);
     pinMode(_reset_sw_pin, INPUT_PULLDOWN);
+    pinMode(_heat_bus_pin, INPUT);
     pinMode(_heat_safety_pin, OUTPUT);
     pinMode(_heat_output_pin, OUTPUT);
     pinMode(LED_BUILTIN, OUTPUT);
@@ -252,6 +255,7 @@ void DisplayController::update(const uint32_t& loop_count) {
     _rel_pressure = _abs_pressure - _press_offset;
     _runSwitch->update();
     _resetSwitch->update();
+    _askingForHeat = digitalRead(_heat_bus_pin);
     bool askingForPressure = digitalRead(_supply_bus_pin) ? HIGH : LOW;
     digitalWrite(_supply_valve_pin, askingForPressure);
     bool dump_state = digitalRead(_dump_bus_pin) ? HIGH : LOW;
@@ -301,7 +305,7 @@ uint32_t DisplayController::getCurrentLoopCount() {
 
 
 void DisplayController::computeHeaterOutput(const unsigned int& interval) {
-    if (_setpoint_temp == 0) {
+    if (_setpoint_temp == 0 || _askingForHeat) {
     } 
     else {
         double deltaT = _sump_temp - _setpoint_temp;
@@ -339,9 +343,6 @@ void DisplayController::armHeaters() {
 double DisplayController::getSetpointTemp() {
     return _setpoint_temp;
 }
-
-
-
 
 void DisplayController::readTorque() {
     uint32_t pwm_high_val = pulseIn(_torque_pin, HIGH, 100000);
@@ -750,10 +751,18 @@ String DisplayController::padBetweenChars(const int& num_chars,
 
 String DisplayController::tempToStrLCD(const double& temp,
                                     const bool& unit) {
-  if (unit) {
-    return String(temp, 0) + "\xDF" + "C";
-  }
-  else return String(temp, 0) + "\xDF" + "F";
+    if (temp > 99) {
+        if (unit) {
+            return String(temp, 0) + "C";
+        }
+        else return String(temp, 0) + "F";
+    }
+    else {
+        if (unit) {
+            return String(temp, 0) + "\xDF" + "C";
+        }
+        else return String(temp, 0) + "\xDF" + "F";
+    }
 }
 
 String DisplayController::tempToStrLog(const double& temp,

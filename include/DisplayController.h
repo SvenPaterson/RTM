@@ -262,11 +262,12 @@ class DisplayController {
 
         elapsedMillis _PIDTimer, _heatSafetyTimer;
         uint8_t _heat_safety_pin, _heat_output_pin;
+        uint8_t _heat_bus_pin;
         double _setpoint_temp, _input, _output;
         double _Kp = 60, _Ki = 40, _Kd = 25;
         double _deltaT_safety;
         PID _heaterPIDControl;
-        bool _areHeatersArmed;
+        bool _areHeatersArmed, _askingForHeat;
 
         uint8_t _run_sw_pin, _reset_sw_pin;
         Bounce *_runSwitch, *_resetSwitch;

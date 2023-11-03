@@ -10,6 +10,7 @@
 #define SD_DETECT_PIN 0
 #define LOOP_BUS_PIN 1
 #define MOTOR_HLFB_PIN 2
+#define HEAT_BUS_PIN 3
 #define HEAT_OUTPUT_PIN 6
 #define HEAT_SAFETY_PIN 7
 #define AIR_SUPPLY_PIN 8
@@ -64,6 +65,7 @@ void setup() {
   std::map<String, uint8_t> pinMappings = {
     {"SD_DETECT_PIN", SD_DETECT_PIN},
     {"LOOP_BUS_PIN", LOOP_BUS_PIN},
+    {"HEAT_BUS_PIN", HEAT_BUS_PIN},
     {"MOTOR_HLFB_PIN", MOTOR_HLFB_PIN},
     {"HEAT_OUTPUT_PIN", HEAT_OUTPUT_PIN},
     {"HEAT_SAFETY_PIN", HEAT_SAFETY_PIN}, 
@@ -75,7 +77,7 @@ void setup() {
     {"AIR_DUMP_BUS_PIN", AIR_DUMP_BUS_PIN}, 
     {"RUN_SW_PIN", RUN_SW_PIN},
     {"RESET_SW_PIN", RESET_SW_PIN},
-    {"SDA0_PIN", SDA0_PIN}, 
+    {"SDA0_PIN", SDA0_PIN},
     {"SDL0_PIN", SDL0_PIN},
     {"PRGM_RESET_BUS_PIN", PRGM_RESET_BUS_PIN}
   };
@@ -146,7 +148,6 @@ void loop() {
       else if (rtm.getSumpTemp() < rtm.getSetpointTemp()) {
         rtm.stopProgram();
         rtm.updateLCD(test_status_str);
-        rtm.armHeaters();
         rtm.computeHeaterOutput();
       }
       else if (rtm.getResetSwitch()) {
