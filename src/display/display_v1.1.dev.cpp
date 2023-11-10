@@ -10,7 +10,7 @@
 #define SD_DETECT_PIN 0
 #define LOOP_BUS_PIN 1
 #define MOTOR_HLFB_PIN 2
-#define HEAT_BUS_PIN 3
+#define HEAT_BUS_PIN 12
 #define HEAT_OUTPUT_PIN 6
 #define HEAT_SAFETY_PIN 7
 #define AIR_SUPPLY_PIN 8

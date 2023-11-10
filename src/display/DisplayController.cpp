@@ -17,6 +17,7 @@ DisplayController::DisplayController() : _heaterPIDControl(&_input, &_output, &_
     _setpoint_temp = 70.0;
     _heaterPIDControl.SetMode(AUTOMATIC);
     _heaterPIDControl.SetOutputLimits(0, 150);
+    _askingForHeat = true;
     Serial.println(" - PID loop initialized");
     _runSwitch = NULL;
     _resetSwitch = NULL;
@@ -133,7 +134,7 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     pinMode(_loop_bus_pin, INPUT_PULLDOWN);
     pinMode(_run_sw_pin, INPUT_PULLDOWN);
     pinMode(_reset_sw_pin, INPUT_PULLDOWN);
-    pinMode(_heat_bus_pin, INPUT);
+    pinMode(_heat_bus_pin, INPUT_PULLDOWN);
     pinMode(_heat_safety_pin, OUTPUT);
     pinMode(_heat_output_pin, OUTPUT);
     pinMode(LED_BUILTIN, OUTPUT);
@@ -255,7 +256,7 @@ void DisplayController::update(const uint32_t& loop_count) {
     _rel_pressure = _abs_pressure - _press_offset;
     _runSwitch->update();
     _resetSwitch->update();
-    _askingForHeat = digitalRead(_heat_bus_pin);
+    _askingForHeat = digitalRead(_heat_bus_pin) ? HIGH : LOW;
     bool askingForPressure = digitalRead(_supply_bus_pin) ? HIGH : LOW;
     digitalWrite(_supply_valve_pin, askingForPressure);
     bool dump_state = digitalRead(_dump_bus_pin) ? HIGH : LOW;
@@ -305,9 +306,11 @@ uint32_t DisplayController::getCurrentLoopCount() {
 
 
 void DisplayController::computeHeaterOutput(const unsigned int& interval) {
-    if (_setpoint_temp == 0 || _askingForHeat) {
+    if (_setpoint_temp == 0 || !_askingForHeat) {
+        turnOffHeaters();
     } 
     else {
+        armHeaters();
         double deltaT = _sump_temp - _setpoint_temp;
         
         if (_PIDTimer > 3600000 && deltaT < -5) {
