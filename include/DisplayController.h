@@ -14,7 +14,6 @@
 #include <SPI.h>
 #include <cmath>
 #include <avr/wdt.h>
-#include <map>
 
 #define MCP9600_DEFAULT_ADDR_ONE 0x60
 #define MCP9600_DEFAULT_ADDR_TWO 0x67
@@ -168,6 +167,14 @@ class DisplayController {
         void updateLCD(const String& test_status);
 
         /**
+         * @brief Updates the screen with the current test status.
+         * Useful for when the run or reset switch is hit by the user
+         * and the screen reflects the change immediately.
+         * @param test_status_str current status of test to be displayed
+         */
+        void statusUpdate(const String& test_status);
+
+        /**
          * @brief Interrupts with a red flashing error screen and
          * displays the provided error message. Error screen will be
          * ignored after the ignore time provided, or will halt remaining
@@ -255,11 +262,12 @@ class DisplayController {
 
         elapsedMillis _PIDTimer, _heatSafetyTimer;
         uint8_t _heat_safety_pin, _heat_output_pin;
+        uint8_t _heat_bus_pin;
         double _setpoint_temp, _input, _output;
         double _Kp = 60, _Ki = 40, _Kd = 25;
         double _deltaT_safety;
         PID _heaterPIDControl;
-        bool _areHeatersArmed;
+        bool _areHeatersArmed, _askingForHeat;
 
         uint8_t _run_sw_pin, _reset_sw_pin;
         Bounce *_runSwitch, *_resetSwitch;
