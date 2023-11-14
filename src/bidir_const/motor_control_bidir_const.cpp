@@ -32,10 +32,10 @@ FlexyStepper stepper;
 #define HIGH_SPEED_MOTOR 3
 #define STD_SPEED_MOTOR 1
 #define MOTOR_PULSES 800 // as set in the ClearPath MSP software, per motor basis
-uint16_t PPR = (MOTOR_PULSES / HIGH_SPEED_MOTOR);  // pulses per rev for motor
+uint16_t PPR = (MOTOR_PULSES / STD_SPEED_MOTOR);  // pulses per rev for motor
 
 /****** TEST STEP PARAMS ******/
-struct Step {
+/* struct Step {
   bool run;           // only set false if the motor is already stopped
   bool heat;          // true for requesting heat, false for none
   uint16_t speed;     // rpm
@@ -50,9 +50,9 @@ Step steps[] = { // RTM TEST PROTOCOL (active high EN pin)
   {true,  true,   4500,   4500/3,    540000,      (2*3600-3)*1000},
   {true,  true,   0,      4500/3,    3*4500/60,            3*1000},
   {false, true,   0,      1000,      0,               2*3600*1000}
-};
+}; */
 
-/* struct Step { // HARLEY OSCILLATORY TEST
+struct Step { // HARLEY OSCILLATORY TEST
   bool run;           // only set false if the motor is already stopped
   bool heat;          // true for requesting heat, false for none
   uint16_t speed;     // rpm
@@ -64,7 +64,7 @@ Step steps[] = {
   {true, true, 100, 955, 15.0/360.0},
   {true, true, 100, 955, -15.0/360.0},
   {true, true, 100, 955, 0}
-}; */
+};
 
 /* Step steps[] = { // RTM TEST DEMO TIMES (active high EN pin)
   {true,  true,   2000,   1000,    960000,         10*1000},
@@ -84,7 +84,7 @@ Step steps[] = {
 
 bool break_loop, pause_requested;
 uint32_t sum_time = 0;
-elapsedMillis loop_time;
+elapsedMillis loop_time, hour_timer;
 
 /******* FUNC DECLARATIONS *******/
 void display_srcfile_details();
@@ -133,6 +133,7 @@ void loop() {
   if (!digitalRead(PRGM_FLAG_BUS_PIN)) {
     digitalWrite (LEDPIN, LOW);
     digitalWrite (MOTOR_EN_PIN, LOW); // note: test bench is active LOW
+    hour_timer = 0;
     delay(100);
     if (Resetbool == HIGH) {
       Resetbool = LOW;
@@ -153,20 +154,24 @@ void loop() {
       sum_time = 0;   // Reset sum_time for each step
       
       digitalWrite(LEDPIN, !digitalRead(LEDPIN));
-      stepper.setCurrentPositionInSteps(0); // comment out for oscillatory
+      // stepper.setCurrentPositionInSteps(0); // comment out for oscillatory
+      // stepper.setTargetPositionInRevolutions(steps[i].revs); // comment out for oscillatory
       stepper.setAccelerationInRevolutionsPerSecondPerSecond(steps[i].accel / 60);
       stepper.setSpeedInRevolutionsPerSecond(steps[i].speed / 60);
-      stepper.setTargetPositionInRevolutions(steps[i].revs);
+      
 
-      // Harley Oscillatory
-      /* digitalWrite(HEAT_FLAG_BUS_PIN, steps[i].heat);
+      // HARLEY OSCILLATORY CODE
+      digitalWrite(HEAT_FLAG_BUS_PIN, steps[i].heat);
       stepper.moveToPositionInRevolutions(steps[i].revs);  // BLOCKING CODE!!! WATCH OUT...
       if (!digitalRead(PRGM_FLAG_BUS_PIN)) {
+        stepper.setTargetPositionToStop();
+        while (!stepper.processMovement());
         i = 0;
         break_loop = true;
         break;
-      } */
+      }
 
+      /* // HARLEY CONSTANT SPEED CODE 
       sum_time += steps[i].time;
       while (loop_time < sum_time) {
 
@@ -188,19 +193,22 @@ void loop() {
           // stops motor spinning during a dwell step
           stepper.setSpeedInRevolutionsPerSecond(0);
           digitalWrite(MOTOR_EN_PIN, LOW);
-        }
+        } */
       }
     }
 
       
-
+   if (hour_timer > 3600000) { // comment out for constant speed oscillatory 
     if (digitalRead(PRGM_FLAG_BUS_PIN)) {
       digitalWrite (LOOP_BUS_PIN, HIGH);
       delay(1);
       digitalWrite (LOOP_BUS_PIN, LOW);
     }
+    hour_timer = 0;
+   }
+
   }
-}
+//}
 
 
 
