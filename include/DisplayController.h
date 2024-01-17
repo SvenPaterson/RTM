@@ -274,7 +274,7 @@ class DisplayController {
 
         uint8_t _run_bus_pin, _reset_bus_pin;
         uint8_t _loop_bus_pin;
-        uint8_t _supply_bus_pin, _dump_bus_pin;
+        // uint8_t _supply_bus_pin, _dump_bus_pin;
 
         uint8_t _supply_valve_pin, _dump_valve_pin;
         bool _isPressureApplied;

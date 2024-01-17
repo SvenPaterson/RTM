@@ -109,8 +109,8 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
 
     _pinMappings = pinMappings;
     _SD_detect_pin = pinMappings.at("SD_DETECT_PIN");
-    _supply_bus_pin = pinMappings.at("AIR_SUPPLY_BUS_PIN");
-    _dump_bus_pin = pinMappings.at("AIR_DUMP_BUS_PIN");
+    //_supply_bus_pin = pinMappings.at("AIR_SUPPLY_BUS_PIN");
+    //_dump_bus_pin = pinMappings.at("AIR_DUMP_BUS_PIN");
     _supply_valve_pin = pinMappings.at("AIR_SUPPLY_PIN");
     _dump_valve_pin = pinMappings.at("AIR_DUMP_PIN");
     _torque_pin = pinMappings.at("MOTOR_HLFB_PIN");
@@ -124,8 +124,8 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     _heat_output_pin = pinMappings.at("HEAT_OUTPUT_PIN");
     
     pinMode(_SD_detect_pin, INPUT_PULLDOWN);
-    pinMode(_supply_bus_pin, INPUT_PULLDOWN);
-    pinMode(_dump_bus_pin, INPUT_PULLDOWN);
+    //pinMode(_supply_bus_pin, INPUT_PULLDOWN);
+    //pinMode(_dump_bus_pin, INPUT_PULLDOWN);
     pinMode(_supply_valve_pin, OUTPUT);
     pinMode(_dump_valve_pin, OUTPUT);
     pinMode(_torque_pin, INPUT_PULLUP);
@@ -257,9 +257,9 @@ void DisplayController::update(const uint32_t& loop_count) {
     _runSwitch->update();
     _resetSwitch->update();
     _askingForHeat = digitalRead(_heat_bus_pin) ? HIGH : LOW;
-    bool askingForPressure = digitalRead(_supply_bus_pin) ? HIGH : LOW;
+    bool askingForPressure = false; // digitalRead(_supply_bus_pin) ? HIGH : LOW;
     digitalWrite(_supply_valve_pin, askingForPressure);
-    bool dump_state = digitalRead(_dump_bus_pin) ? HIGH : LOW;
+    bool dump_state = true; // digitalRead(_dump_bus_pin) ? HIGH : LOW;
     digitalWrite(_dump_valve_pin, dump_state);
     _isSDCardInserted = digitalRead(_SD_detect_pin);
     if (!_isSDCardInserted) {

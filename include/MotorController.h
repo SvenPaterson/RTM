@@ -36,7 +36,7 @@ class MotorController {
 
     private:
         std::map<String, uint8_t> _pinMappings;
-        uint8_t _supply_bus_pin, _dump_bus_pin, _run_bus_pin;
+        uint8_t _run_bus_pin; //_supply_bus_pin, _dump_bus_pin;
         uint8_t _reset_bus_pin, _loop_bus_pin, _motor_step_pin;
         uint8_t _motor_enable_pin, _motor_dir_pin, _torque_flag_bus_pin;
         uint8_t _LED_pin;

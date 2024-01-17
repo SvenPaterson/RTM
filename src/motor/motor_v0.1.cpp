@@ -5,14 +5,19 @@
 #define MOTOR_STEP_PIN 3
 #define MOTOR_DIR_PIN 4
 #define MOTOR_ENABLE_PIN 5
-#define PRGM_RUN_BUS_PIN 10
-#define TORQ_FLAG_BUS_PIN 11
-#define LED_PIN 13
-#define AIR_SUPPLY_BUS_PIN 14
-#define AIR_DUMP_BUS_PIN 15
+#define CS_PIN 10
+#define COPI_PIN 11
+#define CIPO_PIN 12
+#define SCK_PIN 13
+#define PRGM_RUN_BUS_PIN 14 //10
+#define TORQ_FLAG_BUS_PIN 15 //11
+//#define AIR_SUPPLY_BUS_PIN 14
+//#define AIR_DUMP_BUS_PIN 15
 #define SDA0_PIN 18
 #define SCL0_PIN 19
 #define RESET_BUS_PIN 20
+
+
 
 MotorController rtm;
 
@@ -38,8 +43,11 @@ void setup() {
     {"PRGM_RUN_BUS_PIN", PRGM_RUN_BUS_PIN},
     {"PRGM_RESET_BUS_PIN", PRGM_RUN_BUS_PIN},
     {"TORQ_FLAG_BUS_PIN", TORQ_FLAG_BUS_PIN},
-    {"AIR_SUPPLY_BUS_PIN", AIR_SUPPLY_BUS_PIN},
-    {"AIR_DUMP_BUS_PIN", AIR_DUMP_BUS_PIN},
+    //{"AIR_SUPPLY_BUS_PIN", AIR_SUPPLY_BUS_PIN},
+    //{"AIR_DUMP_BUS_PIN", AIR_DUMP_BUS_PIN},
+    {"CS_PIN", CS_PIN},
+    {"COPI_PIN", COPI_PIN},
+    {"CIPO_PIN", CIPO_PIN},
     {"SDA0_PIN", SDA0_PIN},
     {"SCL0_PIN", SCL0_PIN},
     {"LED_PIN", LED_PIN},

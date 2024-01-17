@@ -15,15 +15,21 @@
 #define HEAT_SAFETY_PIN 7
 #define AIR_SUPPLY_PIN 8
 #define AIR_DUMP_PIN 9
-#define PRGM_RUN_BUS_PIN 10
-#define TORQ_FLAG_BUS_PIN 11
-#define AIR_SUPPLY_BUS_PIN 14
-#define AIR_DUMP_BUS_PIN 15
+#define CS_PIN 10
+#define COPI_PIN 11
+#define CIPO_PIN 12
+#define SCK_PIN 13
+#define PRGM_RUN_BUS_PIN 14 //10
+#define TORQ_FLAG_BUS_PIN 15 //11
+//#define AIR_SUPPLY_BUS_PIN 14
+//#define AIR_DUMP_BUS_PIN 15
 #define RUN_SW_PIN 16
 #define RESET_SW_PIN 17
 #define SDA0_PIN 18
 #define SDL0_PIN 19
 #define PRGM_RESET_BUS_PIN 20
+
+
 
 // Initialize DisplayController
 DisplayController rtm;
@@ -73,8 +79,11 @@ void setup() {
     {"AIR_DUMP_PIN", AIR_DUMP_PIN}, 
     {"PRGM_RUN_BUS_PIN", PRGM_RUN_BUS_PIN}, 
     {"TORQ_FLAG_BUS_PIN", TORQ_FLAG_BUS_PIN}, 
-    {"AIR_SUPPLY_BUS_PIN", AIR_SUPPLY_BUS_PIN}, 
-    {"AIR_DUMP_BUS_PIN", AIR_DUMP_BUS_PIN}, 
+    //{"AIR_SUPPLY_BUS_PIN", AIR_SUPPLY_BUS_PIN}, 
+    //{"AIR_DUMP_BUS_PIN", AIR_DUMP_BUS_PIN},
+    {"CS_PIN", CS_PIN},
+    {"COPI_PIN", COPI_PIN},
+    {"CIPO_PIN", CIPO_PIN},
     {"RUN_SW_PIN", RUN_SW_PIN},
     {"RESET_SW_PIN", RESET_SW_PIN},
     {"SDA0_PIN", SDA0_PIN},

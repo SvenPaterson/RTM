@@ -14,8 +14,8 @@ MotorController::~MotorController() {
 void MotorController::begin(const std::map<String, uint8_t>& pinMappings) {
 
     _pinMappings = pinMappings;
-    _supply_bus_pin = pinMappings.at("AIR_SUPPLY_BUS_PIN");
-    _dump_bus_pin = pinMappings.at("AIR_DUMP_BUS_PIN");
+    //_supply_bus_pin = pinMappings.at("AIR_SUPPLY_BUS_PIN");
+    //_dump_bus_pin = pinMappings.at("AIR_DUMP_BUS_PIN");
     _run_bus_pin = pinMappings.at("PRGM_RUN_BUS_PIN");
     _reset_bus_pin = pinMappings.at("PRGM_RESET_BUS_PIN");
     _loop_bus_pin = pinMappings.at("LOOP_BUS_PIN");
@@ -31,8 +31,8 @@ void MotorController::begin(const std::map<String, uint8_t>& pinMappings) {
     pinMode(_reset_bus_pin, OUTPUT);
     pinMode(_LED_pin, OUTPUT);
 
-    pinMode(_supply_bus_pin, INPUT_PULLDOWN);
-    pinMode(_dump_bus_pin, INPUT_PULLDOWN);
+    //pinMode(_supply_bus_pin, INPUT_PULLDOWN);
+    //pinMode(_dump_bus_pin, INPUT_PULLDOWN);
     pinMode(_loop_bus_pin, INPUT_PULLDOWN);
     pinMode(LED_BUILTIN, OUTPUT);
 
