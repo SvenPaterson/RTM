@@ -563,7 +563,12 @@ void DisplayController::readConfigFile() {
 
 
 void DisplayController::updateLCD(const String& test_status) {
-    String loops_str = _current_loop_count;
+    String loops_label = "Loop:";
+    String loops_str = String(_current_loop_count);
+    // Check if the number of loops exceeds 9999, change label to "lp:"
+    if (_current_loop_count > 9999) {
+        loops_label = "Lp:";
+    }
     String seal_temp_str = tempToStrLCD(_seal_temp, _temp_units);
     String sump_temp_str = tempToStrLCD(_sump_temp, _temp_units);
     String pressure = String(_rel_pressure);
