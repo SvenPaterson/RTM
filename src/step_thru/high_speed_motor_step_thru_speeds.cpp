@@ -38,16 +38,11 @@ struct Step {
   uint32_t time;  // milliseconds
 };
 
-/* Step steps[] = { // tritec
-  {true,  2475,  2475/8,          18000},
-  {true,  8500,  (8500-2475)/15,  15000},
-  {true,  0,     8500/5,          5000},
-  {false, 0,     0,               120000}
-}; */
-Step steps[] = { // sean PDR test
+Step steps[] = { // test steps defined here
   {true,  8000,  8000/5,          5000},
   {true,  8000,  8000/5,          120000},
-  {true,  0,     8000/10,         10000}
+  {true,  0,     8000/9,          9500},
+  {false, 0,     0,               500}
 };
 
 bool break_loop, pause_requested;
@@ -120,7 +115,7 @@ void loop() {
       digitalWrite(LEDPIN, !digitalRead(LEDPIN));
       stepper.setAccelerationInRevolutionsPerSecondPerSecond(steps[i].accel / 60);
       stepper.setSpeedInRevolutionsPerSecond(steps[i].speed / 60);
-      stepper.setTargetPositionInSteps(2147483647);
+      stepper.setTargetPositionInSteps(-2147483647);
 
       sum_time += steps[i].time;
       while (loop_time < sum_time) {
