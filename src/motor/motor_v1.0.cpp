@@ -24,7 +24,7 @@ const uint8_t ProgramRunPin = 10; //Pin That tell the to run the motor program.
 const uint8_t TorqueFLagPin = 11; //Pin That tell the to run the motor program.
 const uint8_t LEDPIN = 13;
 const uint8_t ResetPin = 20;  // This Pin is used
-const uint8_t heat_bus_pin = 3;
+const uint8_t heat_bus_pin = 12;
 
 // Define a stepper and the pins it will use
 FlexyStepper stepper;
@@ -33,16 +33,17 @@ uint16_t PPR = (200 / 3);  // pulses per rev for motor
 /****** TEST STEP PARAMS ******/
 struct Step {
   bool run;       // true for motor turning, false for stopped
+  bool heatThisStep;
   uint16_t speed; // rpm
   double accel;   // rpm per second
   uint32_t time;  // milliseconds
 };
 
 Step steps[] = { // test steps defined here
-  {true,  8000,  8000/5,          5000},
-  {true,  8000,  8000/5,          120000},
-  {true,  0,     8000/9,          9500},
-  {false, 0,     0,               500}
+  {true,  true,   8000,  8000/5,          5000},
+  {true,  true,   8000,  8000/5,          120000},
+  {true,  true,   0,     8000/9,          9500},
+  {false, true,   0,     0,               500}
 };
 
 bool break_loop, pause_requested;
@@ -76,7 +77,6 @@ void setup() ////////////////////////////////////////////////////////////Setup /
   digitalWrite (LEDPIN, HIGH);
   digitalWrite (LoopPin, LOW);
   digitalWrite (TorqueFLagPin, LOW);
-  digitalWrite (heat_bus_pin, HIGH);
 
   stepper.connectToPins(MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
   stepper.setStepsPerRevolution(PPR);
@@ -112,6 +112,7 @@ void loop() {
       loop_time = 0;  // Reset loop_time for each step
       sum_time = 0;   // Reset sum_time for each step
       
+      digitalWrite(heat_bus_pin, steps[i].heatThisStep); 
       digitalWrite(LEDPIN, !digitalRead(LEDPIN));
       stepper.setAccelerationInRevolutionsPerSecondPerSecond(steps[i].accel / 60);
       stepper.setSpeedInRevolutionsPerSecond(steps[i].speed / 60);
