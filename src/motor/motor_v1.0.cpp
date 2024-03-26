@@ -1,7 +1,3 @@
-/*
-  
-*/
-
 #include <Wire.h>
 #include <FlexyStepper.h>
 #include <avr/pgmspace.h>
@@ -13,42 +9,46 @@ volatile unsigned long end_micros = 0;
 volatile unsigned long duration = 0;
 volatile bool Resetbool = false;
 
-const uint8_t LoopPin = 1;  // This Pin is used to keeps track of the loops compleated by the motor controller.
-const uint8_t PWM_TorquePin = 2;   //This pin reads the PWM signal from the motor for torque. ** Not Used at this time**
+const uint8_t LOOP_BUS_PIN = 1;  // This Pin is used to keeps track of the loops compleated by the motor controller.
 const uint8_t MOTOR_STEP_PIN = 3;
 const uint8_t MOTOR_DIRECTION_PIN = 4;
-const uint8_t EnablePin = 5;        // This is the pin that enables the motor.
-const uint8_t AirValvePin = 14;        // the number of the AirValvePin pin
-const uint8_t AirDumpValvePin = 15 ;        // the number of the AirValvePin pin
-const uint8_t ProgramRunPin = 10; //Pin That tell the to run the motor program.
-const uint8_t TorqueFLagPin = 11; //Pin That tell the to run the motor program.
-const uint8_t LEDPIN = 13;
-const uint8_t ResetPin = 20;  // This Pin is used
-const uint8_t heat_bus_pin = 12;
+const uint8_t MOTOR_ENABLE_PIN = 5;        // This is the pin that enables the motor.
+const uint8_t AIR_SUPPLY_BUS_PIN = 14;        // the number of the AIR_SUPPLY_BUS_PIN pin
+const uint8_t AIR_DUMP_BUS_PIN = 15 ;        // the number of the AIR_SUPPLY_BUS_PIN pin
+const uint8_t PRGM_FLAG_BUS_PIN = 10; //Pin That tell the to spinning the motor program.
+const uint8_t TORQUE_FLAG_BUS_PIN = 11; //Pin That tell the to spinning the motor program.
+const uint8_t LED_PIN = 13;
+const uint8_t PRGM_RESET_BUS_PIN = 20;  // This Pin is used
+const uint8_t HEAT_BUS_PIN = 12;
 
-// Define a stepper and the pins it will use
-FlexyStepper stepper;
-uint16_t PPR = (200 / 3);  // pulses per rev for motor
-
-/****** TEST STEP PARAMS ******/
 struct Step {
-  bool run;       // true for motor turning, false for stopped
-  bool heatThisStep;
-  uint16_t speed; // rpm
-  double accel;   // rpm per second
-  uint32_t time;  // milliseconds
+  bool spinning;    // true for motor turning, false for stopped
+  bool turnOnHeat;  // true for heat, false for none
+  bool spin_dir;    // true for CW from front, false for CCW
+  uint16_t speed;   // rpm
+  double accel;     // rpm per second
+  uint32_t time;    // milliseconds
 };
 
-Step steps[] = { // test steps defined here
-  {true,  true,   8000,  8000/5,          5000},
-  {true,  true,   8000,  8000/5,          120000},
-  {true,  true,   0,     8000/9,          9500},
-  {false, true,   0,     0,               500}
+/****** TEST STEP PARAMS ******/
+
+// enter the test stand type, high speed or standard
+// and the steps per rev in ClearPath MSP software
+bool isHighSpeedGearBox = true;
+uint16_t SPR = 200;
+
+Step steps[] = {
+// spinning   heating   direction   speed   acceleration    time
+  {true,      true,     true,       8000,   8000/5,         5000},
+  {true,      true,     true,       8000,   8000/5,         120000},
+  {true,      true,     true,       0,      8000/9,         9500},
+  {false,     true,     true,       0,      0,              500}
 };
 
 bool break_loop, pause_requested;
 uint32_t sum_time = 0;
 elapsedMillis loop_time;
+FlexyStepper stepper;
 
 /******* FUNC DECLARATIONS *******/
 void display_srcfile_details();
@@ -58,28 +58,27 @@ int pgm_lastIndexOf(uint8_t c, const char * p);
 
 void setup() ////////////////////////////////////////////////////////////Setup ////////////////////////////////////////////////////////////////
 {
-  pinMode(PWM_TorquePin, INPUT_PULLUP); // Motor torque pin.
-  pinMode(ProgramRunPin, INPUT_PULLDOWN); // This pin get the signel from the disply to run the programe.
-  pinMode(ResetPin, INPUT_PULLDOWN); // This pin get the signel from the disply to run the programe.
-  pinMode(LEDPIN, OUTPUT);  // Make it an OUTput.
-  pinMode(AirValvePin, OUTPUT);  // Make it an OUTput.
-  pinMode(AirDumpValvePin, OUTPUT);// Make it an OUTput.
-  pinMode(EnablePin, OUTPUT);   // Make it an OUTput.
-  pinMode(MOTOR_STEP_PIN, OUTPUT);   // Make it an OUTput.
-  pinMode(MOTOR_DIRECTION_PIN, OUTPUT);   // Make it an OUTput.
-  pinMode(LoopPin, OUTPUT);   // Make it an OUTput.
-  pinMode(TorqueFLagPin, OUTPUT);   // Make it an OUTput.
-  pinMode(heat_bus_pin, OUTPUT);
+  pinMode(PRGM_FLAG_BUS_PIN, INPUT_PULLDOWN);
+  pinMode(PRGM_RESET_BUS_PIN, INPUT_PULLDOWN); 
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(AIR_SUPPLY_BUS_PIN, OUTPUT);  
+  pinMode(AIR_DUMP_BUS_PIN, OUTPUT);
+  pinMode(MOTOR_ENABLE_PIN, OUTPUT);
+  pinMode(MOTOR_STEP_PIN, OUTPUT);
+  pinMode(MOTOR_DIRECTION_PIN, OUTPUT);
+  pinMode(LOOP_BUS_PIN, OUTPUT);
+  pinMode(TORQUE_FLAG_BUS_PIN, OUTPUT);
+  pinMode(HEAT_BUS_PIN, OUTPUT);
 
-  digitalWrite (EnablePin, LOW);
-  digitalWrite (AirValvePin, LOW);
-  digitalWrite (AirDumpValvePin, LOW);
-  digitalWrite (LEDPIN, HIGH);
-  digitalWrite (LoopPin, LOW);
-  digitalWrite (TorqueFLagPin, LOW);
+  digitalWrite (MOTOR_ENABLE_PIN, LOW);
+  digitalWrite (AIR_SUPPLY_BUS_PIN, LOW);
+  digitalWrite (AIR_DUMP_BUS_PIN, LOW);
+  digitalWrite (LED_PIN, HIGH);
+  digitalWrite (LOOP_BUS_PIN, LOW);
+  digitalWrite (TORQUE_FLAG_BUS_PIN, LOW);
 
   stepper.connectToPins(MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
-  stepper.setStepsPerRevolution(PPR);
+  stepper.setStepsPerRevolution(isHighSpeedGearBox ? SPR / 3 : SPR);
 
   Serial.begin(115200); // Initalize UART, I2C bus, and connect to the micropressure sensor
 
@@ -89,40 +88,41 @@ void setup() ////////////////////////////////////////////////////////////Setup /
   delay(2000);
   display_srcfile_details();
 
-  attachInterrupt(digitalPinToInterrupt(ResetPin), rising, RISING); // Enable the interupt.
+  attachInterrupt(digitalPinToInterrupt(PRGM_RESET_BUS_PIN), rising, RISING); // Enable the interupt.
 }
 
 void loop() {
-  if (!digitalRead(ProgramRunPin)) {
-    digitalWrite (LEDPIN, LOW);
-    digitalWrite (EnablePin, LOW);
+  if (!digitalRead(PRGM_FLAG_BUS_PIN)) {
+    digitalWrite (LED_PIN, LOW);
+    digitalWrite (MOTOR_ENABLE_PIN, LOW);
     delay(100);
     if (Resetbool == HIGH) {
       Resetbool = LOW;
       display_srcfile_details();
     }
   } else {
-    digitalWrite (LEDPIN, HIGH);
-    digitalWrite (EnablePin, HIGH);
+    digitalWrite (LED_PIN, HIGH);
+    digitalWrite (MOTOR_ENABLE_PIN, HIGH);
     
     break_loop = false;
     pause_requested = false;
     // loop through test steps array, changing accel, speed each time.
-    for (uint16_t i = 0; i < sizeof(steps) / sizeof(steps[0]) && !break_loop && digitalRead(ProgramRunPin); i++) {
+    for (uint16_t i = 0; i < sizeof(steps) / sizeof(steps[0]) && !break_loop 
+         && digitalRead(PRGM_FLAG_BUS_PIN); i++) {
       loop_time = 0;  // Reset loop_time for each step
       sum_time = 0;   // Reset sum_time for each step
       
-      digitalWrite(heat_bus_pin, steps[i].heatThisStep); 
-      digitalWrite(LEDPIN, !digitalRead(LEDPIN));
+      digitalWrite(HEAT_BUS_PIN, steps[i].turnOnHeat); 
+      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
       stepper.setAccelerationInRevolutionsPerSecondPerSecond(steps[i].accel / 60);
       stepper.setSpeedInRevolutionsPerSecond(steps[i].speed / 60);
-      stepper.setTargetPositionInSteps(-2147483647);
+      stepper.setTargetPositionInSteps(steps[i].spin_dir ? -2147483647 : 2147483647);
 
       sum_time += steps[i].time;
       while (loop_time < sum_time) {
         
         // if stop/reset called, spin down motor and restart loop
-        if (!digitalRead(ProgramRunPin)) {
+        if (!digitalRead(PRGM_FLAG_BUS_PIN)) {
           stepper.setAccelerationInRevolutionsPerSecondPerSecond(850 / 60);
           stepper.setTargetPositionToStop();
           while (!stepper.processMovement());
@@ -131,20 +131,20 @@ void loop() {
           break;
         }
 
-        if (steps[i].run) {
+        if (steps[i].spinning) {
           stepper.processMovement();
         } 
         else {
           // stops motor spinning during a dwell step
-          digitalWrite(EnablePin, LOW);
+          digitalWrite(MOTOR_ENABLE_PIN, LOW);
         }
       }
     }
 
-    if (digitalRead(ProgramRunPin)) {
-      digitalWrite (LoopPin, HIGH);
+    if (digitalRead(PRGM_FLAG_BUS_PIN)) {
+      digitalWrite (LOOP_BUS_PIN, HIGH);
       delay(1);
-      digitalWrite (LoopPin, LOW);
+      digitalWrite (LOOP_BUS_PIN, LOW);
     }
   }
 }
@@ -155,21 +155,21 @@ void loop() {
 ////////////////////////////////////Functions/////////////////////////////////////////////////////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////
 void rising() {
-  attachInterrupt(digitalPinToInterrupt(ResetPin), falling, FALLING);
+  attachInterrupt(digitalPinToInterrupt(PRGM_RESET_BUS_PIN), falling, FALLING);
   start_micros = micros();
 }
 
 void falling() {
   end_micros = micros();
   duration = end_micros - start_micros;
-  attachInterrupt(digitalPinToInterrupt(ResetPin), rising, RISING); // Enable the interupt.
+  attachInterrupt(digitalPinToInterrupt(PRGM_RESET_BUS_PIN), rising, RISING); // Enable the interupt.
 
   if (duration >= 9900 && duration < 10100) {
     Resetbool = HIGH;
   } else Resetbool = LOW;
 }
 
-int pgm_lastIndexOf(uint8_t c, const char * p)// displays at startup the Sketch running in the Arduino
+int pgm_lastIndexOf(uint8_t c, const char * p)// displays at startup the Sketch spinningning in the Arduino
 {
   int last_index = -1; // -1 indicates no match
   uint8_t b;
@@ -182,7 +182,7 @@ int pgm_lastIndexOf(uint8_t c, const char * p)// displays at startup the Sketch 
   return last_index;
 }
 
-void display_srcfile_details(void) { // displays at startup the Sketch running in the Arduino
+void display_srcfile_details(void) { // displays at startup the Sketch spinningning in the Arduino
 
   const char *the_path = PSTR(__FILE__);           // save RAM, use flash to hold __FILE__ instead
 

@@ -4,10 +4,6 @@
 #include <avr/pgmspace.h>
 #include <Bounce2.h>
 
-/*
-* Motor controller source code will run test spec for 
-* Harley Davidson constant speed test
-*/
 //Interupt variables
 volatile unsigned long start_micros = 0.0;
 volatile unsigned long end_micros = 0;
