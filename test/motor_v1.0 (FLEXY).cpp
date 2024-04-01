@@ -1,14 +1,14 @@
-  #include "motor_config.h"
-  #include <AccelStepper.h>
+  #include <Wire.h>
+  #include <FlexyStepper.h>
   #include <avr/pgmspace.h>
+  #include <Bounce2.h>
 
-  /******* INTERRUPT VARIABLES *******/
+  //Interupt variables
   volatile unsigned long start_micros = 0.0;
   volatile unsigned long end_micros = 0;
   volatile unsigned long duration = 0;
   volatile bool askingToRun = false;
 
-  /******* I/O PINS *******/
   const uint8_t LOOP_BUS_PIN = 1;  
   const uint8_t MOTOR_STEP_PIN = 3;
   const uint8_t MOTOR_DIRECTION_PIN = 4;
@@ -21,7 +21,6 @@
   const uint8_t PRGM_RESET_BUS_PIN = 20;
   const uint8_t HEAT_BUS_PIN = 12;
 
-  /******* SYSTEM STATE CONTROL *******/
   enum SystemState {
   IDLE,
   RUNNING,
@@ -29,19 +28,53 @@
   RESET_REQUESTED,
   RESUME
   };
+  // Initialize the system state to IDLE at startup
   SystemState currentState = IDLE;
   bool isFullyStopped = false;
   bool isStepInitialized = false;
-  bool isPauseInitiated = false;
-  uint16_t currentStepIndex = 0;
-  elapsedMillis LED_timer, step_timer;
-  unsigned long pause_start_time = 0;
+  uint16_t distance_revs = 0;
+  uint16_t currentStepIndex = 0; // keeps track during PAUSE & RESUME states
+  elapsedMillis LED_timer, dwell_timer;
+  struct Step {
+    bool motorDwell;  // true if motor stopped, false for motor spinning
+    bool turnOnHeat;  // true for heat, false for none
+    bool spin_dir;    // true for CW from front, false for CCW
+    uint16_t target_speed;   // rpm
+    double accel;     // rpm per second
+    uint32_t time;    // milliseconds
+  };
 
-  /******* STEPPER MOTOR INIT *******/
-  AccelStepper stepper = AccelStepper(AccelStepper::DRIVER, MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
-  uint32_t motor_target_steps = 0;
-  uint16_t steps_per_rev = isHighSpeedGearBox ? SPR / 3 : SPR;
+  /****** TEST STEP PARAMS ******/
+
+  // enter the test stand type, high speed or standard
+  // and the steps per rev in ClearPath MSP software
+  bool isHighSpeedGearBox = true;
+  // for high speed gear box MUST MUST MUST be a multiple of 3
+  uint16_t SPR = 600; 
+
+  // may need to tweak acceleration on steps to ensure achieving set point
+  // within the step time or if performing a deceleration step to make sure
+  // motor comes to a complete stop before dwell step.
+  // UNITS:   speed, rpm | acceleration, rpm/s | time, ms
+  Step steps[] = {
+  // CODE WILL NOT COMPILE UNTIL YOU CUSTOMIZE AND UNCOMMENT OUT THIS CODE SECTION.
+  // motorDwell   heating   direction   speed   acceleration    time
+    {false,       true,     true,       3000,   1000,        13000},
+    {false,       true,     true,       0,      1000,        3000},
+    {true,        true,     true,       0,      0,           5000},
+    {false,       true,     false,      3000,   1000,        10000},
+    {false,       true,     false,      0,      1000,        3000},
+    {true,        true,     false,       0,      0,           5000},
+    {false,       false,    true,       1500,   500,        10000},
+    {false,       false,    true,       0,      500,        3000},
+    {true,        false,    true,      0,      0,           5000},
+    {false,       false,    false,      1500,   500,        10000},
+    {false,       false,    false,      0,      500,        3000},
+    {true,        false,    false,       0,      0,           5000},
+  };
   uint8_t size_steps = sizeof(steps) / sizeof(steps[0]);
+
+  FlexyStepper stepper;
 
   /******* FUNC DECLARATIONS *******/
   void display_srcfile_details();
@@ -50,10 +83,10 @@
   void run_rising();
   void run_falling();
   int pgm_lastIndexOf(uint8_t c, const char * p);
+  double calcTotalRevs(double initial_velocity_rpm, double acceleration_rpm_s, 
+                       double speed_rpm, double duration_ms);
   void printCurrentStepInfo();
   void printCurrentState();
-  uint32_t calcTotalSteps(double initial_velocity_rpm, double acceleration_rpm_s, 
-                       double speed_rpm, double duration_ms);
 
 
   void setup() {
@@ -76,16 +109,19 @@
     digitalWrite (LOOP_BUS_PIN, LOW);
     digitalWrite (TORQUE_FLAG_BUS_PIN, LOW);
 
-    Serial.begin(115200);
-    float max_speed_rpm = isHighSpeedGearBox ? 8500.0 : 2800.0;
-    stepper.setMaxSpeed(max_speed_rpm / 60 * steps_per_rev);
+    stepper.connectToPins(MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
+    stepper.setStepsPerRevolution(isHighSpeedGearBox ? SPR / 3 : SPR);
+
+    Serial.begin(115200); // Initalize UART, I2C bus, and connect to the micropressure sensor
+
+    Wire.begin(); // start the I2C bus
+    Wire.setClock(100000); //Optional - set I2C SCL to High Speed Mode of 100kHz
 
     delay(2000);
     display_srcfile_details();
 
     attachInterrupt(digitalPinToInterrupt(PRGM_RESET_BUS_PIN), reset_rising, RISING);
     attachInterrupt(digitalPinToInterrupt(PRGM_RUN_BUS_PIN), run_rising, RISING);
-    
     LED_timer = 0;
     printCurrentState();
   }
@@ -120,109 +156,94 @@
         break;
 
       case PAUSED:
-        pause_start_time = step_timer;
-        // Flash LED quickly to signal PAUSED state
+        // flash LED quickly to signal PAUSED state
         if (LED_timer > 100) {
-            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-            LED_timer = 0;
+          digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+          LED_timer = 0;
         }
 
-        // // Instruct the motor to stop as quickly as possible only once
-        if (!isPauseInitiated) {
-            Serial.println("Motor called to stop");
-            stepper.stop();
-            motor_target_steps = motor_target_steps - stepper.currentPosition();
-            isPauseInitiated = true;
+        if (!stepper.motionComplete()) {
+          /* NOTE:
+          The time spent spinning down to a stop (and resuming again)
+          will count towards the target distance. FlexyStepper library
+          will not allow us to ignore and account for this.
+          */
+          stepper.setAccelerationInRevolutionsPerSecondPerSecond(15);
+          stepper.setTargetPositionToStop();
+          stepper.processMovement();
+
+        }
+        else if (!isFullyStopped) {
+          digitalWrite(MOTOR_ENABLE_PIN, LOW);
+          isFullyStopped = true;
         }
 
-        // Check if the motor has completely stopped and keep running if not
-        if (!stepper.run()) {
-            digitalWrite(MOTOR_ENABLE_PIN, LOW); // Optionally disable motor power
-            isFullyStopped = true;
+        if (askingToRun) {
+          currentState = RESUME;
+          printCurrentState();
+          break;
         }
-
-        // Check if it's time to resume
-        if (askingToRun && isFullyStopped) {
-            Serial.println("Test called to resume");
-            currentState = RESUME;
-            isPauseInitiated = false; // Reset pause flag
-            printCurrentState();
-        }
-        break;
-
         
       case RESUME:
         digitalWrite(LED_PIN, HIGH);
         digitalWrite(HEAT_BUS_PIN, steps[currentStepIndex].turnOnHeat);
-        
-        if (steps[currentStepIndex].target_speed != 0) {
-          // Enable motor driver
+        if (!steps[currentStepIndex].motorDwell) {
           digitalWrite(MOTOR_ENABLE_PIN, HIGH);
-          
-          // Configure acceleration and speed according to the current step
-          stepper.setAcceleration(steps[currentStepIndex].accel / 60 * steps_per_rev);
-          stepper.setMaxSpeed(steps[currentStepIndex].target_speed / 60 * steps_per_rev);
-          stepper.moveTo(steps[currentStepIndex].is_CCW ? -motor_target_steps : motor_target_steps);
-          
-        } else {
-          // If it's a dwell step, ensure the motor is disabled
+          stepper.setAccelerationInRevolutionsPerSecondPerSecond(steps[currentStepIndex].accel / 60);
+          stepper.setSpeedInRevolutionsPerSecond(steps[currentStepIndex].target_speed / 60);
+          stepper.setTargetPositionInRevolutions(steps[currentStepIndex].spin_dir ? -distance_revs : distance_revs);
+        }
+        else {
           digitalWrite(MOTOR_ENABLE_PIN, LOW);
         }
-
         Serial.println("Resuming the following step:");
         printCurrentStepInfo();
-        
-        currentState = RUNNING; // Change the state back to RUNNING to continue with the test sequence
+        currentState = RUNNING;
         printCurrentState();
-        
-        step_timer = pause_start_time;
         break;
 
-
       case RUNNING:
-        // only perform these actions once
         if (!isStepInitialized) {
-          // Initialize common settings for all steps
+          // if current step is 0, previous step is set to final step
+          uint8_t prevIndex = (currentStepIndex == 0) ? size_steps - 1 : currentStepIndex - 1;
+          distance_revs = calcTotalRevs(steps[prevIndex].target_speed, steps[currentStepIndex].accel, 
+                                        steps[currentStepIndex].target_speed, steps[currentStepIndex].time);
+          // Initialize the heater and motor
           digitalWrite(LED_PIN, HIGH);
           digitalWrite(HEAT_BUS_PIN, steps[currentStepIndex].turnOnHeat);
-          stepper.setAcceleration(steps[currentStepIndex].accel / 60 * steps_per_rev);
-          if (steps[currentStepIndex].target_speed != 0) { // Deceleration to stop
-            // Enable motor driver and set speed and acceleration
+          if (!steps[currentStepIndex].motorDwell) {
             digitalWrite(MOTOR_ENABLE_PIN, HIGH);
-            stepper.setMaxSpeed(steps[currentStepIndex].target_speed / 60 * steps_per_rev);
-            motor_target_steps = calcTotalSteps(stepper.speed(), steps[currentStepIndex].accel, 
-                                         steps[currentStepIndex].target_speed, steps[currentStepIndex].time);
-            stepper.moveTo(steps[currentStepIndex].is_CCW ? -motor_target_steps : motor_target_steps);
-          } else { // Decel and stop step logic
-            stepper.stop();
+            stepper.setAccelerationInRevolutionsPerSecondPerSecond(steps[currentStepIndex].accel / 60);
+            stepper.setSpeedInRevolutionsPerSecond(steps[currentStepIndex].target_speed / 60);
+            stepper.setTargetPositionInRevolutions(steps[currentStepIndex].spin_dir ? -distance_revs : distance_revs);
           }
-          step_timer = 0; // Reset step timer
-          isStepInitialized = true; // Mark step as initialized
+          else {
+            digitalWrite(MOTOR_ENABLE_PIN, LOW);
+          }
+          dwell_timer = 0;
+          isStepInitialized = true;
+          
           printCurrentStepInfo();
         }
 
-        // run motor if not dwelling
-        if (stepper.isRunning()) {
-          stepper.run();
-        } else {
-          digitalWrite(MOTOR_ENABLE_PIN, LOW);
+        if (!steps[currentStepIndex].motorDwell) {
+          stepper.processMovement();
         }
 
-        // Check if the step time has elapsed
-        if (step_timer >= steps[currentStepIndex].time && !stepper.isRunning()) {
-          Serial.println("Step duration completed");
-          isStepInitialized = false;
-          currentStepIndex = (currentStepIndex + 1) % size_steps;
-          stepper.setCurrentPosition(0);
+        if (dwell_timer >= steps[currentStepIndex].time) {
+          if (stepper.motionComplete()) {
+            Serial.println("Motor motion completed");
+            stepper.setCurrentPositionInRevolutions(0); // reset abs. motor pos. to 0
+            isStepInitialized = false;
+            currentStepIndex = (currentStepIndex + 1) % size_steps;
+          }
         }
 
-        // Inform display controller of loop completion
-        if (currentStepIndex == 0 && !isStepInitialized) {
-          digitalWrite(LOOP_BUS_PIN, HIGH);
+        if (currentStepIndex == 0 && stepper.motionComplete()) {
+          digitalWrite (LOOP_BUS_PIN, HIGH);
           delay(1);
-          digitalWrite(LOOP_BUS_PIN, LOW);
+          digitalWrite (LOOP_BUS_PIN, LOW);
         }
-        break;
     }
   }
 
@@ -254,7 +275,6 @@
     Serial.println("Entering run_rising ISR");
     attachInterrupt(digitalPinToInterrupt(PRGM_RUN_BUS_PIN), run_falling, FALLING);
     askingToRun = true;
-    Serial.println(isFullyStopped);
   }
 
   void run_falling() {
@@ -307,12 +327,41 @@
 
   }
 
+  // Function signature update to accept initial velocity as an argument
+  double calcTotalRevs(double initial_velocity_rpm, double acceleration_rpm_s, 
+                                  double speed_rpm, double duration_ms) {
+      // Calculate the effective acceleration time considering the initial velocity
+      double time_to_speed_s;
+      if (acceleration_rpm_s != 0) {
+          time_to_speed_s = (speed_rpm - initial_velocity_rpm) / acceleration_rpm_s;
+      } else {
+          time_to_speed_s = 0;
+      }
+      
+      // Ensure time_to_speed_s is not negative (which can happen if speed_rpm < initial_velocity_rpm)
+      time_to_speed_s = max(0.0, time_to_speed_s);
+
+      // Distance (rotations) during acceleration phase, accounting for initial velocity
+      double distance_accel = 0.5 * (acceleration_rpm_s / 60) * (time_to_speed_s * time_to_speed_s) 
+                              + (initial_velocity_rpm / 60) * time_to_speed_s;
+
+      // Determine if there's a constant speed phase
+      double duration_s = duration_ms / 1000.0;
+      double time_constant_s = duration_s > time_to_speed_s ? duration_s - time_to_speed_s : 0.0;
+
+      // Distance (rotations) at constant speed
+      double distance_const = (speed_rpm / 60) * time_constant_s;
+
+      // Total rotations
+      return distance_accel + distance_const;
+  }
+
   void printCurrentStepInfo() {
     Serial.print("Step ");
     Serial.print(currentStepIndex + 1);
     Serial.print(": Distance = ");
-    Serial.print(steps[currentStepIndex].is_CCW ? -1 * motor_target_steps : motor_target_steps);
-    Serial.print(" steps, Time = ");
+    Serial.print(steps[currentStepIndex].spin_dir ? -1 * distance_revs : distance_revs);
+    Serial.print("revs, Time = ");
     Serial.print(steps[currentStepIndex].time);
     Serial.print(" ms, Speed = ");
     Serial.print(steps[currentStepIndex].target_speed);
@@ -342,34 +391,4 @@
         Serial.println("Unknown State");
         break;
     }
-  }
-
-
-// Function signature update to accept initial velocity as an argument
-  uint32_t calcTotalSteps(double initial_velocity_rpm, double acceleration_rpm_s, 
-                                  double speed_rpm, double duration_ms) {
-      // Calculate the effective acceleration time considering the initial velocity
-      double time_to_speed_s;
-      if (acceleration_rpm_s != 0) {
-          time_to_speed_s = (speed_rpm - initial_velocity_rpm) / acceleration_rpm_s;
-      } else {
-          time_to_speed_s = 0;
-      }
-      
-      // Ensure time_to_speed_s is not negative (which can happen if speed_rpm < initial_velocity_rpm)
-      time_to_speed_s = max(0.0, time_to_speed_s);
-
-      // Distance (rotations) during acceleration phase, accounting for initial velocity
-      double distance_accel = 0.5 * (acceleration_rpm_s / 60) * (time_to_speed_s * time_to_speed_s) 
-                              + (initial_velocity_rpm / 60) * time_to_speed_s;
-
-      // Determine if there's a constant speed phase
-      double duration_s = duration_ms / 1000.0;
-      double time_constant_s = duration_s > time_to_speed_s ? duration_s - time_to_speed_s : 0.0;
-
-      // Distance (rotations) at constant speed
-      double distance_const = (speed_rpm / 60) * time_constant_s;
-
-      // Total rotations
-      return (distance_accel + distance_const) * steps_per_rev;
   }
