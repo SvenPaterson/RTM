@@ -15,5 +15,3 @@ generate_motor_config(steps, config)
 
 # Compile and upload the project
 compile_and_upload(project_dir, environment)
-
-
