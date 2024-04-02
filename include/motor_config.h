@@ -3,8 +3,8 @@
 
 #include <cstdint>
 
-const bool isHighSpeedGearBox = true;
-const uint16_t SPR = 600;
+const bool isHighSpeedGearBox = false;
+const uint16_t SPR = 800;
 
 struct Step {
     bool turnOnHeat;
@@ -15,14 +15,14 @@ struct Step {
 };
 
 const Step steps[] = {
-    {true, 3000, false, 1000, 13000},
-    {true, 0, false, 1000, 8000},
-    {true, 3000, true, 1000, 13000},
-    {true, 0, true, 1000, 8000},
-    {false, 1500, false, 1000, 13000},
-    {false, 0, false, 1000, 8000},
-    {false, 1500, true, 1000, 13000},
-    {false, 0, true, 1000, 8000},
+    {false, 1000, true, 500, 12},
+    {false, 0, true, 250, 5},
+    {false, 1000, true, 500, 12},
+    {false, 0, true, 250, 5},
+    {false, 500, true, 500, 12},
+    {false, 0, true, 250, 5},
+    {false, 500, true, 500, 12},
+    {false, 0, true, 250, 5},
 };
 
 #endif

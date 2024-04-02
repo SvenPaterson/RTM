@@ -40,7 +40,7 @@
   /******* STEPPER MOTOR INIT *******/
   AccelStepper stepper = AccelStepper(AccelStepper::DRIVER, MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
   uint32_t motor_target_steps = 0;
-  uint16_t steps_per_rev = isHighSpeedGearBox ? SPR / 3 : SPR;
+  uint16_t steps_per_rev = SPR;
   uint8_t size_steps = sizeof(steps) / sizeof(steps[0]);
 
   /******* FUNC DECLARATIONS *******/
