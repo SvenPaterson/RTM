@@ -15,13 +15,13 @@ struct Step {
 };
 
 const Step steps[] = {
-    {true, 3000, false, 1000, 63000},
+    {true, 3000, false, 1000, 13000},
     {true, 0, false, 1000, 8000},
-    {true, 3000, true, 1000, 63000},
+    {true, 3000, true, 1000, 13000},
     {true, 0, true, 1000, 8000},
-    {false, 1500, false, 1000, 63000},
+    {false, 1500, false, 1000, 13000},
     {false, 0, false, 1000, 8000},
-    {false, 1500, true, 1000, 63000},
+    {false, 1500, true, 1000, 13000},
     {false, 0, true, 1000, 8000},
 };
 
