@@ -10,13 +10,13 @@
 #define SD_DETECT_PIN 0
 #define LOOP_BUS_PIN 1
 #define MOTOR_HLFB_PIN 2
-#define HEAT_BUS_PIN 12
 #define HEAT_OUTPUT_PIN 6
 #define HEAT_SAFETY_PIN 7
 #define AIR_SUPPLY_PIN 8
 #define AIR_DUMP_PIN 9
 #define PRGM_RUN_BUS_PIN 10
 #define TORQ_FLAG_BUS_PIN 11
+#define HEAT_BUS_PIN 12
 #define AIR_SUPPLY_BUS_PIN 14
 #define AIR_DUMP_BUS_PIN 15
 #define RUN_SW_PIN 16

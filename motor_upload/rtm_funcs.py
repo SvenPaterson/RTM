@@ -31,15 +31,15 @@ def generate_motor_config(steps, config):
         
         file.write("struct Step {\n")
         file.write("    bool turnOnHeat;\n")
-        file.write("    double target_speed;\n")
+        file.write("    uint16_t target_speed;\n")
         file.write("    bool is_CCW;\n")
-        file.write("    double accel;\n")
+        file.write("    uint16_t accel;\n")
         file.write("    uint32_t time;\n")
         file.write("};\n\n")
         
         file.write("const Step steps[] = {\n")
         for step in steps:
-            file.write(f"    {{{'true' if step['turnOnHeat'] else 'false'}, {step['target_speed']}, {'true' if step['is_CCW'] else 'false'}, {step['accel']}, {step['time']}}},\n")
+            file.write(f"    {{{'true' if step['turnOnHeat'] else 'false'}, {step['target_speed']}, {'true' if step['is_CCW'] == 'CCW' else 'false'}, {step['accel']}, {step['time']}}},\n")
         
         file.write("};\n\n")
         file.write("#endif\n")

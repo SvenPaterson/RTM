@@ -10,6 +10,9 @@ environment = 'motor'
 # Load configurations and steps from Excel
 steps, config = load_config_from_excel(config_xlsx)
 
+### NEED TO INCLUDE BLOCKING CODE TO PREVENT TARGET SPEEDS ###
+### FROM NEVER BEING REACHED WITH GIVEN ACCELS AND STEP TIMES!!! ###
+
 # Generate the motor_config.h file
 generate_motor_config(steps, config)
 
