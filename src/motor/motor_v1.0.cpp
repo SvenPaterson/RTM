@@ -24,14 +24,14 @@ const uint8_t PRGM_RESET_BUS_PIN = 20;
 
 /******* SYSTEM STATE CONTROL *******/
 enum SystemState {
-DEBUG,
-IDLE,
+DEBUG,  // debug mode: currentState = DEBUG
+IDLE,   // normal mode: currentState = IDLE
 RUNNING,
 PAUSED,
 RESET_REQUESTED,
 RESUME
 };
-SystemState currentState = IDLE; // IDLE for normal operation, or DEBUG
+SystemState currentState = IDLE;
 bool isFullyStopped = false;
 bool isStepInitialized = false;
 bool isPauseInitiated = false;
