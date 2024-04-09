@@ -33,6 +33,7 @@ String msg, prev_status_str, test_status_str = "STANDBY";
 uint32_t current_loop_count = 0;
 uint32_t requested_loops = 0;
 bool torqueRequested = false;
+#define RESET_TIMER 5
 
 enum ProgramState {
   STATE_STANDBY,
@@ -99,7 +100,6 @@ void setup() {
   // measure ambient lab pressure and automatically set offset
   rtm.setPressureOffset();
 
-
   // Clear screen to begin test protocol
   Serial.println("Test Status: " + test_status_str);
   rtm.writeToLog("Display Controller initialized", "STATUS");
@@ -135,7 +135,8 @@ void loop() {
         rtm.updateLCD(test_status_str);
         rtm.turnOffHeaters();
       }
-      return;
+
+      break;
 
     case STATE_HEATING:
       rtm.updateLCD(test_status_str);
@@ -159,7 +160,8 @@ void loop() {
         test_status_str = "RUNNING";
         rtm.writeToLog(test_status_str, "STATUS");
       }
-      return;
+
+      break;
 
     case STATE_RUNNING:
       rtm.updateLCD(test_status_str);
@@ -167,10 +169,9 @@ void loop() {
       rtm.computeHeaterOutput();
       rtm.writeToDataFile();
       if (current_loop_count >= requested_loops) {
-        currentState = STATE_TEST_COMPLETED;
         test_status_str = "TEST DONE";
         rtm.writeToLog(test_status_str, "STATUS");
-
+        currentState = STATE_TEST_COMPLETED;
       }
       else if(torqueRequested) {
         torqueRequested = false;
@@ -185,7 +186,8 @@ void loop() {
         test_status_str = "PAUSED";
         rtm.writeToLog(test_status_str, "STATUS");
       }
-      return;  
+
+      break;  
 
     case STATE_PAUSED:
       rtm.updateLCD(test_status_str);
@@ -200,19 +202,18 @@ void loop() {
         currentState = STATE_RESET_REQUESTED;
         test_status_str = "RESETTING";
       }
-      return;
 
-    case STATE_TEST_COMPLETED:
-      rtm.updateLCD(test_status_str);
-      rtm.lcd.setBacklight(0,255,0);
-      rtm.turnOffHeaters();
-      rtm.stopProgram();
+      break;
+
+    case STATE_TEST_COMPLETED:     
+      rtm.testCompleted(test_status_str);
       if (rtm.getResetSwitch()) {
-        test_status_str = "RESETTING";
         currentState = STATE_RESET_REQUESTED;
+        test_status_str = "RESETTING";
         rtm.lcd.setBacklight(255,255,255);
       }
-      return;
+
+      break;
 
     case STATE_RESET_REQUESTED:
       if (!rtm.getResetSwitch() && current_loop_count < requested_loops) {
@@ -222,8 +223,8 @@ void loop() {
       }
       else if (!rtm.getResetSwitch() && current_loop_count >= requested_loops) {
         test_status_str = "TEST DONE";
-        currentState = STATE_TEST_COMPLETED;
         rtm.writeToLog(test_status_str, "STATUS");
+        currentState = STATE_TEST_COMPLETED;
       }
       else {
         rtm.updateLCD(test_status_str);
@@ -231,7 +232,7 @@ void loop() {
         rtm.stopProgram();
         msg = "Test will be RESET in:";
         rtm.messageScreen(msg);
-        for (int i = 10; i > 0; i--) {
+        for (int i = RESET_TIMER; i > 0; i--) {
           rtm.messageScreen(msg, false, String(i) + " seconds");
           delay(1000);
           rtm.update(current_loop_count);
@@ -251,7 +252,8 @@ void loop() {
           currentState = STATE_STANDBY;
         }
       }
-      return;
+
+      break;
   }
 }
 

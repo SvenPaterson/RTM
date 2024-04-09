@@ -645,13 +645,15 @@ void DisplayController::messageScreen(const String& msg,
         }
 }
 
-void DisplayController::testDoneScreen(const uint8_t& loop_count) {
-    //String status = "Total hours ran: " + String(_run_hours);
-    if (_completeTimer >= 10000) {
-        lcd.clear();
-    }
+void DisplayController::testCompleted(const String& test_status_str) {
+     if (!_hasTestCompletedBeenCalled) {
+        turnOffHeaters();
+        stopProgram();
+        _hasTestCompletedBeenCalled = true;
+     }
+    
     if (_completeTimer >= 1000) {
-        messageScreen("[TEST COMPLETED]", true);
+        updateLCD(test_status_str);
         if (_flasher) {
             lcd.setBacklight(RGB_GREEN);
         }
