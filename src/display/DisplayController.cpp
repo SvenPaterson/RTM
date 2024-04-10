@@ -161,7 +161,6 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
 
     // Initialize the LCD screen
     lcd.begin(Wire);
-    Wire.setClock(10000); // low speed mode for long wire runs
     lcd.setFastBacklight(RGB_WHITE);
     lcd.setContrast(5);
     lcd.clear();
