@@ -45,7 +45,7 @@ class DisplayController {
          * to set the pressure offset.
          * @param num_meas default: 10 measurements
          */
-        void setPressureOffset(const uint8_t& num_meas=10);
+        void setPressureOffset(const uint8_t& num_meas=5);
 
         /**  
          * @brief Write an entry to the the data file after a defined interval.
@@ -146,15 +146,11 @@ class DisplayController {
                            const String& status="");
 
         /**  
-         * @brief Displays a 'test completed' screen which includes the
-         * total loops completed as well as test duration
-         * @param loop_count this is the current loop count
-         * @param total_loops this is the total number of loops from test spec
-         * @param cls clear screen is set to 'true' by default.
-         *            Will reduce flickering if set to 'false' 
-         *            while updating a 'status' only.
+         * @brief Updates the display with test_status, turns of heaters,
+         * stops program. Flashes green and white to notify user.
+         * @param test_status_str
          */
-        void testDoneScreen(const uint8_t& loop_count);
+        void testCompleted(const String& test_status_str);
         
         /**
          * @brief Updates the main test loop LCD status screen with all
@@ -184,6 +180,12 @@ class DisplayController {
          *             set to 0 to halt program 
          */
         void errorScreen(const String& msg, const int& time=0);
+
+        /**
+         * @brief clears the screen and resets the backlight to bright
+         * white. 
+         */
+        void resetScreen();
 
         /**
          * @brief Write an entry to the log file. Writes one line per 
@@ -288,6 +290,7 @@ class DisplayController {
 
         elapsedMillis _screenTimer, _errorTimer, _completeTimer;
         bool _flasher, _isScreenUpdate = true;
+        bool _hasTestCompletedBeenCalled = false;
 
         /**
          * Prints a row on the lcd screen using four strings, they will 

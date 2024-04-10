@@ -24,14 +24,14 @@ const uint8_t PRGM_RESET_BUS_PIN = 20;
 
 /******* SYSTEM STATE CONTROL *******/
 enum SystemState {
-DEBUG,
-IDLE,
+DEBUG,  // debug mode: currentState = DEBUG
+IDLE,   // normal mode: currentState = IDLE
 RUNNING,
 PAUSED,
 RESET_REQUESTED,
 RESUME
 };
-SystemState currentState = IDLE; // IDLE for normal operation, or DEBUG
+SystemState currentState = IDLE;
 bool isFullyStopped = false;
 bool isStepInitialized = false;
 bool isPauseInitiated = false;
@@ -84,10 +84,10 @@ void setup() {
 
     delay(2000);
     display_srcfile_details();
-
-    attachInterrupt(digitalPinToInterrupt(PRGM_RESET_BUS_PIN), reset_rising, RISING);
-    attachInterrupt(digitalPinToInterrupt(PRGM_RUN_BUS_PIN), run_rising, RISING);
-
+    if (currentState != DEBUG) {
+        attachInterrupt(digitalPinToInterrupt(PRGM_RESET_BUS_PIN), reset_rising, RISING);
+        attachInterrupt(digitalPinToInterrupt(PRGM_RUN_BUS_PIN), run_rising, RISING);
+    }
     LED_timer = 0;
     printCurrentState();
 }
@@ -96,7 +96,7 @@ void setup() {
 void loop() {
     switch (currentState) {
         case DEBUG:
-            // move motor back and forth at 180rpm
+            /* // move motor back and forth at 180rpm
             digitalWrite(MOTOR_ENABLE_PIN, HIGH);
             stepper.setAccelerationInRevolutionsPerSecondPerSecond(90 / 60.0);
             stepper.setSpeedInRevolutionsPerSecond(180 / 60.0);
@@ -108,8 +108,14 @@ void loop() {
 
             // Manually set to move CCW
             stepper.setTargetPositionRelativeInRevolutions(-10);
-            while(!stepper.motionComplete()) stepper.processMovement();
-            delay(1000);
+            while(!stepper.motionComplete()) stepper.processMovement(); */
+
+            if (digitalRead(PRGM_RUN_BUS_PIN)) {
+                digitalWrite(LOOP_BUS_PIN, HIGH);
+                delay(1);
+                digitalWrite(LOOP_BUS_PIN, LOW);
+                delay(3000);
+            }
 
             break;
         
