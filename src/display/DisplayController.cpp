@@ -6,6 +6,7 @@
 #define RGB_WHITE 255, 255, 255
 #define RGB_RED 255, 0, 0
 #define RGB_GREEN 0, 255, 0
+#define RGB_OFF 0, 0, 0
 #define MAX_CHARS_PER_LINE 20
 #define ERROR_SCREEN_DURATION 5
 
@@ -160,7 +161,8 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
 
     // Initialize the LCD screen
     lcd.begin(Wire);
-    lcd.setBacklight(RGB_WHITE);
+    Wire.setClock(10000); // low speed mode for long wire runs
+    lcd.setFastBacklight(RGB_WHITE);
     lcd.setContrast(5);
     lcd.clear();
     Serial.println(" - lcd screen initialized");
@@ -240,7 +242,7 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     _resetSwitch->attach(_reset_sw_pin);
     _resetSwitch->interval(10);
     writeToLog(msg);
-}
+    }
 
 
 
@@ -317,7 +319,7 @@ void DisplayController::computeHeaterOutput(const unsigned int& interval) {
             errorScreen("Sump temp not rising, check heaters");
         }
         if (deltaT > _deltaT_safety) {
-            errorScreen("Thermal runaway!", 0);
+            errorScreen("Thermal runaway!");
         }
         if (_PIDTimer > interval) {
             _input = _sump_temp;
@@ -396,7 +398,7 @@ void DisplayController::writeToLog(const String& msg, const String& type,
         _isSDCardActive = SD.begin(BUILTIN_SDCARD);
     }
     if (!_isSDCardInserted && Serial) {
-        errorScreen(msg, 2);
+        errorScreen(msg, 5);
         Serial.println(" - [INTENDED FOR LOGFILE] " + msg);
     }
     else if (_isSDCardActive) {
@@ -410,7 +412,7 @@ void DisplayController::writeToLog(const String& msg, const String& type,
             Serial.println(" - " + msg);
         }
         else {
-            errorScreen(msg, 2);
+            errorScreen(msg, 5);
         }
     }
 }
@@ -445,12 +447,12 @@ void DisplayController::writeToDataFile() {
                 
             }
             else {
-                errorScreen(error, 2);
+                errorScreen(error, 5);
                 _dataLoggerTimer = 0;
             } 
         }
         else {
-            errorScreen(error, 2);
+            errorScreen(error, 5);
             _dataLoggerTimer = 0;
         }
     } 
@@ -498,10 +500,10 @@ void DisplayController::writeToConfigFile() {
             _restartFile.close();
         } else {
             error = "Error writing to config_file.txt";
-            errorScreen(error, 2);
+            errorScreen(error);
         }
     } else {
-        errorScreen(error, 2);
+        errorScreen(error);
     }
 }
 
@@ -650,16 +652,18 @@ void DisplayController::testCompleted(const String& test_status_str) {
         turnOffHeaters();
         stopProgram();
         _hasTestCompletedBeenCalled = true;
+        _screenTimer = 0;
      }
     
-    if (_completeTimer >= 1000) {
-        updateLCD(test_status_str);
+    if (_completeTimer >= 1500) {
         if (_flasher) {
-            lcd.setBacklight(RGB_GREEN);
+            lcd.setFastBacklight(RGB_GREEN);
         }
         else {
-            lcd.setBacklight(RGB_WHITE);
+            lcd.setFastBacklight(RGB_WHITE);
         }
+        
+        updateLCD(test_status_str);
         _flasher = !_flasher;
         _completeTimer = 0;
     }
@@ -676,19 +680,20 @@ void DisplayController::errorScreen(const String& msg, const int& time) {
         stopProgram();
         while (true) {
             if (_errorTimer >= 1000) {
-                update(_current_loop_count);
-                if (getResetSwitch()) {
-                    begin(_pinMappings);
-                    break;
-                }
+                
                 if (_flasher) {
-                    lcd.setBacklight(RGB_RED);
+                    lcd.setFastBacklight(RGB_RED);
                 }
                 else {
-                    lcd.setBacklight(RGB_WHITE);
+                    lcd.setFastBacklight(RGB_OFF);
                 }
+                update(_current_loop_count);
                 _flasher = !_flasher;
                 _errorTimer = 0;
+            }
+            else if (getResetSwitch()) {
+                begin(_pinMappings);
+                break;
             }
         }
     }
@@ -696,21 +701,30 @@ void DisplayController::errorScreen(const String& msg, const int& time) {
         for (int x=time; x>0; x--) {
         if (_errorTimer >= 1000) {
             if (_flasher) {
-                lcd.setBacklight(RGB_RED);
+                lcd.setFastBacklight(RGB_RED);
             }
             else {
-                lcd.setBacklight(RGB_WHITE);
+                lcd.setFastBacklight(RGB_WHITE);
             }
             _flasher = !_flasher;
             _errorTimer = 0;
+            delay(10);
             messageScreen(msg, false, "continue in " + String(x) + "s");
         }
+        else if (getResetSwitch()) {
+                begin(_pinMappings);
+                break;
+            }
         delay(1000);
     }
-    lcd.setBacklight(RGB_WHITE);
+    lcd.setFastBacklight(RGB_WHITE);
     }
 }
 
+void DisplayController::resetScreen() {
+    lcd.clear();
+    lcd.setFastBacklight(RGB_WHITE);
+}
 
 
 

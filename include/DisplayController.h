@@ -182,6 +182,12 @@ class DisplayController {
         void errorScreen(const String& msg, const int& time=0);
 
         /**
+         * @brief clears the screen and resets the backlight to bright
+         * white. 
+         */
+        void resetScreen();
+
+        /**
          * @brief Write an entry to the log file. Writes one line per 
          * execution.
          * @param msg msg to be logged
