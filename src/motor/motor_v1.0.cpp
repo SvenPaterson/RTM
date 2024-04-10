@@ -2,6 +2,10 @@
 #include <FlexyStepper.h>
 #include <avr/pgmspace.h>
 
+// RTM Motor Controller Version
+// Last Update: 4/10/24
+#define SRC_FILE_VERSION "Motor v1.3"
+
 /******* INTERRUPT VARIABLES *******/
 volatile unsigned long start_micros = 0;
 volatile unsigned long end_micros = 0;
@@ -53,7 +57,6 @@ void reset_rising();
 void reset_falling();
 void run_rising();
 void run_falling();
-int pgm_lastIndexOf(uint8_t c, const char * p);
 void debugStepInfo();
 void printCurrentState();
 
@@ -82,7 +85,7 @@ void setup() {
     stepper.connectToPins(MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
     stepper.setStepsPerRevolution(cnts_per_rev);
 
-    delay(2000);
+    delay(5000);
     display_srcfile_details();
     if (currentState != DEBUG) {
         attachInterrupt(digitalPinToInterrupt(PRGM_RESET_BUS_PIN), reset_rising, RISING);
@@ -286,45 +289,9 @@ void run_falling() {
     printCurrentState();
 }
 
-
-int pgm_lastIndexOf(uint8_t c, const char * p) {
-    /* HELPER FUNCTION TO PRINT SRC FILE */
-    int last_index = -1; // -1 indicates no match
-    uint8_t b;
-    for (int i = 0; true; i++) {
-        b = pgm_read_byte(p++);
-        if (b == c)
-        last_index = i;
-        else if (b == 0) break;
-    }
-    return last_index;
-}
-
 void display_srcfile_details(void) {
-    /* Print source file to Serial */
-    // save RAM, use flash to hold __FILE__ instead
-    const char *the_path = PSTR(__FILE__);
-
-    // index of last '/'
-    int slash_loc = pgm_lastIndexOf('/', the_path);
-    // or last '\' (windows, ugh)
-    if (slash_loc < 0) slash_loc = pgm_lastIndexOf('\\', the_path);
-
-    // index of last '.'
-    int dot_loc = pgm_lastIndexOf('.', the_path);
-    // if no dot, return end of string
-    if (dot_loc < 0) dot_loc = pgm_lastIndexOf(0, the_path);
-
-    // print out the firmware version to serial port
-    Serial.print("\nFirmware Version: ");
-    for (int i = slash_loc + 1; i < dot_loc; i++) {
-        uint8_t b = pgm_read_byte(&the_path[i]);
-        if (b != 0) {
-        Serial.print((char) b);
-        }
-        else break;
-    }
-    Serial.print(", Compiled on: ");
+    Serial.print(SRC_FILE_VERSION);
+    Serial.print("  Compiled on: ");
     Serial.print(__DATE__);
     Serial.print(" at ");
     Serial.print(__TIME__);

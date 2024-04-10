@@ -3,8 +3,11 @@
 #include <TimeLib.h>
 #include <Bounce2.h>
 
-#include <avr/wdt.h>
 #include "DisplayController.h"
+
+// RTM Display Controller Version
+// Last Update: 4/10/24
+#define SRC_FILE_VERSION "Display v1.3"
 
 // define the board I/O pin numbers
 #define SD_DETECT_PIN 0
@@ -50,7 +53,6 @@ volatile unsigned long start_micros = 0;
 volatile unsigned long end_micros = 0;
 
 // FUNCTION DECLARATIONS
-int pgm_lastIndexOf(uint8_t c, const char *p);
 String srcfile_details();
 void loopPinRisingEdge();
 void loopPinFallingEdge();
@@ -265,59 +267,18 @@ void loop() {
 }
 
 
+
 ///////////////////////////////////////////////////////////////////////////////////
-// FUNCTION DEFINITIONS //
+////////////////////////////////////Functions//////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////
 
 String srcfile_details() { 
-  /* Function fetches the source file filename
-   * as well as the date and time at compile and
-   * returns that as a String.
-  */ 
-  const char *the_path = PSTR(__FILE__);
-  String msg = "Firmware Version: ";
-
-  int slash_loc = pgm_lastIndexOf('/', the_path);
-  if (slash_loc < 0)
-    slash_loc = pgm_lastIndexOf('\\', the_path);
-
-  int dot_loc = pgm_lastIndexOf('.', the_path);
-  if (dot_loc < 0)
-    dot_loc = pgm_lastIndexOf(0, the_path);
-
-  for (int i = slash_loc + 1; i < dot_loc; i++)
-  {
-    uint8_t b = pgm_read_byte(&the_path[i]);
-    if (b != 0) {
-      msg += (char)b;
-    }
-    else {
-      break;
-    }
-  }
-
-  msg += " - compiled on: ";
-  msg += __DATE__;
-  msg += " at ";
-  msg += __TIME__;
-  return msg;
-}
-
-int pgm_lastIndexOf(uint8_t c, const char *p) {
-  /* finds last index of char 'c', withing string 'p' */
-  int last_index = -1; // -1 indicates no match
-  uint8_t b;
-  for (int i = 0; true; i++) {
-    b = pgm_read_byte(p++);
-    if (b == c) {
-      last_index = i;
-    }
-    else {
-      if (b == 0) {
-        break;
-      }
-    }
-  }
-  return last_index;
+    String msg = SRC_FILE_VERSION;
+    msg += "  compiled on: ";
+    msg += __DATE__;
+    msg += " at ";
+    msg += __TIME__;
+    return msg;
 }
 
 /****** INTERRUPT FUNCTIONS ******/
