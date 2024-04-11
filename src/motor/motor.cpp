@@ -1,6 +1,6 @@
 #include "motor_config.h"
 #include <FlexyStepper.h>
-#include <avr/pgmspace.h>
+#include <SPI_MSTransfer_T4.h>
 
 // RTM Motor Controller Version
 // Last Update: 4/10/24
@@ -13,18 +13,33 @@ volatile unsigned long duration = 0;
 volatile bool askingToRun = false;
 
 /******* I/O PINS *******/
-const uint8_t LOOP_BUS_PIN = 1;  
-const uint8_t MOTOR_STEP_PIN = 3;
-const uint8_t MOTOR_DIRECTION_PIN = 4;
-const uint8_t MOTOR_ENABLE_PIN = 5;
-const uint8_t PRGM_RUN_BUS_PIN = 10;
-const uint8_t TORQUE_FLAG_BUS_PIN = 11;
-const uint8_t HEAT_BUS_PIN = 12;
-const uint8_t LED_PIN = 13;
-const uint8_t AIR_SUPPLY_BUS_PIN = 14;
-const uint8_t AIR_DUMP_BUS_PIN = 15 ;
-const uint8_t PRGM_RESET_BUS_PIN = 20;
+// SETUP FOR SPI1
+#define CS1 0
+#define MISO1 1
+#define FREE_1 2
+#define MOTOR_STEP_PIN 3        // can't be moved
+#define MOTOR_DIRECTION_PIN 4   // can't be moved
+#define MOTOR_ENABLE_PIN 5      // can't be moved
+#define LOOP_BUS_PIN 6
+#define FREE_3 7
+#define FREE_4 8
+#define FREE_5 9
+#define PRGM_RUN_BUS_PIN 10
+#define TORQUE_FLAG_BUS_PIN 11
+#define HEAT_BUS_PIN 12
+#define LED_PIN 13
+#define AIR_SUPPLY_BUS_PIN 14
+#define AIR_DUMP_BUS_PIN 15
+#define FREE_6 16
+#define FREE_7 17
+#define FREE_8 18
+#define FREE_9 19
+#define PRGM_RESET_BUS_PIN 20
 
+#define MOSI1 26    // open pad on bottom of board
+#define CLK1 27     // open pad on bottom of board
+
+SPI_MSTransfer_T4<&SPI1, 0x1234> mySPI;
 
 /******* SYSTEM STATE CONTROL *******/
 enum SystemState {
@@ -59,6 +74,7 @@ void run_rising();
 void run_falling();
 void debugStepInfo();
 void printCurrentState();
+void myCB(uint16_t *buffer, uint16_t length, AsyncMST info);
 
 
 void setup() {
@@ -84,6 +100,9 @@ void setup() {
     Serial.begin(115200);
     stepper.connectToPins(MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
     stepper.setStepsPerRevolution(cnts_per_rev);
+
+    mySPI.begin();
+    mySPI.onTransfer(myCB);
 
     delay(5000);
     display_srcfile_details();
@@ -337,4 +356,15 @@ void printCurrentState() {
         Serial.println("Unknown State");
         break;
     }
+}
+
+void myCB(uint16_t *buffer, uint16_t length, AsyncMST info) {
+    for (int i = 0; i < length; i++) {
+        Serial.print(buffer[i], HEX);
+        Serial.print(" ");
+    }
+    Serial.print(" --> Length: ");
+    Serial.print(length);
+    Serial.print(" --> PacketID: ");
+    Serial.println(info.packetID, HEX);
 }

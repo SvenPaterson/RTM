@@ -17,6 +17,7 @@
 
 #define MCP9600_DEFAULT_ADDR_ONE 0x60
 #define MCP9600_DEFAULT_ADDR_TWO 0x67
+#define DISP_CNTRLLR_ADDR 0x10
 
 class DisplayController {
     public:

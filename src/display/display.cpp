@@ -2,7 +2,7 @@
 #include <string.h>
 #include <TimeLib.h>
 #include <Bounce2.h>
-
+#include <SPI_MSTransfer_MASTER.h>
 #include "DisplayController.h"
 
 // RTM Display Controller Version
@@ -10,26 +10,32 @@
 #define SRC_FILE_VERSION "Display v1.3"
 
 // define the board I/O pin numbers
+// SETUP FOR SPI0 
 #define SD_DETECT_PIN 0
-#define LOOP_BUS_PIN 1
-#define MOTOR_HLFB_PIN 2
-#define HEAT_OUTPUT_PIN 6
-#define HEAT_SAFETY_PIN 7
-#define AIR_SUPPLY_PIN 8
-#define AIR_DUMP_PIN 9
-#define PRGM_RUN_BUS_PIN 10
-#define TORQ_FLAG_BUS_PIN 11
-#define HEAT_BUS_PIN 12
+#define PRGM_RUN_BUS_PIN 1
+#define MOTOR_HLFB_PIN 2        // can't be moved
+#define TORQ_FLAG_BUS_PIN 3
+#define HEAT_BUS_PIN 4
+#define LOOP_BUS_PIN 5
+#define HEAT_OUTPUT_PIN 6       // can't be moved
+#define HEAT_SAFETY_PIN 7       // can't be moved
+#define AIR_SUPPLY_PIN 8        // can't be moved
+#define AIR_DUMP_PIN 9          // can't be moved
+#define CS0 10
+#define MOSI0 11
+#define MISO0 12
+#define CLK0 13                 // solder jumper wire
 #define AIR_SUPPLY_BUS_PIN 14
 #define AIR_DUMP_BUS_PIN 15
-#define RUN_SW_PIN 16
-#define RESET_SW_PIN 17
-#define SDA0_PIN 18
-#define SDL0_PIN 19
+#define RUN_SW_PIN 16           // can't be moved
+#define RESET_SW_PIN 17         // can't be moved
+#define SDA0_PIN 18             // can't be moved
+#define SDL0_PIN 19             // can't be moved
 #define PRGM_RESET_BUS_PIN 20
 
 // Initialize DisplayController
 DisplayController rtm;
+SPI_MSTransfer_MASTER <&SPI, 10, 0x1234> mySPI;
 
 // TEST CONTROL
 String msg, prev_status_str, test_status_str = "STANDBY";
@@ -39,6 +45,7 @@ bool torqueRequested = false;
 #define RESET_TIMER 5
 
 enum ProgramState {
+    STATE_DEBUG,
     STATE_STANDBY,
     STATE_HEATING,
     STATE_RUNNING,
@@ -62,9 +69,6 @@ String source_file = srcfile_details();
 
 /* ----------------------------- INTIAL SETUP ----------------------------- */
 void setup() {
-    /****** DEBUGGING *******/
-
-    // pin mappings
     std::map<String, uint8_t> pinMappings = {
     {"SD_DETECT_PIN", SD_DETECT_PIN},
     {"LOOP_BUS_PIN", LOOP_BUS_PIN},
@@ -84,6 +88,10 @@ void setup() {
     {"SDL0_PIN", SDL0_PIN},
     {"PRGM_RESET_BUS_PIN", PRGM_RESET_BUS_PIN}
     };
+
+    // Initialize SPI comms
+    //SPI.begin();
+    mySPI.begin();
 
     // Initialize bus pins and attach interrupts
     pinMode(LOOP_BUS_PIN, INPUT_PULLDOWN);
@@ -105,7 +113,7 @@ void setup() {
     // Clear screen to begin test protocol
     Serial.println("Test Status: " + test_status_str);
     rtm.writeToLog("Display Controller initialized", "STATUS");
-    rtm.lcd.clear();
+    rtm.resetScreen();
 
     requested_loops = rtm.getRequestedNumberOfLoops();
     current_loop_count = rtm.getCurrentLoopCount();
@@ -122,147 +130,173 @@ void loop() {
         rtm.statusUpdate(test_status_str);
     }
     prev_status_str = test_status_str;
+    
+    static uint32_t t = millis();
+    if ( millis() - t > 1000 ) {
+        Serial.println(millis());
+
+        uint16_t buf[5] = { 0xF1, 0xF2, 0xDEAD, 0xF4, 0xBEEF };
+        uint16_t buf2[5] = { 0xBEEF, 0xF7, 0xF8, 0xF9, 0xDEAD };
+        mySPI.transfer16(buf2, 5, random(0x1000, 0x8000));
+        mySPI.transfer16(buf, 5, random(0x1000, 0x8000));
+
+        static bool flip = 0;
+        flip = !flip;
+        mySPI.digitalWrite(6, flip);
+        //    mySPI1234.pinMode(5, INPUT);
+        bool moo = mySPI.digitalRead(6);
+        Serial.print("State: "); Serial.println(moo);
+        mySPI.detectSlaves();
+
+        //mySPI.pinMode(5, INPUT);
+        t = millis();
+    }
 
     switch (currentState) {
-    case STATE_STANDBY:
-        if (rtm.getRunSwitch()) {
-            currentState = STATE_HEATING;
-            test_status_str = "HEATING";
-            rtm.writeToLog(test_status_str, "STATUS");
-        }
-            else if (rtm.getResetSwitch()) {
-            currentState = STATE_RESET_REQUESTED;
-        }
-        else {
-            rtm.updateLCD(test_status_str);
-            rtm.turnOffHeaters();
-        }
+        case STATE_DEBUG:
+            // nothing
 
-        break;
+            break;
 
-    case STATE_HEATING:
-        rtm.updateLCD(test_status_str);
-        rtm.computeHeaterOutput();
-        if (!rtm.getRunSwitch()) {
-            test_status_str = "PAUSED";
-            currentState = STATE_PAUSED;
-            rtm.writeToLog(test_status_str, "STATUS");
-        }
-        else if (rtm.getSumpTemp() < rtm.getSetpointTemp()) {
-            rtm.stopProgram();
+        case STATE_STANDBY:
+            if (rtm.getRunSwitch()) {
+                currentState = STATE_HEATING;
+                test_status_str = "HEATING";
+                rtm.writeToLog(test_status_str, "STATUS");
+            }
+                else if (rtm.getResetSwitch()) {
+                currentState = STATE_RESET_REQUESTED;
+            }
+            else {
+                rtm.updateLCD(test_status_str);
+                rtm.turnOffHeaters();
+            }
+
+            break;
+
+        case STATE_HEATING:
             rtm.updateLCD(test_status_str);
             rtm.computeHeaterOutput();
-        }
-        else if (rtm.getResetSwitch()) {
-            test_status_str = "RESETTING";
-            currentState = STATE_RESET_REQUESTED;
-        }
-        else {
-            currentState = STATE_RUNNING;
-            test_status_str = "RUNNING";
-            rtm.writeToLog(test_status_str, "STATUS");
-        }
+            if (!rtm.getRunSwitch()) {
+                test_status_str = "PAUSED";
+                currentState = STATE_PAUSED;
+                rtm.writeToLog(test_status_str, "STATUS");
+            }
+            else if (rtm.getSumpTemp() < rtm.getSetpointTemp()) {
+                rtm.stopProgram();
+                rtm.updateLCD(test_status_str);
+                rtm.computeHeaterOutput();
+            }
+            else if (rtm.getResetSwitch()) {
+                test_status_str = "RESETTING";
+                currentState = STATE_RESET_REQUESTED;
+            }
+            else {
+                currentState = STATE_RUNNING;
+                test_status_str = "RUNNING";
+                rtm.writeToLog(test_status_str, "STATUS");
+            }
 
-        break;
+            break;
 
-    case STATE_RUNNING:
-        rtm.updateLCD(test_status_str);
-        rtm.runProgram();
-        rtm.computeHeaterOutput();
-        rtm.writeToDataFile();
-        if (current_loop_count >= requested_loops) {
-            test_status_str = "TEST DONE";
-            rtm.writeToLog(test_status_str, "STATUS");
-            currentState = STATE_TEST_COMPLETED;
-        }
-        else if(torqueRequested) {
-            torqueRequested = false;
-            rtm.readTorque();
-        }
-        else if (rtm.getResetSwitch()) {
-            test_status_str = "RESETTING";
-            currentState = STATE_RESET_REQUESTED;
-        }
-        if (!rtm.getRunSwitch()) {
-            currentState = STATE_PAUSED;
-            test_status_str = "PAUSED";
-            rtm.writeToLog(test_status_str, "STATUS");
-        }
-
-        break;  
-
-    case STATE_PAUSED:
-        rtm.updateLCD(test_status_str);
-        rtm.stopProgram();
-        rtm.turnOffHeaters();
-        if (rtm.getRunSwitch()) {
-            currentState = STATE_HEATING;
-            test_status_str = "HEATING";
-            rtm.writeToLog(test_status_str, "STATUS");
-        }
-        else if (rtm.getResetSwitch()) {
-            currentState = STATE_RESET_REQUESTED;
-            test_status_str = "RESETTING";
-        }
-
-        break;
-
-    case STATE_TEST_COMPLETED:     
-        rtm.testCompleted(test_status_str);
-        if (rtm.getResetSwitch()) {
-            currentState = STATE_RESET_REQUESTED;
-            test_status_str = "RESETTING";
-            rtm.resetScreen();
-        }
-
-        break;
-
-    case STATE_RESET_REQUESTED:
-        // cancel reset request before count is up and test has not completed
-        if (!rtm.getResetSwitch() && current_loop_count < requested_loops) {
-            test_status_str = "PAUSED";
-            currentState = STATE_PAUSED;
-            rtm.writeToLog(test_status_str, "STATUS");
-        }
-        
-        // cancel reset request before count is up, but test has completed
-        else if (!rtm.getResetSwitch() && current_loop_count >= requested_loops) {
-            test_status_str = "TEST DONE";
-            rtm.writeToLog(test_status_str, "STATUS");
-            currentState = STATE_TEST_COMPLETED;
-        }
-
-        // countdown before completing system reset
-        else {
+        case STATE_RUNNING:
             rtm.updateLCD(test_status_str);
-            rtm.turnOffHeaters();
-            rtm.stopProgram();
-            msg = "Test will be RESET in:";
-            rtm.messageScreen(msg);
+            rtm.runProgram();
+            rtm.computeHeaterOutput();
+            rtm.writeToDataFile();
+            if (current_loop_count >= requested_loops) {
+                test_status_str = "TEST DONE";
+                rtm.writeToLog(test_status_str, "STATUS");
+                currentState = STATE_TEST_COMPLETED;
+            }
+            else if(torqueRequested) {
+                torqueRequested = false;
+                rtm.readTorque();
+            }
+            else if (rtm.getResetSwitch()) {
+                test_status_str = "RESETTING";
+                currentState = STATE_RESET_REQUESTED;
+            }
+            if (!rtm.getRunSwitch()) {
+                currentState = STATE_PAUSED;
+                test_status_str = "PAUSED";
+                rtm.writeToLog(test_status_str, "STATUS");
+            }
 
-            for (int i = RESET_TIMER; i > 0; i--) {
-                rtm.messageScreen(msg, false, String(i) + " seconds");
-                delay(1000);
-                rtm.update(current_loop_count);
-                if (!rtm.getResetSwitch()) {
-                    i = 0; // kick out of reset loop
+            break;  
+
+        case STATE_PAUSED:
+            rtm.updateLCD(test_status_str);
+            rtm.stopProgram();
+            rtm.turnOffHeaters();
+            if (rtm.getRunSwitch()) {
+                currentState = STATE_HEATING;
+                test_status_str = "HEATING";
+                rtm.writeToLog(test_status_str, "STATUS");
+            }
+            else if (rtm.getResetSwitch()) {
+                currentState = STATE_RESET_REQUESTED;
+                test_status_str = "RESETTING";
+            }
+
+            break;
+
+        case STATE_TEST_COMPLETED:     
+            rtm.testCompleted(test_status_str);
+            if (rtm.getResetSwitch()) {
+                currentState = STATE_RESET_REQUESTED;
+                test_status_str = "RESETTING";
+                rtm.resetScreen();
+            }
+
+            break;
+
+        case STATE_RESET_REQUESTED:
+            // cancel reset request before count is up and test has not completed
+            if (!rtm.getResetSwitch() && current_loop_count < requested_loops) {
+                test_status_str = "PAUSED";
+                currentState = STATE_PAUSED;
+                rtm.writeToLog(test_status_str, "STATUS");
+            }
+            
+            // cancel reset request before count is up, but test has completed
+            else if (!rtm.getResetSwitch() && current_loop_count >= requested_loops) {
+                test_status_str = "TEST DONE";
+                rtm.writeToLog(test_status_str, "STATUS");
+                currentState = STATE_TEST_COMPLETED;
+            }
+
+            // countdown before completing system reset
+            else {
+                rtm.updateLCD(test_status_str);
+                rtm.turnOffHeaters();
+                rtm.stopProgram();
+                msg = "Test will be RESET in:";
+                rtm.messageScreen(msg);
+
+                for (int i = RESET_TIMER; i > 0; i--) {
+                    rtm.messageScreen(msg, false, String(i) + " seconds");
+                    delay(1000);
+                    rtm.update(current_loop_count);
+                    if (!rtm.getResetSwitch()) {
+                        i = 0; // kick out of reset loop
+                        rtm.resetScreen();
+                    }
+                }
+
+                if (rtm.getResetSwitch()) {
+                    current_loop_count = 0;
+                    rtm.resetTest();
+                    requested_loops = rtm.getRequestedNumberOfLoops();
+                    rtm.messageScreen(source_file);
+                    delay(4000);
                     rtm.resetScreen();
+                    test_status_str = "STANDBY";
+                    currentState = STATE_STANDBY;
                 }
             }
 
-            if (rtm.getResetSwitch()) {
-                current_loop_count = 0;
-                rtm.resetTest();
-                requested_loops = rtm.getRequestedNumberOfLoops();
-                rtm.messageScreen(source_file);
-                delay(4000);
-                rtm.resetScreen();
-                test_status_str = "STANDBY";
-                currentState = STATE_STANDBY;
-            }
-        }
-
-        break;
+            break;
     }
 }
 

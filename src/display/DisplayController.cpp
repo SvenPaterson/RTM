@@ -138,7 +138,7 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     pinMode(_heat_bus_pin, INPUT_PULLDOWN);
     pinMode(_heat_safety_pin, OUTPUT);
     pinMode(_heat_output_pin, OUTPUT);
-    pinMode(LED_BUILTIN, OUTPUT);
+    //pinMode(LED_BUILTIN, OUTPUT);
 
     digitalWrite(_heat_safety_pin, LOW);
     digitalWrite(_heat_output_pin, LOW);
@@ -155,11 +155,8 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     }
     Serial.println(msg);
 
-    // Initialize the I2C bus
-    Wire.begin();
-    Serial.println(" - i2c bus initialized");
-
     // Initialize the LCD screen
+    Wire.begin();
     lcd.begin(Wire);
     lcd.setFastBacklight(RGB_WHITE);
     lcd.setContrast(5);
@@ -241,6 +238,7 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     _resetSwitch->attach(_reset_sw_pin);
     _resetSwitch->interval(10);
     writeToLog(msg);
+
     }
 
 

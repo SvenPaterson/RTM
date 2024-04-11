@@ -2,7 +2,7 @@
 from rtm_funcs import *
 from pathlib import Path
 
-config_xlsx = Path.cwd() / 'motor_upload' / 'RTM_config.xlsx'
+config_xlsx = Path.cwd() / 'upload_files' / 'RTM_config.xlsx'
 project_dir = Path.cwd()
 
 environment = 'motor'
