@@ -1,4 +1,4 @@
-import subprocess
+import subprocess, os
 import pandas as pd
 
 def load_config_from_excel(file_path):
@@ -45,10 +45,10 @@ def generate_motor_config(steps, config):
         file.write("#endif\n")
 
 
-def compile_and_upload(project_directory, environment):
-    compile_command = ["C:/Users/stephen/.platformio/penv/Scripts/platformio.exe", 
-                       "run", "--target", "upload", "--environment",
-                       environment, "-d", project_directory]
+def compile_and_upload(project_directory):
+    user_profile = os.getenv('USERPROFILE')
+    platformio_path = os.path.join(user_profile, '.platformio', 'penv', 'Scripts', 'platformio.exe')
+    compile_command = [platformio_path, "run", "--target", "upload", "--environment", 'motor', "-d", project_directory]
 
     try:
         # Compile and upload the project
