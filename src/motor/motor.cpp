@@ -97,10 +97,12 @@ void setup() {
 
 
 void loop() {
+
     switch (currentState) {
         case DEBUG:
-            /* // move motor back and forth at 180rpm
             digitalWrite(MOTOR_ENABLE_PIN, HIGH);
+            /* // move motor back and forth at 180rpm
+            
             stepper.setAccelerationInRevolutionsPerSecondPerSecond(90 / 60.0);
             stepper.setSpeedInRevolutionsPerSecond(180 / 60.0);
 
@@ -113,12 +115,12 @@ void loop() {
             stepper.setTargetPositionRelativeInRevolutions(-10);
             while(!stepper.motionComplete()) stepper.processMovement(); */
 
-            if (digitalRead(PRGM_RUN_BUS_PIN)) {
+            /* if (digitalRead(PRGM_RUN_BUS_PIN)) {
                 digitalWrite(LOOP_BUS_PIN, HIGH);
                 delay(1);
                 digitalWrite(LOOP_BUS_PIN, LOW);
                 delay(3000);
-            }
+            } */
 
             break;
         
