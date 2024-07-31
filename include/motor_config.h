@@ -8,10 +8,10 @@ const uint16_t SPR = 200;
 
 struct Step {
     bool turnOnHeat;
-    uint16_t target_speed;
+    double target_speed;
     bool is_CCW;
-    uint16_t accel;
-    uint32_t time;
+    double accel;
+    double time;
 };
 
 const Step steps[] = {
