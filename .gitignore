@@ -1,3 +1,4 @@
 .pio
 .vscode
 upload_files/__pycache__/rtm_funcs.cpython-311.pyc
+include/motor_config.h
