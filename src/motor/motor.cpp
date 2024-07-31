@@ -226,7 +226,7 @@ void loop() {
 
             // If currently in a dwell period, disable the motor
             if (steps[currentStepIndex].target_speed == 0 && 
-                test_step_timer > time_spent_accelerating_s * 1000.0) {
+                test_step_timer > int(time_spent_accelerating_s * 1000.0)) {
                 if (digitalRead(MOTOR_ENABLE_PIN)) {
                     digitalWrite(MOTOR_ENABLE_PIN, LOW);
                 }
@@ -236,7 +236,7 @@ void loop() {
             }
 
             // Check if the test step has completed
-            if (test_step_timer >= int(steps[currentStepIndex].time * 1000)) {
+            if (test_step_timer >= int(steps[currentStepIndex].time * 1000.0)) {
                 isStepInitialized = false;
                 currentStepIndex = (currentStepIndex + 1) % size_steps;
                 
