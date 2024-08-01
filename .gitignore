@@ -1,3 +1,4 @@
 .pio
 .vscode
 include/motor_config.h
+upload_files/__pycache__/
