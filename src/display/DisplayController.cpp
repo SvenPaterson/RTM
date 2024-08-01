@@ -649,10 +649,11 @@ void DisplayController::messageScreen(const String& msg,
 void DisplayController::testCompleted(const String& test_status_str) {
      if (!_hasTestCompletedBeenCalled) {
         turnOffHeaters();
-        stopProgram();
+        stopProgram(); // don't remove this!
         _hasTestCompletedBeenCalled = true;
         _screenTimer = 0;
      }
+    Serial.println(digitalRead(_run_bus_pin)); // don't remove this!
     
     if (_completeTimer >= 1500) {
         if (_flasher) {
@@ -798,7 +799,7 @@ String DisplayController::getTimeStr() {
 }
 
 String DisplayController::getDateStr() {
-    char dateBuffer[9];
+    char dateBuffer[11];
     sprintf(dateBuffer, "%02d/%02d/%04d", month(), day(), year());
     return String(dateBuffer);
 }

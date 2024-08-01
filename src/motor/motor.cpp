@@ -40,7 +40,7 @@ bool isFullyStopped = false;
 bool isStepInitialized = false;
 bool isPauseInitiated = false;
 uint16_t currentStepIndex = 0;
-elapsedMillis LED_timer, test_step_timer;
+elapsedMillis LED_timer, test_step_timer, debugTimer;
 unsigned long pause_start_time = 0;
 
 /******* STEPPER MOTOR INIT *******/
@@ -85,7 +85,7 @@ void setup() {
     stepper.connectToPins(MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
     stepper.setStepsPerRevolution(cnts_per_rev);
 
-    delay(5000);
+    delay(2000);
     display_srcfile_details();
     if (currentState != DEBUG) {
         attachInterrupt(digitalPinToInterrupt(PRGM_RESET_BUS_PIN), reset_rising, RISING);
@@ -97,7 +97,12 @@ void setup() {
 
 
 void loop() {
-
+    if (debugTimer > 1000) {
+        Serial.print("askingToRun:\t");
+        Serial.println(askingToRun);
+        debugTimer = 0;
+    }
+    askingToRun = digitalRead(PRGM_RUN_BUS_PIN);
     switch (currentState) {
         case DEBUG:
             digitalWrite(MOTOR_ENABLE_PIN, HIGH);
@@ -220,7 +225,7 @@ void loop() {
                 
                 // prevent re-initialization of test step
                 isStepInitialized = true;
-                debugStepInfo();
+                //debugStepInfo();
 
                 // begin timing the test step
                 test_step_timer = 0;
@@ -251,6 +256,9 @@ void loop() {
                 digitalWrite(LOOP_BUS_PIN, LOW);
             }
 
+            if (!askingToRun) {
+                currentState = PAUSED;
+            }
             break;
     }
 }
@@ -281,7 +289,6 @@ void reset_falling() {
 void run_rising() {
     attachInterrupt(digitalPinToInterrupt(PRGM_RUN_BUS_PIN), run_falling, FALLING);
     askingToRun = true;
-    Serial.println(isFullyStopped);
 }
 
 void run_falling() {

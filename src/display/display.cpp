@@ -207,7 +207,8 @@ void loop() {
 
         break;
 
-    case STATE_TEST_COMPLETED:     
+    case STATE_TEST_COMPLETED:
+        rtm.stopProgram();  // don't remove this
         rtm.testCompleted(test_status_str);
         if (rtm.getResetSwitch()) {
             currentState = STATE_RESET_REQUESTED;
