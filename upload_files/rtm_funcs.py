@@ -31,10 +31,10 @@ def generate_motor_config(steps, config):
         
         file.write("struct Step {\n")
         file.write("    bool turnOnHeat;\n")
-        file.write("    uint16_t target_speed;\n")
+        file.write("    double target_speed;\n")
         file.write("    bool is_CCW;\n")
-        file.write("    uint16_t accel;\n")
-        file.write("    uint32_t time;\n")
+        file.write("    double accel;\n")
+        file.write("    double time;\n")
         file.write("};\n\n")
         
         file.write("const Step steps[] = {\n")
