@@ -27,8 +27,8 @@ def generate_motor_config(steps, config):
         file.write("#define motor_config_h\n\n")
         file.write("#include <cstdint>\n\n")
         
-        file.write(f"const bool isHighSpeedGearBox = {'true' if config['isHighSpeedGearBox'] else 'false'};\n")
-        file.write(f"const uint16_t SPR = {config['SPR_3'] if config['isHighSpeedGearBox'] else config['SPR']};\n\n")
+        # file.write(f"const bool isHighSpeedGearBox = {'true' if config['isHighSpeedGearBox'] else 'false'};\n")
+        file.write(f"const uint16_t SPR = {int(config['SPR_3']) if config['isHighSpeedGearBox'] else int(config['SPR'])};\n\n")
         
         file.write("struct Step {\n")
         file.write("    bool turnOnHeat;\n")

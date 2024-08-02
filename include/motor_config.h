@@ -3,8 +3,7 @@
 
 #include <cstdint>
 
-const bool isHighSpeedGearBox = true;
-const uint16_t SPR = 200;
+const uint16_t SPR = 600;
 
 struct Step {
     bool turnOnHeat;

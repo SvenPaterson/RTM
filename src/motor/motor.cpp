@@ -48,8 +48,6 @@ FlexyStepper stepper;
 uint16_t cnts_per_rev = SPR;
 int32_t MAX_REVS = (__LONG_MAX__ / cnts_per_rev) - 1;
 uint8_t size_steps = sizeof(steps) / sizeof(steps[0]);
-float time_spent_accelerating_s = 0.0;
-float prev_speed_rpm = 0.0;
 
 /******* FUNC DECLARATIONS *******/
 void display_srcfile_details();
