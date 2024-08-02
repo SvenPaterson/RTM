@@ -201,7 +201,7 @@ void loop() {
                 digitalWrite(MOTOR_ENABLE_PIN, HIGH);
                 stepper.setAccelerationInRevolutionsPerSecondPerSecond(steps[currentStepIndex].accel / 60.0);
                 stepper.setSpeedInRevolutionsPerSecond(steps[currentStepIndex].max_speed / 60.0);
-                stepper.setTargetPositionRelativeInRevolutions(-steps[currentStepIndex].target_position / 360.0);
+                stepper.setTargetPositionInRevolutions(-steps[currentStepIndex].target_position / 360.0);
                 
                 // Prevent re-initialization of test step
                 isStepInitialized = true;
