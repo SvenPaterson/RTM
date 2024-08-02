@@ -7,15 +7,16 @@ def load_config_from_excel(file_path):
     config = {row['Setting']: row['Value'] for _, row in config_df.iterrows()}
     
     # Load steps, skipping the first row of data (units)
-    steps_df = pd.read_excel(file_path, sheet_name='Steps', usecols="A:F", header=0, skiprows=[1], engine='openpyxl')
+    steps_df = pd.read_excel(file_path, sheet_name='Steps', usecols="A:G", header=0, skiprows=[1], engine='openpyxl')
     steps = []
     for _, row in steps_df.iterrows():
         steps.append({
             "turnOnHeat": bool(row.iloc[1]),
-            "target_speed": row.iloc[2],
-            "is_CCW": row.iloc[3],
-            "accel": row.iloc[4],
-            "time": row.iloc[5]
+            "hold_step": bool(row.iloc[2]),
+            "hold_time": row.iloc[3],
+            "target_position": row.iloc[4],
+            "max_speed": row.iloc[5],
+            "accel": row.iloc[6],
         })
     
     return steps, config
@@ -31,16 +32,16 @@ def generate_motor_config(steps, config):
         
         file.write("struct Step {\n")
         file.write("    bool turnOnHeat;\n")
-        file.write("    uint16_t target_speed;\n")
-        file.write("    bool is_CCW;\n")
-        file.write("    uint16_t accel;\n")
-        file.write("    uint32_t time;\n")
+        file.write("    bool hold_step;\n")
+        file.write("    double hold_time;\n")
+        file.write("    double target_position;\n")
+        file.write("    double max_speed;\n")
+        file.write("    double accel;\n")
         file.write("};\n\n")
         
         file.write("const Step steps[] = {\n")
         for step in steps:
-            file.write(f"    {{{'true' if step['turnOnHeat'] else 'false'}, {step['target_speed']}, {'true' if step['is_CCW'] == 'CCW' else 'false'}, {step['accel']}, {step['time']}}},\n")
-        
+            file.write(f"    {{{'true' if step['turnOnHeat'] else 'false'}, {'true' if step['hold_step'] else 'false'}, {step['hold_time']}, {step['target_position']}, {step['max_speed']}, {step['accel']}}},\n")
         file.write("};\n\n")
         file.write("#endif\n")
 

@@ -152,9 +152,6 @@ void loop() {
             break;
 
         case PAUSED:
-            // store the test step timer value upon pausing test
-            pause_start_time = test_step_timer;
-
             // Flash LED quickly to signal PAUSED state
             if (LED_timer > 100) {
                 digitalWrite(LED_PIN, !digitalRead(LED_PIN));
@@ -188,58 +185,50 @@ void loop() {
             Serial.println("Resuming the following step:");
             debugStepInfo();
 
-            // re-initialize common test settings
+            // Re-initialize common test settings
             digitalWrite(LED_PIN, HIGH);
             digitalWrite(HEAT_BUS_PIN, steps[currentStepIndex].turnOnHeat);
             digitalWrite(MOTOR_ENABLE_PIN, HIGH);
             
             currentState = RUNNING;
             printCurrentState();
-
-            // resume the test step timer
-            test_step_timer = pause_start_time;
-            
+                        
             break;
 
         case RUNNING:
-            // only perform these actions at start of test step
+            // Only perform these actions at start of test step
             if (!isStepInitialized) {
                 digitalWrite(LED_PIN, HIGH);
                 digitalWrite(HEAT_BUS_PIN, steps[currentStepIndex].turnOnHeat);
                 digitalWrite(MOTOR_ENABLE_PIN, HIGH);
                 stepper.setAccelerationInRevolutionsPerSecondPerSecond(steps[currentStepIndex].accel / 60.0);
-                stepper.setSpeedInRevolutionsPerSecond(steps[currentStepIndex].target_speed / 60.0);
-                stepper.setTargetPositionRelativeInRevolutions(steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS);
+                stepper.setSpeedInRevolutionsPerSecond(steps[currentStepIndex].max_speed / 60.0);
+                stepper.setTargetPositionRelativeInRevolutions(-steps[currentStepIndex].target_position / 360.0);
                 
-                // calculate the time spent accelerating for dwell period logic
-                prev_speed_rpm = abs(stepper.getCurrentVelocityInStepsPerSecond() * 60.0 / cnts_per_rev);
-                time_spent_accelerating_s = abs(steps[currentStepIndex].target_speed - prev_speed_rpm) / 
-                                                steps[currentStepIndex].accel;
-                
-                // prevent re-initialization of test step
+                // Prevent re-initialization of test step
                 isStepInitialized = true;
                 debugStepInfo();
 
-                // begin timing the test step
+                // Begin timing the test step
                 test_step_timer = 0;
             }
 
-            // If currently in a dwell period, disable the motor
-            if (steps[currentStepIndex].target_speed == 0 && 
-                test_step_timer > time_spent_accelerating_s * 1000) {
+            // Check if the motor should be disabled during a dwell period
+            if (stepper.motionComplete() || 
+                (test_step_timer > steps[currentStepIndex].hold_time && steps[currentStepIndex].hold_step)) {
+
+                // If the motor is currently enabled, disable it
                 if (digitalRead(MOTOR_ENABLE_PIN)) {
                     digitalWrite(MOTOR_ENABLE_PIN, LOW);
                 }
-            } 
-            else { // otherwise advance the motor
+            } else { // otherwise advance the motor
                 stepper.processMovement();
             }
 
             // Check if the test step has completed
-            if (test_step_timer >= steps[currentStepIndex].time * 1000) {
+            if (stepper.motionComplete()) {
                 isStepInitialized = false;
                 currentStepIndex = (currentStepIndex + 1) % size_steps;
-                
             }
 
             // Inform display controller of loop completion
@@ -301,17 +290,20 @@ void display_srcfile_details(void) {
 void debugStepInfo() {
     Serial.print("Step ");
     Serial.print(currentStepIndex + 1);
-    Serial.print("---->\tDir: ");
-    Serial.print(steps[currentStepIndex].is_CCW ? "CCW" : "CW");
-    Serial.print("\t\tTarget, revs: ");
-    Serial.print(steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS);
-    Serial.print("\t\tTime, s: ");
-    Serial.print(steps[currentStepIndex].time);
-    Serial.print("\tSpeed, rpm: ");
-    Serial.print(steps[currentStepIndex].target_speed);
+    Serial.print("---->\tHeat On: ");
+    Serial.print(steps[currentStepIndex].turnOnHeat ? "TRUE" : "FALSE");
+    Serial.print("\tHold Step: ");
+    Serial.print(steps[currentStepIndex].hold_step ? "TRUE" : "FALSE");
+    Serial.print("\tHold Duration, secs: ");
+    Serial.print(steps[currentStepIndex].hold_time);
+    Serial.print("\tTarget Position, deg: ");
+    Serial.print(steps[currentStepIndex].target_position);
+    Serial.print("\tMax Speed, rpm: ");
+    Serial.print(steps[currentStepIndex].max_speed);
     Serial.print("\tAccel, rpm/s: ");
     Serial.println(steps[currentStepIndex].accel);
 }
+
 
 void printCurrentState() {
     switch (currentState) {
