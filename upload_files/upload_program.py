@@ -7,8 +7,12 @@ from pathlib import Path
 
 # ENSURE RTM PROJECT RESIDES IN "C:/RTM/upload_files"
 # IF NOT MOVE IT OR CHANGE THE PATH FOR project_dir
-project_dir = Path("C:/RTM") # Path for RTM Torque stand code directory
-# project_dir = Path(os.path.join(os.environ["USERPROFILE"], "RTM"))  # LOCAL CODING ON STEPHEN'S MACHINE ONLY
+
+user_profile = Path(os.environ["USERPROFILE"])
+if user_profile == Path("C:/Users/Stephen.Garden"): 
+    project_dir = user_profile / "RTM"
+else:
+    project_dir = Path("C:/RTM")
 
 desktop = Path(os.path.join(os.environ["USERPROFILE"], "Desktop"))
 onedriveTSS_desktop = Path(os.path.join(os.environ["USERPROFILE"], "OneDrive - Trelleborg AB", "Desktop"))

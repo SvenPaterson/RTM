@@ -16,9 +16,9 @@ struct Step {
 
 const Step steps[] = {
     {false, false, 0.0, 62.37, 94.5, 945},
-    {false, true, 0.1, 0.0, 0.0, 0},
+    {false, true, 0.1, 62.37, 0.0, 0},
     {false, false, 0.0, -62.37, 94.5, 945},
-    {false, true, 0.1, 0.0, 0.0, 0},
+    {false, true, 0.1, -62.37, 0.0, 0},
 };
 
 #endif
