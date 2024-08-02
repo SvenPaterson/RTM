@@ -2,3 +2,4 @@
 .vscode
 *.xlsx
 *.pyc
+upload_files\__pycache__
