@@ -97,12 +97,6 @@ void setup() {
 
 
 void loop() {
-    if (debugTimer > 1000) {
-        Serial.print("askingToRun:\t");
-        Serial.println(askingToRun);
-        debugTimer = 0;
-    }
-    askingToRun = digitalRead(PRGM_RUN_BUS_PIN);
     switch (currentState) {
         case DEBUG:
             digitalWrite(MOTOR_ENABLE_PIN, HIGH);
