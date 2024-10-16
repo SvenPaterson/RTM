@@ -21,14 +21,14 @@ if onedrive_desktop.exists():
     desktop = onedrive_desktop
 if onedriveTSS_desktop.exists():
     desktop = onedriveTSS_desktop
-config_xlsx = project_dir / "upload_files" / "RTM_config.xlsx"
-new_config_xlsx = desktop / "RTM_config.xlsx"
+config_xlsx = project_dir / "upload_files" / "RTM_continuous_config.xlsx"
+new_config_xlsx = desktop / "RTM_continuous_config.xlsx"
 if not new_config_xlsx.exists():
     shutil.copy(config_xlsx, desktop)
-    print("'RTM_config.xlsx' was not present on the desktop, so a generic one has been created.")
+    print("'RTM_continuous_config.xlsx' was not present on the desktop, so a generic one has been created.")
     print("Please edit it to reflect the desired test profile and re-run the 'RTM Upload' program.")
 
-config_xlsx = desktop / "RTM_config.xlsx"
+config_xlsx = desktop / "RTM_continuous_config.xlsx"
 # Load configurations and steps from Excel
 steps, config = load_config_from_excel(config_xlsx)
 
