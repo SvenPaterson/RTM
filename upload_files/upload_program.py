@@ -18,11 +18,16 @@ desktop = Path(os.path.join(os.environ["USERPROFILE"], "Desktop"))
 onedriveTSS_desktop = Path(os.path.join(os.environ["USERPROFILE"], "OneDrive - Trelleborg AB", "Desktop"))
 onedrive_desktop = Path(os.path.join(os.environ["USERPROFILE"], "Desktop"))
 if onedrive_desktop.exists():
+    print('Working from personal OneDrive')
     desktop = onedrive_desktop
+    print(desktop)
 if onedriveTSS_desktop.exists():
+    print('Working from TSS OneDrive')
     desktop = onedriveTSS_desktop
+    print(desktop)
 config_xlsx = project_dir / "upload_files" / "RTM_config.xlsx"
 new_config_xlsx = desktop / "RTM_config.xlsx"
+
 if not new_config_xlsx.exists():
     shutil.copy(config_xlsx, desktop)
     print("'RTM_config.xlsx' was not present on the desktop, so a generic one has been created.")
