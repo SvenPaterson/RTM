@@ -3,7 +3,7 @@
 
 #include <cstdint>
 
-const uint16_t SPR = 600;
+const uint16_t SPR = 200;
 
 struct Step {
     bool turnOnHeat;
@@ -15,10 +15,11 @@ struct Step {
 };
 
 const Step steps[] = {
-    {false, false, 0.0, 62.37, 94.5, 945},
-    {false, true, 0.1, 62.37, 0.0, 0},
-    {false, false, 0.0, -62.37, 94.5, 945},
-    {false, true, 0.1, -62.37, 0.0, 0},
+    {true, true, 1.0, 180, 100, 500},
+    {true, true, 3.0, -35, 300, 350},
+    {true, true, 5.4, -90, 150, 350},
+    {true, true, 10.0, 260, 50, 350},
+    {true, true, 20.0, 50, 20, 350},
 };
 
 #endif
