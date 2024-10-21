@@ -3,3 +3,4 @@
 *.pyc
 include/motor_config.h
 upload_files/__pycache__/
+RTM_env/
