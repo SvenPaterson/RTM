@@ -65,21 +65,21 @@ void setup() {
     pinMode(PRGM_RUN_BUS_PIN, INPUT_PULLDOWN);
     pinMode(PRGM_RESET_BUS_PIN, INPUT_PULLDOWN); 
     pinMode(LED_PIN, OUTPUT);
-    pinMode(AIR_SUPPLY_BUS_PIN, OUTPUT);  
-    pinMode(AIR_DUMP_BUS_PIN, OUTPUT);
+    // pinMode(AIR_SUPPLY_BUS_PIN, OUTPUT);  
+    // pinMode(AIR_DUMP_BUS_PIN, OUTPUT);
     pinMode(MOTOR_ENABLE_PIN, OUTPUT);
     pinMode(MOTOR_STEP_PIN, OUTPUT);
     pinMode(MOTOR_DIRECTION_PIN, OUTPUT);
     pinMode(LOOP_BUS_PIN, OUTPUT);
-    pinMode(TORQUE_FLAG_BUS_PIN, OUTPUT);
-    pinMode(HEAT_BUS_PIN, OUTPUT);
+    // pinMode(TORQUE_FLAG_BUS_PIN, OUTPUT);
+    // pinMode(HEAT_BUS_PIN, OUTPUT);
 
     digitalWrite (MOTOR_ENABLE_PIN, LOW);
-    digitalWrite (AIR_SUPPLY_BUS_PIN, LOW);
-    digitalWrite (AIR_DUMP_BUS_PIN, LOW);
+    // digitalWrite (AIR_SUPPLY_BUS_PIN, LOW);
+    // digitalWrite (AIR_DUMP_BUS_PIN, LOW);
     digitalWrite (LED_PIN, HIGH);
     digitalWrite (LOOP_BUS_PIN, LOW);
-    digitalWrite (TORQUE_FLAG_BUS_PIN, LOW);
+    // digitalWrite (TORQUE_FLAG_BUS_PIN, LOW);
 
     Serial.begin(115200);
     stepper.connectToPins(MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
@@ -132,7 +132,7 @@ void loop() {
         
             // power down motor and heaters
             digitalWrite(MOTOR_ENABLE_PIN, LOW);
-            digitalWrite(HEAT_BUS_PIN, LOW);
+            // digitalWrite(HEAT_BUS_PIN, LOW);
 
             // check for run request
             if (askingToRun) {
@@ -191,7 +191,7 @@ void loop() {
 
             // re-initialize common test settings
             digitalWrite(LED_PIN, HIGH);
-            digitalWrite(HEAT_BUS_PIN, steps[currentStepIndex].turnOnHeat);
+            // digitalWrite(HEAT_BUS_PIN, steps[currentStepIndex].turnOnHeat);
             digitalWrite(MOTOR_ENABLE_PIN, HIGH);
             
             currentState = RUNNING;
@@ -206,14 +206,13 @@ void loop() {
             // only perform these actions at start of test step
             if (!isStepInitialized) {
                 digitalWrite(LED_PIN, HIGH);
-                digitalWrite(HEAT_BUS_PIN, steps[currentStepIndex].turnOnHeat);
+                // digitalWrite(HEAT_BUS_PIN, steps[currentStepIndex].turnOnHeat);
                 digitalWrite(MOTOR_ENABLE_PIN, HIGH);
                 stepper.setAccelerationInRevolutionsPerSecondPerSecond(steps[currentStepIndex].accel / 60.0);
                 stepper.setSpeedInRevolutionsPerSecond(steps[currentStepIndex].target_speed / 60.0);
                 stepper.setTargetPositionRelativeInRevolutions(steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS);
                 
                 // calculate the time spent accelerating for dwell period logic
-                prev_speed_rpm = abs(stepper.getCurrentVelocityInStepsPerSecond() * 60.0 / cnts_per_rev);
                 time_spent_accelerating_s = abs(steps[currentStepIndex].target_speed - prev_speed_rpm) / 
                                                 steps[currentStepIndex].accel;
                 
@@ -240,6 +239,7 @@ void loop() {
             if (test_step_timer >= int(steps[currentStepIndex].time * 1000.0)) {
                 isStepInitialized = false;
                 currentStepIndex = (currentStepIndex + 1) % size_steps;
+                prev_speed_rpm = steps[currentStepIndex].target_speed;
                 
             }
 
