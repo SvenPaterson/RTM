@@ -1,5 +1,6 @@
 #include "motor_config.h"
-#include <FlexyStepper.h>
+//#include <FlexyStepper.h>
+#include <AccelStepper.h>
 #include <avr/pgmspace.h>
 
 // RTM Motor Controller Version
@@ -42,11 +43,14 @@ bool isPauseInitiated = false;
 uint16_t currentStepIndex = 0;
 elapsedMillis LED_timer, test_step_timer, debugTimer;
 unsigned long pause_start_time = 0;
+unsigned long step_duration_ms = 0; // Duration of the current step in milliseconds
+
 
 /******* STEPPER MOTOR INIT *******/
-FlexyStepper stepper;
-uint16_t cnts_per_rev = SPR;
-int32_t MAX_REVS = (__LONG_MAX__ / cnts_per_rev) - 1;
+//FlexyStepper stepper;
+AccelStepper stepper(AccelStepper::DRIVER, MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
+uint16_t steps_per_rev = SPR;
+int32_t MAX_REVS = (__LONG_MAX__ / steps_per_rev) - 1;
 uint8_t size_steps = sizeof(steps) / sizeof(steps[0]);
 float time_spent_accelerating_s = 0.0;
 float prev_speed_rpm = 0.0;
@@ -82,8 +86,8 @@ void setup() {
     // digitalWrite (TORQUE_FLAG_BUS_PIN, LOW);
 
     Serial.begin(115200);
-    stepper.connectToPins(MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
-    stepper.setStepsPerRevolution(cnts_per_rev);
+    // stepper.connectToPins(MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
+    // stepper.setStepsPerRevolution(steps_per_rev);
 
     delay(2000);
     display_srcfile_details();
@@ -165,15 +169,22 @@ void loop() {
             // upon entering a pause, call for a stop
             if (!isPauseInitiated) {
                 Serial.println("Motor called to stop");
-                stepper.setTargetPositionToStop();
+                stepper.stop();
+                // stepper.setTargetPositionToStop();
                 isPauseInitiated = true;
             }
-
+            
             // Run until stopped, then disable motor
-            if (!stepper.processMovement()) {
+            stepper.run();
+            if (stepper.distanceToGo() == 0) {
                 digitalWrite(MOTOR_ENABLE_PIN, LOW);
                 isFullyStopped = true;
+                Serial.println("Motor fully stopped.");
             }
+            /* if (!stepper.processMovement()) {
+                digitalWrite(MOTOR_ENABLE_PIN, LOW);
+                isFullyStopped = true;
+            } */
 
             // Check if it's time to resume
             if (askingToRun && isFullyStopped) {
@@ -206,41 +217,41 @@ void loop() {
             // only perform these actions at start of test step
             if (!isStepInitialized) {
                 digitalWrite(LED_PIN, HIGH);
-                // digitalWrite(HEAT_BUS_PIN, steps[currentStepIndex].turnOnHeat);
                 digitalWrite(MOTOR_ENABLE_PIN, HIGH);
-                stepper.setAccelerationInRevolutionsPerSecondPerSecond(steps[currentStepIndex].accel / 60.0);
-                stepper.setSpeedInRevolutionsPerSecond(steps[currentStepIndex].target_speed / 60.0);
-                stepper.setTargetPositionRelativeInRevolutions(steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS);
-                
-                // calculate the time spent accelerating for dwell period logic
-                time_spent_accelerating_s = abs(steps[currentStepIndex].target_speed - prev_speed_rpm) / 
-                                                steps[currentStepIndex].accel;
-                
-                // prevent re-initialization of test step
-                isStepInitialized = true;
-                //debugStepInfo();
 
-                // begin timing the test step
-                test_step_timer = 0;
-            }
+                // Set accel and target speed for given step
+                double accel_steps_s2 = (steps[currentStepIndex].accel / 60.0) * steps_per_rev;
+                stepper.setAcceleration(accel_steps_s2);
+                double target_speed_steps_s = (steps[currentStepIndex].target_speed / 60.0) * steps_per_rev;
+                stepper.setMaxSpeed(target_speed_steps_s);
 
-            // If currently in a dwell period, disable the motor
-            if (steps[currentStepIndex].target_speed == 0 && 
-                test_step_timer > int(time_spent_accelerating_s * 1000.0)) {
-                if (digitalRead(MOTOR_ENABLE_PIN)) {
-                    digitalWrite(MOTOR_ENABLE_PIN, LOW);
+                // Set target position only if speed is > 0 as the motor will already be moving
+                if (steps[currentStepIndex].target_speed > 0) {
+                    long targetPosition = steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS;
+                    stepper.moveTo(targetPosition);
                 }
-            } 
-            else { // otherwise advance the motor
-                stepper.processMovement();
+                
+                // Set timer for current step
+                test_step_timer = 0;
+                step_duration_ms = steps[currentStepIndex].time * 1000.0;
+                isStepInitialized = true;
+                //debugStepInfo();               
             }
 
-            // Check if the test step has completed
-            if (test_step_timer >= int(steps[currentStepIndex].time * 1000.0)) {
+            // Run the stepper each loop to ensure smooth movement
+            stepper.run();
+
+            // Check if motor has reached a target speed of 0.0 but still has time left to dwell
+            if (test_step_timer < step_duration_ms) {
+                if (fabs(stepper.speed()) < 0.1) {
+                    // Motor has effectively stopped; disable and reset position
+                    digitalWrite(MOTOR_ENABLE_PIN, LOW);
+                    stepper.setCurrentPosition(0);
+                }
+            } else {
+                // If step duration is over, move to the next step
                 isStepInitialized = false;
                 currentStepIndex = (currentStepIndex + 1) % size_steps;
-                prev_speed_rpm = steps[currentStepIndex].target_speed;
-                
             }
 
             // Inform display controller of loop completion
@@ -250,6 +261,7 @@ void loop() {
                 digitalWrite(LOOP_BUS_PIN, LOW);
             }
 
+            // Transition to PAUSED state if necessary
             if (!askingToRun) {
                 currentState = PAUSED;
             }
