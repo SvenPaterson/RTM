@@ -4,7 +4,7 @@
 #include <cstdint>
 
 // Steps per Revolution
-const uint16_t SPR = 800; // Assuming 800 steps per revolution
+const uint16_t SPR = 200; // Assuming 800 steps per revolution
 
 // Struct to define each step
 struct Step {
@@ -21,7 +21,7 @@ const Step steps[] = {
     // {false, 0.0, 30.0, 1.0},
 
     // 2. 5 minutes at 1800 RPM with accel of 300 RPM/s CW, then stop
-    {false, 1800.0, 300.0, 300.0},
+    {false, 1800.0, 300.0, 30.0}, // change back to 300.0 seconds!!!
     // {false, 0.0, 600.0, 3.0},
 
     // 3. Run baseline again CW, then stop

@@ -216,11 +216,10 @@ void loop() {
 
             // If the dwell period is complete, mark the dwell as over
             if (isTargetSpeedMet && dwell_timer >= steps[currentStepIndex].dwell_time) {
-                if (target_speed_steps_s == 0) {
-                    // Stop motor completely if the target speed was zero
+                if (target_speed_steps_s != 0 && !isDwellOver) {
+                    // If dwell is over and motor is still running then stop it
                     stepper.stop();
-                }
-                isDwellOver = true;  // Mark the dwell period as over
+                } else isDwellOver = true;  // Mark the dwell period as over
             }
 
             // If dwell is over and the motor has reached a stop, move to the next step
