@@ -214,6 +214,8 @@ void loop() {
                 dwell_timer = 0;  // Reset dwell timer once the target speed is met
             }
 
+            /* 
+            // 1st iteration
             // If the dwell period is complete, mark the dwell as over
             if (isTargetSpeedMet && dwell_timer >= steps[currentStepIndex].dwell_time) {
                 if (target_speed_steps_s != 0 && !isDwellOver) {
@@ -221,6 +223,30 @@ void loop() {
                     stepper.stop();
                 }
                 isDwellOver = true;  // Mark the dwell period as over
+            } */
+
+            // 2nd iteration
+            /* if (isTargetSpeedMet && dwell_timer < steps[currentStepIndex].dwell_time) {
+                // Motor should continue running at the target speed
+                stepper.run();  // Keep calling run to maintain the target speed
+            } else if (isTargetSpeedMet && dwell_timer >= steps[currentStepIndex].dwell_time) {
+                // If the dwell period is complete, mark the dwell as over
+                if (target_speed_steps_s != 0) {
+                    // If dwell is over and motor is still running, stop it
+                    stepper.stop();
+                }
+                isDwellOver = true;  // Mark the dwell period as over */
+
+            // 3rd iteration
+            // Manage dwell period after target speed is reached
+            if (isTargetSpeedMet && dwell_timer >= steps[currentStepIndex].dwell_time) {
+                if (!isDwellOver) {
+                    if (target_speed_steps_s != 0) {
+                        // If target speed was non-zero, stop the motor after the dwell period
+                        stepper.stop();
+                    }
+                    isDwellOver = true;  // Mark that dwell is complete
+                }
             }
 
             // If dwell is over and the motor has reached a stop, move to the next step
