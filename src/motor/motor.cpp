@@ -43,7 +43,7 @@ bool isPauseInitiated = false;
 bool isTargetSpeedMet = false;
 bool isDwellOver = false;
 uint16_t currentStepIndex = 0;
-elapsedMillis LED_timer, test_step_timer, dwell_timer, debugTimer;
+elapsedMillis LED_timer, dwell_timer, debugTimer;
 
 
 /******* STEPPER MOTOR INIT *******/
@@ -164,7 +164,6 @@ void loop() {
 
             // re-initialize common test settings
             digitalWrite(LED_PIN, HIGH);
-            // digitalWrite(HEAT_BUS_PIN, steps[currentStepIndex].turnOnHeat);
             digitalWrite(MOTOR_ENABLE_PIN, HIGH);
             
             currentState = RUNNING;
@@ -188,12 +187,11 @@ void loop() {
                 long targetPosition = steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS;
                 stepper.moveTo(targetPosition);
                 
-                // Set timer for current step
-                test_step_timer = 0;
-                dwell_timer = 0;
+                // Reset flags for new step
                 isStepInitialized = true;
                 isTargetSpeedMet = false;
                 isDwellOver = false;
+
                 // debugStepInfo();               
             }
 
@@ -203,62 +201,37 @@ void loop() {
             // If target speed is zero, check if motor has stopped and handle dwell logic
             if (target_speed_steps_s == 0 && fabs(stepper.speed()) < 0.1 && !isTargetSpeedMet) {
                 // If target speed is zero, the motor should be stopped
-                digitalWrite(MOTOR_ENABLE_PIN, LOW);  // Disable the motor
-                isTargetSpeedMet = true;  // Indicate motor is at target (stopped) speed
+                digitalWrite(MOTOR_ENABLE_PIN, LOW);
+                isTargetSpeedMet = true;
                 dwell_timer = 0;
             }
 
-            // Check if target speed has been reached (for non-zero speeds)
+            // Check if non-zero target speed has been reached and handle dwell logic
             if (!isTargetSpeedMet && fabs(stepper.speed()) >= 0.99 * target_speed_steps_s) {
-                isTargetSpeedMet = true;  // Mark the target speed as met
-                dwell_timer = 0;  // Reset dwell timer once the target speed is met
+                isTargetSpeedMet = true;
+                dwell_timer = 0;
             }
 
-            
-            // 1st iteration
             // If the dwell period is complete, mark the dwell as over
             if (isTargetSpeedMet && dwell_timer >= steps[currentStepIndex].dwell_time * 1000) {
                 if (target_speed_steps_s != 0 && !isDwellOver) {
                     // If dwell is over and motor is still running then stop it
                     stepper.stop();
                 }
-                isDwellOver = true;  // Mark the dwell period as over
+                isDwellOver = true; 
             }
-
-            // 2nd iteration
-            /* if (isTargetSpeedMet && dwell_timer < steps[currentStepIndex].dwell_time * 1000) {
-                // Motor should continue running at the target speed
-                stepper.run();  // Keep calling run to maintain the target speed
-            } else if (isTargetSpeedMet && dwell_timer >= steps[currentStepIndex].dwell_time * 1000) {
-                // If the dwell period is complete, mark the dwell as over
-                if (target_speed_steps_s != 0) {
-                    // If dwell is over and motor is still running, stop it
-                    stepper.stop();
-                }
-                isDwellOver = true;  // Mark the dwell period as over
-            } */
-            // 3rd iteration
-            // Manage dwell period after target speed is reached
-            /* if (isTargetSpeedMet && dwell_timer >= steps[currentStepIndex].dwell_time) {
-                if (!isDwellOver) {
-                    if (target_speed_steps_s != 0) {
-                        // If target speed was non-zero, stop the motor after the dwell period
-                        stepper.stop();
-                    }
-                    isDwellOver = true;  // Mark that dwell is complete
-                }
-            } */
 
             // If dwell is over and the motor has reached a stop, move to the next step
             if (isDwellOver && (target_speed_steps_s == 0 || stepper.distanceToGo() == 0)) {
-                isStepInitialized = false;  // Reset the flag to initialize the next step
-                currentStepIndex = (currentStepIndex + 1) % size_steps;  // Move to the next step
+                isStepInitialized = false;
+                currentStepIndex = (currentStepIndex + 1) % size_steps;
             }
 
             // Inform display controller of loop completion (after the last step)
             if (currentStepIndex == 0 && !isStepInitialized) {
+                // Briefly pulse the loop bus pin high
                 digitalWrite(LOOP_BUS_PIN, HIGH);
-                delay(1);  // Briefly set the loop bus pin high
+                delay(1);  
                 digitalWrite(LOOP_BUS_PIN, LOW);
             }
 
