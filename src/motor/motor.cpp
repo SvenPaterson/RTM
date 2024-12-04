@@ -226,32 +226,42 @@ void loop() {
                 stepper.setMaxSpeed(target_speed_steps_s);
 
                 // Set target position only if speed is > 0 as the motor will already be moving
-                if (steps[currentStepIndex].target_speed > 0) {
+                /* if (steps[currentStepIndex].target_speed > 0) {
                     long targetPosition = steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS;
                     stepper.moveTo(targetPosition);
-                }
+                } */
+                long targetPosition = steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS;
+                stepper.moveTo(targetPosition);
                 
                 // Set timer for current step
                 test_step_timer = 0;
                 step_duration_ms = steps[currentStepIndex].time * 1000.0;
                 isStepInitialized = true;
-                //debugStepInfo();               
+                debugStepInfo();               
             }
 
             // Run the stepper each loop to ensure smooth movement
             stepper.run();
 
             // Check if motor has reached a target speed of 0.0 but still has time left to dwell
-            if (test_step_timer < step_duration_ms) {
+            /* if (test_step_timer > step_duration_ms) {
                 if (fabs(stepper.speed()) < 0.1) {
                     // Motor has effectively stopped; disable and reset position
-                    digitalWrite(MOTOR_ENABLE_PIN, LOW);
+                    //digitalWrite(MOTOR_ENABLE_PIN, LOW);
+                    Serial.println("motor now stopped - start of dwell");
                     stepper.setCurrentPosition(0);
                 }
             } else {
                 // If step duration is over, move to the next step
+                (Serial.println("dwell period now over, moving to next step"));
                 isStepInitialized = false;
                 currentStepIndex = (currentStepIndex + 1) % size_steps;
+            } */
+            if (test_step_timer >= step_duration_ms) {
+                isStepInitialized = false;
+                currentStepIndex = (currentStepIndex + 1) % size_steps;
+            } else {
+                stepper.run();
             }
 
             // Inform display controller of loop completion
@@ -260,11 +270,13 @@ void loop() {
                 delay(1);
                 digitalWrite(LOOP_BUS_PIN, LOW);
             }
+            stepper.run();
 
             // Transition to PAUSED state if necessary
             if (!askingToRun) {
                 currentState = PAUSED;
             }
+            stepper.run();
             break;
     }
 }

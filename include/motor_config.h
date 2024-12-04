@@ -4,7 +4,7 @@
 #include <cstdint>
 
 // Steps per Revolution
-const uint16_t SPR = 800; // Assuming 800 steps per revolution
+const uint16_t SPR = 200; // Assuming 800 steps per revolution
 
 // Struct to define each step
 struct Step {
@@ -17,7 +17,7 @@ struct Step {
 // Updated Steps Array
 const Step steps[] = {
     // 1. Baseline: 20s at 30 RPM with accel of 30 RPM/s CW, then stop
-    {false, 30.0, 30.0, 19.0},
+    {false, 30.0, 30.0, 20.0},
     {false, 0.0, 30.0, 1.0},
 
     // 2. 5 minutes at 1800 RPM with accel of 300 RPM/s CW, then stop
@@ -25,7 +25,7 @@ const Step steps[] = {
     {false, 0.0, 600.0, 3.0},
 
     // 3. Run baseline again CW, then stop
-    {false, 30.0, 30.0, 19.0},
+    {false, 30.0, 30.0, 20.0},
     {false, 0.0, 30.0, 1.0},
 
     // 4. Sweep from 0 to 1800 to 0 RPM at 30 RPM/s CW for however long that takes
@@ -33,11 +33,11 @@ const Step steps[] = {
     {false, 0.0, 30.0, 60.0},    // Sweep down to 0 RPM
 
     // 5. Run baseline again CW
-    {false, 30.0, 30.0, 19.0},
+    {false, 30.0, 30.0, 20.0},
     {false, 0.0, 30.0, 1.0},
 
     // 6. Run baseline again CCW
-    {true, 30.0, 30.0, 19.0},
+    {true, 30.0, 30.0, 20.0},
     {true, 0.0, 30.0, 1.0},
 
     // 7. Run sweep again but CCW
@@ -45,7 +45,7 @@ const Step steps[] = {
     {true, 0.0, 30.0, 60.0},     // Sweep down to 0 RPM CCW
 
     // 8. Run baseline again but CCW
-    {true, 30.0, 30.0, 19.0},
+    {true, 30.0, 30.0, 20.0},
     {true, 0.0, 30.0, 1.0}
 };
 
