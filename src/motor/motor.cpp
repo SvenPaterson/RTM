@@ -40,20 +40,19 @@ SystemState currentState = IDLE;
 bool isFullyStopped = false;
 bool isStepInitialized = false;
 bool isPauseInitiated = false;
+bool isTargetSpeedMet = false;
+bool isDwellOver = false;
 uint16_t currentStepIndex = 0;
-elapsedMillis LED_timer, test_step_timer, debugTimer;
-unsigned long pause_start_time = 0;
-unsigned long step_duration_ms = 0; // Duration of the current step in milliseconds
+elapsedMillis LED_timer, test_step_timer, dwell_timer, debugTimer;
 
 
 /******* STEPPER MOTOR INIT *******/
-//FlexyStepper stepper;
 AccelStepper stepper(AccelStepper::DRIVER, MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
 uint16_t steps_per_rev = SPR;
 int32_t MAX_REVS = (__LONG_MAX__ / steps_per_rev) - 1;
 uint8_t size_steps = sizeof(steps) / sizeof(steps[0]);
-float time_spent_accelerating_s = 0.0;
-float prev_speed_rpm = 0.0;
+double target_speed_steps_s = 0;
+double accel_steps_s2 = 0;
 
 /******* FUNC DECLARATIONS *******/
 void display_srcfile_details();
@@ -69,25 +68,16 @@ void setup() {
     pinMode(PRGM_RUN_BUS_PIN, INPUT_PULLDOWN);
     pinMode(PRGM_RESET_BUS_PIN, INPUT_PULLDOWN); 
     pinMode(LED_PIN, OUTPUT);
-    // pinMode(AIR_SUPPLY_BUS_PIN, OUTPUT);  
-    // pinMode(AIR_DUMP_BUS_PIN, OUTPUT);
     pinMode(MOTOR_ENABLE_PIN, OUTPUT);
     pinMode(MOTOR_STEP_PIN, OUTPUT);
     pinMode(MOTOR_DIRECTION_PIN, OUTPUT);
     pinMode(LOOP_BUS_PIN, OUTPUT);
-    // pinMode(TORQUE_FLAG_BUS_PIN, OUTPUT);
-    // pinMode(HEAT_BUS_PIN, OUTPUT);
 
     digitalWrite (MOTOR_ENABLE_PIN, LOW);
-    // digitalWrite (AIR_SUPPLY_BUS_PIN, LOW);
-    // digitalWrite (AIR_DUMP_BUS_PIN, LOW);
     digitalWrite (LED_PIN, HIGH);
     digitalWrite (LOOP_BUS_PIN, LOW);
-    // digitalWrite (TORQUE_FLAG_BUS_PIN, LOW);
 
     Serial.begin(115200);
-    // stepper.connectToPins(MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
-    // stepper.setStepsPerRevolution(steps_per_rev);
 
     delay(2000);
     display_srcfile_details();
@@ -103,28 +93,7 @@ void setup() {
 void loop() {
     switch (currentState) {
         case DEBUG:
-            digitalWrite(MOTOR_ENABLE_PIN, HIGH);
-            /* // move motor back and forth at 180rpm
-            
-            stepper.setAccelerationInRevolutionsPerSecondPerSecond(90 / 60.0);
-            stepper.setSpeedInRevolutionsPerSecond(180 / 60.0);
-
-            // Manually set to move CW
-            stepper.setTargetPositionRelativeInRevolutions(10);
-            while(!stepper.motionComplete()) stepper.processMovement();
-            delay(1000);
-
-            // Manually set to move CCW
-            stepper.setTargetPositionRelativeInRevolutions(-10);
-            while(!stepper.motionComplete()) stepper.processMovement(); */
-
-            /* if (digitalRead(PRGM_RUN_BUS_PIN)) {
-                digitalWrite(LOOP_BUS_PIN, HIGH);
-                delay(1);
-                digitalWrite(LOOP_BUS_PIN, LOW);
-                delay(3000);
-            } */
-
+            // anything here you need
             break;
         
         case IDLE:
@@ -157,9 +126,6 @@ void loop() {
             break;
 
         case PAUSED:
-            // store the test step timer value upon pausing test
-            pause_start_time = test_step_timer;
-
             // Flash LED quickly to signal PAUSED state
             if (LED_timer > 100) {
                 digitalWrite(LED_PIN, !digitalRead(LED_PIN));
@@ -181,10 +147,6 @@ void loop() {
                 isFullyStopped = true;
                 Serial.println("Motor fully stopped.");
             }
-            /* if (!stepper.processMovement()) {
-                digitalWrite(MOTOR_ENABLE_PIN, LOW);
-                isFullyStopped = true;
-            } */
 
             // Check if it's time to resume
             if (askingToRun && isFullyStopped) {
@@ -207,9 +169,6 @@ void loop() {
             
             currentState = RUNNING;
             printCurrentState();
-
-            // resume the test step timer
-            test_step_timer = pause_start_time;
             
             break;
 
@@ -220,63 +179,68 @@ void loop() {
                 digitalWrite(MOTOR_ENABLE_PIN, HIGH);
 
                 // Set accel and target speed for given step
-                double accel_steps_s2 = (steps[currentStepIndex].accel / 60.0) * steps_per_rev;
+                accel_steps_s2 = (steps[currentStepIndex].accel / 60.0) * steps_per_rev;
                 stepper.setAcceleration(accel_steps_s2);
-                double target_speed_steps_s = (steps[currentStepIndex].target_speed / 60.0) * steps_per_rev;
+                target_speed_steps_s = (steps[currentStepIndex].target_speed / 60.0) * steps_per_rev;
                 stepper.setMaxSpeed(target_speed_steps_s);
 
-                // Set target position only if speed is > 0 as the motor will already be moving
-                /* if (steps[currentStepIndex].target_speed > 0) {
-                    long targetPosition = steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS;
-                    stepper.moveTo(targetPosition);
-                } */
+                // set target position based on direction of spin required from step
                 long targetPosition = steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS;
                 stepper.moveTo(targetPosition);
                 
                 // Set timer for current step
                 test_step_timer = 0;
-                step_duration_ms = steps[currentStepIndex].time * 1000.0;
+                dwell_timer = 0;
                 isStepInitialized = true;
-                debugStepInfo();               
+                isTargetSpeedMet = false;
+                isDwellOver = false;
+                // debugStepInfo();               
             }
 
-            // Run the stepper each loop to ensure smooth movement
+            // Continuously run the stepper motor to ensure smooth movement
             stepper.run();
 
-            // Check if motor has reached a target speed of 0.0 but still has time left to dwell
-            /* if (test_step_timer > step_duration_ms) {
-                if (fabs(stepper.speed()) < 0.1) {
-                    // Motor has effectively stopped; disable and reset position
-                    //digitalWrite(MOTOR_ENABLE_PIN, LOW);
-                    Serial.println("motor now stopped - start of dwell");
-                    stepper.setCurrentPosition(0);
-                }
-            } else {
-                // If step duration is over, move to the next step
-                (Serial.println("dwell period now over, moving to next step"));
-                isStepInitialized = false;
-                currentStepIndex = (currentStepIndex + 1) % size_steps;
-            } */
-            if (test_step_timer >= step_duration_ms) {
-                isStepInitialized = false;
-                currentStepIndex = (currentStepIndex + 1) % size_steps;
-            } else {
-                stepper.run();
+            // If target speed is zero, check if motor has stopped and handle dwell logic
+            if (target_speed_steps_s == 0 && fabs(stepper.speed()) < 0.1 && !isTargetSpeedMet) {
+                // If target speed is zero, the motor should be stopped
+                digitalWrite(MOTOR_ENABLE_PIN, LOW);  // Disable the motor
+                dwell_timer = 0;
+                isTargetSpeedMet = true;  // Indicate motor is at target (stopped) speed
             }
 
-            // Inform display controller of loop completion
+            // Check if target speed has been reached (for non-zero speeds)
+            if (!isTargetSpeedMet && fabs(stepper.speed()) > 0.999 * target_speed_steps_s) {
+                isTargetSpeedMet = true;  // Mark the target speed as met
+                dwell_timer = 0;  // Reset dwell timer once the target speed is met
+            }
+
+            // If the dwell period is complete, mark the dwell as over
+            if (isTargetSpeedMet && dwell_timer >= steps[currentStepIndex].dwell_time) {
+                if (target_speed_steps_s == 0) {
+                    // Stop motor completely if the target speed was zero
+                    stepper.stop();
+                }
+                isDwellOver = true;  // Mark the dwell period as over
+            }
+
+            // If dwell is over and the motor has reached a stop, move to the next step
+            if (isDwellOver && (target_speed_steps_s == 0 || stepper.distanceToGo() == 0)) {
+                isStepInitialized = false;  // Reset the flag to initialize the next step
+                currentStepIndex = (currentStepIndex + 1) % size_steps;  // Move to the next step
+            }
+
+            // Inform display controller of loop completion (after the last step)
             if (currentStepIndex == 0 && !isStepInitialized) {
                 digitalWrite(LOOP_BUS_PIN, HIGH);
-                delay(1);
+                delay(1);  // Briefly set the loop bus pin high
                 digitalWrite(LOOP_BUS_PIN, LOW);
             }
-            stepper.run();
 
             // Transition to PAUSED state if necessary
             if (!askingToRun) {
                 currentState = PAUSED;
             }
-            stepper.run();
+
             break;
     }
 }
@@ -333,7 +297,7 @@ void debugStepInfo() {
     Serial.print("\t\tTarget, revs: ");
     Serial.print(steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS);
     Serial.print("\t\tTime, s: ");
-    Serial.print(steps[currentStepIndex].time);
+    Serial.print(steps[currentStepIndex].dwell_time);
     Serial.print("\tSpeed, rpm: ");
     Serial.print(steps[currentStepIndex].target_speed);
     Serial.print("\tAccel, rpm/s: ");
