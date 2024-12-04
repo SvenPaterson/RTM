@@ -204,12 +204,12 @@ void loop() {
             if (target_speed_steps_s == 0 && fabs(stepper.speed()) < 0.1 && !isTargetSpeedMet) {
                 // If target speed is zero, the motor should be stopped
                 digitalWrite(MOTOR_ENABLE_PIN, LOW);  // Disable the motor
-                dwell_timer = 0;
                 isTargetSpeedMet = true;  // Indicate motor is at target (stopped) speed
+                dwell_timer = 0;
             }
 
             // Check if target speed has been reached (for non-zero speeds)
-            if (!isTargetSpeedMet && fabs(stepper.speed()) > 0.999 * target_speed_steps_s) {
+            if (!isTargetSpeedMet && fabs(stepper.speed()) >= 0.99 * target_speed_steps_s) {
                 isTargetSpeedMet = true;  // Mark the target speed as met
                 dwell_timer = 0;  // Reset dwell timer once the target speed is met
             }
@@ -219,7 +219,8 @@ void loop() {
                 if (target_speed_steps_s != 0 && !isDwellOver) {
                     // If dwell is over and motor is still running then stop it
                     stepper.stop();
-                } else isDwellOver = true;  // Mark the dwell period as over
+                }
+                isDwellOver = true;  // Mark the dwell period as over
             }
 
             // If dwell is over and the motor has reached a stop, move to the next step
