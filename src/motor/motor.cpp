@@ -43,7 +43,7 @@ bool isPauseInitiated = false;
 bool isTargetSpeedMet = false;
 bool isDwellOver = false;
 uint16_t currentStepIndex = 0;
-elapsedMillis LED_timer, dwell_timer, debugTimer;
+elapsedMillis LED_timer, dwell_timer, pause_timer, debugTimer;
 
 
 /******* STEPPER MOTOR INIT *******/
@@ -52,7 +52,10 @@ uint16_t steps_per_rev = SPR;
 int32_t MAX_REVS = (__LONG_MAX__ / steps_per_rev) - 1;
 uint8_t size_steps = sizeof(steps) / sizeof(steps[0]);
 double target_speed_steps_s = 0;
+long target_position = 0;
 double accel_steps_s2 = 0;
+double current_speed = 0; 
+double current_accel = 0;
 
 /******* FUNC DECLARATIONS *******/
 void display_srcfile_details();
@@ -105,7 +108,6 @@ void loop() {
         
             // power down motor and heaters
             digitalWrite(MOTOR_ENABLE_PIN, LOW);
-            // digitalWrite(HEAT_BUS_PIN, LOW);
 
             // check for run request
             if (askingToRun) {
@@ -120,6 +122,8 @@ void loop() {
             display_srcfile_details();
             // reset test steps
             currentStepIndex = 0;
+            isStepInitialized = false;
+            isPauseInitiated = false;
             currentState = IDLE;
             printCurrentState();
 
@@ -134,9 +138,7 @@ void loop() {
 
             // upon entering a pause, call for a stop
             if (!isPauseInitiated) {
-                Serial.println("Motor called to stop");
                 stepper.stop();
-                // stepper.setTargetPositionToStop();
                 isPauseInitiated = true;
             }
             
@@ -144,13 +146,11 @@ void loop() {
             stepper.run();
             if (stepper.distanceToGo() == 0) {
                 digitalWrite(MOTOR_ENABLE_PIN, LOW);
-                isFullyStopped = true;
-                Serial.println("Motor fully stopped.");
+                isFullyStopped = true;             
             }
 
             // Check if it's time to resume
             if (askingToRun && isFullyStopped) {
-                Serial.println("Test called to resume");
                 currentState = RESUME;
                 isPauseInitiated = false;
                 printCurrentState();
@@ -159,7 +159,7 @@ void loop() {
             break;
 
         case RESUME:
-            Serial.println("Resuming the following step:");
+            Serial.println("\nResuming the following step:");
             debugStepInfo();
 
             // re-initialize common test settings
@@ -169,11 +169,19 @@ void loop() {
             currentState = RUNNING;
             printCurrentState();
             
+            // re- initialize test step
+            stepper.setAcceleration(current_accel);
+            stepper.setSpeed(current_speed);
+            stepper.moveTo(target_position);
+            dwell_timer = pause_timer;
+
             break;
 
         case RUNNING:
             // only perform these actions at start of test step
             if (!isStepInitialized) {
+                Serial.print("Running:");
+                debugStepInfo();
                 digitalWrite(LED_PIN, HIGH);
                 digitalWrite(MOTOR_ENABLE_PIN, HIGH);
 
@@ -184,15 +192,13 @@ void loop() {
                 stepper.setMaxSpeed(target_speed_steps_s);
 
                 // set target position based on direction of spin required from step
-                long targetPosition = steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS;
-                stepper.moveTo(targetPosition);
+                target_position = steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS;
+                stepper.moveTo(target_position);
                 
                 // Reset flags for new step
                 isStepInitialized = true;
                 isTargetSpeedMet = false;
-                isDwellOver = false;
-
-                // debugStepInfo();               
+                isDwellOver = false;             
             }
 
             // Continuously run the stepper motor to ensure smooth movement
@@ -238,6 +244,9 @@ void loop() {
             // Transition to PAUSED state if necessary
             if (!askingToRun) {
                 currentState = PAUSED;
+                pause_timer = dwell_timer;
+                current_speed = stepper.speed();
+                current_accel = stepper.acceleration();
             }
 
             break;
@@ -260,7 +269,7 @@ void reset_falling() {
     end_micros = micros();
     duration = end_micros - start_micros;
     attachInterrupt(digitalPinToInterrupt(PRGM_RESET_BUS_PIN), reset_rising, RISING);
-    // if reset button toggled for 10s, then switch to reset requested state.
+    // if reset button toggled for 10 millis, then switch to reset requested state.
     if (duration >= 9900 && duration < 10100) {
         currentState = RESET_REQUESTED;
         printCurrentState();

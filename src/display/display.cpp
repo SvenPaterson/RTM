@@ -6,8 +6,9 @@
 #include "DisplayController.h"
 
 // RTM Display Controller Version
-// Last Update: 4/10/24
-#define SRC_FILE_VERSION "Display v1.3"
+// Last Update: 12/13/24
+// Changelog: fixed motor reset code
+#define SRC_FILE_VERSION "Display v1.4"
 
 // define the board I/O pin numbers
 #define SD_DETECT_PIN 0
