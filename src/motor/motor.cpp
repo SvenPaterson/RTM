@@ -3,8 +3,10 @@
 #include <avr/pgmspace.h>
 
 // RTM Motor Controller Version
-// Last Update: 4/10/24
-#define SRC_FILE_VERSION "Motor v1.3"
+// Last Update: 12/13/24
+// change log:
+// 12/13/24: Fixed pause and reset logic for motor controller
+#define SRC_FILE_VERSION "Motor v1.4"
 
 /******* INTERRUPT VARIABLES *******/
 volatile unsigned long start_micros = 0;
@@ -147,6 +149,9 @@ void loop() {
             display_srcfile_details();
             // reset test steps
             currentStepIndex = 0;
+            isPauseInitiated = false;
+            isStepInitialized = false;
+
             currentState = IDLE;
             printCurrentState();
 
