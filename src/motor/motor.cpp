@@ -1,5 +1,4 @@
 #include "motor_config.h"
-//#include <FlexyStepper.h>
 #include <AccelStepper.h>
 #include <avr/pgmspace.h>
 
@@ -111,7 +110,6 @@ void loop() {
 
             // check for run request
             if (askingToRun) {
-                Serial.println("Transitioning to RUNNING state");
                 currentState = RUNNING;
                 printCurrentState();
             }
@@ -192,7 +190,7 @@ void loop() {
                 stepper.setMaxSpeed(target_speed_steps_s);
 
                 // set target position based on direction of spin required from step
-                target_position = steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS;
+                target_position = steps[currentStepIndex].is_CCW ? -MAX_REVS : MAX_REVS;
                 stepper.moveTo(target_position);
                 
                 // Reset flags for new step
@@ -246,7 +244,7 @@ void loop() {
                 currentState = PAUSED;
                 pause_timer = dwell_timer;
                 current_speed = stepper.speed();
-                current_accel = stepper.acceleration();
+                current_accel = accel_steps_s2;
             }
 
             break;
