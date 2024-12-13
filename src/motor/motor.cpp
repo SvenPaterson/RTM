@@ -144,6 +144,9 @@ void loop() {
             display_srcfile_details();
             // reset test steps
             currentStepIndex = 0;
+            isPauseInitiated = false;
+            isStepInitialized = false;
+
             currentState = IDLE;
             printCurrentState();
 
