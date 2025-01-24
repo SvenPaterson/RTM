@@ -130,20 +130,25 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     pinMode(_supply_valve_pin, OUTPUT);
     pinMode(_dump_valve_pin, OUTPUT);
     pinMode(_torque_pin, INPUT_PULLUP);
-    pinMode(_run_bus_pin, OUTPUT);
-    pinMode(_reset_bus_pin, OUTPUT);
+    pinMode(_run_bus_pin, OUTPUT); // needs to be inverted because ClearCore is input_pullup only
+    pinMode(_reset_bus_pin, OUTPUT); // see above
     pinMode(_loop_bus_pin, INPUT_PULLDOWN);
     pinMode(_run_sw_pin, INPUT_PULLDOWN);
     pinMode(_reset_sw_pin, INPUT_PULLDOWN);
     pinMode(_heat_bus_pin, INPUT_PULLDOWN);
-    pinMode(_heat_safety_pin, OUTPUT);
-    pinMode(_heat_output_pin, OUTPUT);
+    pinMode(_heat_safety_pin, OUTPUT); // not used on torque stand, but if introduced will need to be inverted too
+    pinMode(_heat_output_pin, OUTPUT); // see above
     pinMode(LED_BUILTIN, OUTPUT);
 
     digitalWrite(_heat_safety_pin, LOW);
     digitalWrite(_heat_output_pin, LOW);
-    digitalWrite(_reset_bus_pin, LOW);
+    //digitalWrite(_reset_bus_pin, LOW);
+    //digitalWrite(_run_bus_pin, LOW);
+    
+    // Inverted for ClearCore
+    digitalWrite(_reset_bus_pin, HIGH);
     digitalWrite(_run_bus_pin, LOW);
+
     digitalWrite(_dump_valve_pin, LOW);
     digitalWrite(_supply_valve_pin, LOW);
     digitalWrite(_heat_output_pin, LOW);
@@ -269,7 +274,8 @@ void DisplayController::update(const uint32_t& loop_count) {
 }
 
 void DisplayController::runProgram() {
-    digitalWrite(_run_bus_pin, HIGH);
+    //digitalWrite(_run_bus_pin, HIGH);
+    digitalWrite(_run_bus_pin, LOW); // Inverted for ClearCore
 }
 
 void DisplayController::resetTest() {
@@ -279,20 +285,24 @@ void DisplayController::resetTest() {
     writeToConfigFile();
     writeToLog("RESET", "STATUS");
     lcd.clear();
-    digitalWrite(_reset_bus_pin, HIGH);
+    //digitalWrite(_reset_bus_pin, HIGH);
+    digitalWrite(_reset_bus_pin, LOW); // Inverted for ClearCore
     delay(10);
-    digitalWrite(_reset_bus_pin, LOW);
+    //digitalWrite(_reset_bus_pin, LOW);
+    digitalWrite(_reset_bus_pin, HIGH);
     _hasHeaderBeenWritten = false;
     //writeToDataFile();
     setPressureOffset();
 }
 
 void DisplayController::stopProgram() {
-    digitalWrite(_run_bus_pin, LOW);
+    //digitalWrite(_run_bus_pin, LOW);
+    digitalWrite(_run_bus_pin, HIGH); // Inverted for ClearCore
 }
 
 void DisplayController::resetProgram() {
-    digitalWrite(_reset_bus_pin, HIGH);
+    // digitalWrite(_reset_bus_pin, HIGH);
+    digitalWrite(_reset_bus_pin, LOW); // Inverted for ClearCore
 }
 
 uint32_t DisplayController::getRequestedNumberOfLoops() {

@@ -4,42 +4,55 @@
 #include <cstdint>
 
 // Steps per Revolution
-const uint16_t SPR = 200; // Assuming 800 steps per revolution
+#define MOTOR_MAX_VEL_RPM 3175
+const uint16_t SPR = 600;
+
+#define MAX_SPEED 1800          // RPM
+#define SWEEP_ACCEL 30          // RPM/sec
+#define BREAKIN_DURATION 300    // sec
+#define BASELINE_SPEED 30       // RPM
+#define BASELINE_DURATION 5     // sec
+#define DWELL_BETWEEN_STEPS 1   // sec
 
 // Struct to define each step
 struct Step {
-    bool is_CCW;         // Direction: true for counter-clockwise (CCW), false for clockwise (CW)
-    double target_speed; // Target speed in RPM
-    double accel;        // Acceleration in RPM/s
-    double dwell_time;   // amount of time to dwell after target speed is reached
+    int32_t target_speed; 
+    uint32_t accel;        // Acceleration in RPM/sec
+    uint32_t dwell_time;   // amount of time to dwell after target speed is reached in sec
 };
 
-// Updated Steps Array
 const Step steps[] = {
-    // 1. Baseline: 20s at 30 RPM with accel of 30 RPM/s CW, then stop
-    {false, 30.0, 30.0, 20.0},
+    // 1. CW TORQUE BASELINE
+    {BASELINE_SPEED, BASELINE_SPEED, BASELINE_DURATION},
+    {0, BASELINE_SPEED, DWELL_BETWEEN_STEPS},
 
-    // 2. 5 minutes at 1800 RPM with accel of 300 RPM/s CW, then stop
-    {false, 1800.0, 300.0, 300.0},
+    // 2. CW BREAKIN
+    {MAX_SPEED, MAX_SPEED / 2, BREAKIN_DURATION},
+    {0, MAX_SPEED / 2, DWELL_BETWEEN_STEPS},
 
-    // 3. Run baseline again CW, then stop
-    {false, 30.0, 30.0, 20.0},
+    // 3. CW
+    {BASELINE_SPEED, BASELINE_SPEED, BASELINE_DURATION},
+    {0, 30, DWELL_BETWEEN_STEPS},
 
-    // 4. Sweep from 0 to 1800 to 0 RPM at 30 RPM/s CW for however long that takes
-    {false, 1800.0, 30.0, 5.0},
-    // extra 5 seconds to let coupler settle
+    // 4. CW SWEEP
+    {MAX_SPEED, SWEEP_ACCEL, DWELL_BETWEEN_STEPS},
+    {0, SWEEP_ACCEL, DWELL_BETWEEN_STEPS},
 
     // 5. Run baseline again CW
-    {false, 30.0, 30.0, 20.0},
+    {BASELINE_SPEED, BASELINE_SPEED, BASELINE_DURATION},
+    {0, 30, DWELL_BETWEEN_STEPS},
 
     // 6. Run baseline again CCW
-    {true, 30.0, 30.0, 20.0},
+    {-BASELINE_SPEED, BASELINE_SPEED, BASELINE_DURATION},
+    {0, 30, DWELL_BETWEEN_STEPS},
 
-    // 7. Run sweep again but CCW
-    {true, 1800.0, 30.0, 5.0},
+    // 7. CCW SWEEP
+    {-MAX_SPEED, SWEEP_ACCEL, DWELL_BETWEEN_STEPS},
+    {0, SWEEP_ACCEL, DWELL_BETWEEN_STEPS},
 
     // 8. Run baseline again but CCW
-    {true, 30.0, 30.0, 20.0},
+    {-BASELINE_SPEED, BASELINE_SPEED, BASELINE_DURATION},
+    {0, 30, DWELL_BETWEEN_STEPS}
 };
 
 #endif

@@ -1,33 +1,22 @@
 #include "motor_config.h"
 #include "ClearCore.h"
-// #include <avr/pgmspace.h>
+#include "ElapsedMillis.h"
 
-// RTM Motor Controller Version
-// Last Update: 12/13/24
+// RTM Motor Controller Version - ClearCore
+// Last Update: 01/23/25
 // change log:
 // 12/13/24: Fixed pause, resume and restart logic
+// 01/23/25: Added ClearCore support
 
-#define SRC_FILE_VERSION "Torque Stand v0.1"
-
-/******* INTERRUPT VARIABLES *******/
-volatile unsigned long start_micros = 0;
-volatile unsigned long end_micros = 0;
-volatile unsigned long duration = 0;
-volatile bool askingToRun = false;
+#define SRC_FILE_VERSION "Torque Stand ClearCore v0.1"
 
 /******* I/O PINS *******/
-//const uint8_t LOOP_BUS_PIN = 1;
-#define LOOP_BUS_PIN ConnectorIO0
-//const uint8_t PRGM_RUN_BUS_PIN = 10;
-#define PRGM_RUN_BUS_PIN ConnectorIO1
-//const uint8_t TORQUE_FLAG_BUS_PIN = 11;
-//const uint8_t HEAT_BUS_PIN = 12;
-//const uint8_t LED_PIN = 13;
-//const uint8_t AIR_SUPPLY_BUS_PIN = 14;
-//const uint8_t AIR_DUMP_BUS_PIN = 15 ;
-//const uint8_t PRGM_RESET_BUS_PIN = 20;
-#define PRGM_RESET_BUS_PIN ConnectorIO2
-
+#define LOOP_BUS_PIN ConnectorIO1
+#define PRGM_RUN_BUS_PIN ConnectorDI6
+#define LED_PIN ConnectorIO0
+#define MOTOR_ENABLE_PIN ConnectorIO2
+#define PRGM_RESET_BUS_PIN ConnectorDI7
+#define SerialPort ConnectorUsb
 
 /******* SYSTEM STATE CONTROL *******/
 enum SystemState {
@@ -39,69 +28,88 @@ RESET_REQUESTED,
 RESUME
 };
 SystemState currentState = IDLE;
+SystemState preResetState = IDLE;
+bool askingToRun = false;
 bool isFullyStopped = false;
 bool isStepInitialized = false;
 bool isPauseInitiated = false;
 bool isTargetSpeedMet = false;
-bool isDwellOver = false;
 uint16_t currentStepIndex = 0;
-unsigned long prevLEDmillis = 0;
-unsigned long LED_interval = 1000;
-unsigned long prevDwellBegin = 0;
-unsigned long prevPauseBegin = 0;
-unsigned long prevDebugBegin = 0;
-
+uint16_t lastDisplayedSecond = 5;
+elapsedMillis LED_timer, dwell_timer, pause_timer, reset_timer;
 
 /******* STEPPER MOTOR INIT *******/
 #define motor ConnectorM0
-//AccelStepper stepper(AccelStepper::DRIVER, MOTOR_STEP_PIN, MOTOR_DIRECTION_PIN);
 uint16_t steps_per_rev = SPR;
-int32_t MAX_REVS = (__LONG_MAX__ / steps_per_rev) - 1;
 uint8_t size_steps = sizeof(steps) / sizeof(steps[0]);
-double target_speed_steps_s = 0;
-long target_position = 0;
-double accel_steps_s2 = 0;
-double current_speed = 0; 
-double current_accel = 0;
+int32_t target_speed_steps_s = 0;
+uint64_t target_position = 0;
+uint32_t accel_steps_s2 = 0;
+int32_t current_speed = 0; 
+uint32_t current_accel = 0;
 
 /******* FUNC DECLARATIONS *******/
 void display_srcfile_details();
-void reset_rising();
-void reset_falling();
-void run_rising();
-void run_falling();
 void debugStepInfo();
 void printCurrentState();
+void PrintAlerts();
 
+int main() {
+    PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL); // docs suggest that pullup is default
+    PRGM_RESET_BUS_PIN.Mode(Connector::INPUT_DIGITAL); // docs suggest that pullup is default
+    MOTOR_ENABLE_PIN.Mode(Connector::OUTPUT_DIGITAL);
+    LOOP_BUS_PIN.Mode(Connector::OUTPUT_DIGITAL);
+    LOOP_BUS_PIN.State(false);
+    LED_PIN.Mode(Connector::OUTPUT_DIGITAL);
+    LED_PIN.State(true);
 
-void main() {
-    // pinMode(PRGM_RUN_BUS_PIN, INPUT_PULLDOWN);
-    PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL) //
-    pinMode(PRGM_RESET_BUS_PIN, INPUT_PULLDOWN); 
-    //pinMode(LED_PIN, OUTPUT);
-    //pinMode(MOTOR_ENABLE_PIN, OUTPUT);
-    //pinMode(MOTOR_STEP_PIN, OUTPUT);
-    //pinMode(MOTOR_DIRECTION_PIN, OUTPUT);
-    pinMode(LOOP_BUS_PIN, OUTPUT);
-
-    digitalWrite (MOTOR_ENABLE_PIN, LOW);
-    digitalWrite (LED_PIN, HIGH);
-    digitalWrite (LOOP_BUS_PIN, LOW);
-
-    Serial.begin(115200);
-
-    delay(2000);
-    display_srcfile_details();
-    if (currentState != DEBUG) {
-        attachInterrupt(digitalPinToInterrupt(PRGM_RESET_BUS_PIN), reset_rising, RISING);
-        attachInterrupt(digitalPinToInterrupt(PRGM_RUN_BUS_PIN), run_rising, RISING);
+    SerialPort.Mode(Connector::USB_CDC);
+    SerialPort.Speed(9600);
+    uint32_t timeout = 5000;
+    uint32_t startTime = Milliseconds();
+    SerialPort.PortOpen();
+    while (!SerialPort && Milliseconds() - startTime < timeout) {
+        // wait for serial port to connect. Needed for native USB port only
+        continue;
     }
+    SerialPort.Send("Serial port connected\r\n");
+
+    // Initialize stepper motor
+    MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
+    MotorMgr.MotorModeSet(MotorManager::MOTOR_M0M1,
+                          Connector::CPM_MODE_STEP_AND_DIR);
+    motor.HlfbMode(MotorDriver::HLFB_MODE_STATIC);
+    motor.VelMax(MOTOR_MAX_VEL_RPM * steps_per_rev / 60);
+    motor.AccelMax(MOTOR_MAX_VEL_RPM * steps_per_rev / 6);
+
+    Delay_ms(2000);
+    display_srcfile_details();
+
+    LED_timer = 0;
     printCurrentState();
 
-
+    SerialPort.Send("Size of steps array: ");
+    SerialPort.Send(size_steps);
+    SerialPort.Send("\r\n");
 
     while (true) {
-        unsigned long currentMillis = Milliseconds();
+        bool runActive = PRGM_RUN_BUS_PIN.State();
+        bool resetActive = PRGM_RESET_BUS_PIN.State();
+        static bool prevResetActive = false;
+
+        if (resetActive && !prevResetActive) {  // Rising edge
+            if (currentState != RUNNING) {      // Only allow reset from non-running states
+                preResetState = currentState;   // Remember previous state
+                currentState = RESET_REQUESTED;
+                reset_timer = 0;
+                lastDisplayedSecond = 5;
+                LED_PIN.State(true);            // Solid LED during countdown
+                SerialPort.Send("RESETTING in 5 seconds...\r\n");
+            }
+        }
+        prevResetActive = resetActive;
+        askingToRun = runActive && (currentState != RESET_REQUESTED);
+
         switch (currentState) {
             case DEBUG:
                 // anything here you need
@@ -109,14 +117,14 @@ void main() {
             
             case IDLE:
                 // flash LED slowly to signal IDLE state
-
-                if (currentMillis - prevLEDmillis >= LED_interval) {
-                    prevLEDmillis = currentMillis;
-                    digitalWrite(LED_PIN, !digitalRead(LED_PIN))
+                if (LED_timer > 1000) {
+                    LED_PIN.State(!LED_PIN.State());
+                    LED_timer = 0;
                 }
             
                 // power down motor and heaters
-                digitalWrite(MOTOR_ENABLE_PIN, LOW);
+                motor.EnableRequest(false);
+                MOTOR_ENABLE_PIN.State(false);
 
                 // check for run request
                 if (askingToRun) {
@@ -127,34 +135,46 @@ void main() {
                 break;
 
             case RESET_REQUESTED:
-                display_srcfile_details();
-                // reset test steps
-                currentStepIndex = 0;
-                isStepInitialized = false;
-                isPauseInitiated = false;
-                currentState = IDLE;
-                printCurrentState();
-
+                if (!resetActive) {
+                    SerialPort.Send("Reset cancelled\r\n");
+                    currentState = preResetState;
+                    printCurrentState();
+                } else if (reset_timer >= 5000) {
+                    SerialPort.Send("Performing a full reset...\r\n");
+                    Delay_ms(100);
+                    SysMgr.ResetBoard();
+                } else {
+                    uint8_t remaining = 5 - (reset_timer / 1000);
+                    if (remaining != lastDisplayedSecond) {
+                        SerialPort.Send("Resetting in ");
+                        SerialPort.Send(remaining);
+                        SerialPort.Send(" seconds...\r\n");
+                        lastDisplayedSecond = remaining;
+                    }
+                    // Blink LED rapidly during countdown
+                    if (LED_timer > 100) {
+                        LED_PIN.State(!LED_PIN.State());
+                    }
+                }
                 break;
 
             case PAUSED:
                 // Flash LED quickly to signal PAUSED state
-                if (LED_timer > 100) {
-                    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+                if (LED_timer > 250) {
+                    LED_PIN.State(!LED_PIN.State());
                     LED_timer = 0;
                 }
 
                 // upon entering a pause, call for a stop
                 if (!isPauseInitiated) {
-                    stepper.stop();
+                    motor.MoveStopDecel((1000 / 60) * steps_per_rev);
                     isPauseInitiated = true;
                 }
                 
-                // Run until stopped, then disable motor
-                stepper.run();
-                if (stepper.distanceToGo() == 0) {
-                    digitalWrite(MOTOR_ENABLE_PIN, LOW);
-                    isFullyStopped = true;             
+                if (motor.StepsComplete()) {
+                    MOTOR_ENABLE_PIN.State(false);
+                    motor.EnableRequest(false);
+                    isFullyStopped = true;
                 }
 
                 // Check if it's time to resume
@@ -167,20 +187,20 @@ void main() {
                 break;
 
             case RESUME:
-                Serial.println("\nResuming the following step:");
+                SerialPort.Send("\nResuming the following step:\r\n");
                 debugStepInfo();
 
                 // re-initialize common test settings
-                digitalWrite(LED_PIN, HIGH);
-                digitalWrite(MOTOR_ENABLE_PIN, HIGH);
+                LED_PIN.State(true);
+                MOTOR_ENABLE_PIN.State(true);
+                motor.EnableRequest(true);
                 
                 currentState = RUNNING;
                 printCurrentState();
                 
                 // re- initialize test step
-                stepper.setAcceleration(current_accel);
-                stepper.setSpeed(current_speed);
-                stepper.moveTo(target_position);
+                motor.AccelMax(current_accel);
+                motor.MoveVelocity(current_speed);
                 dwell_timer = pause_timer;
 
                 break;
@@ -188,160 +208,155 @@ void main() {
             case RUNNING:
                 // only perform these actions at start of test step
                 if (!isStepInitialized) {
-                    Serial.print("Running:");
                     debugStepInfo();
-                    digitalWrite(LED_PIN, HIGH);
-                    digitalWrite(MOTOR_ENABLE_PIN, HIGH);
+                    LED_PIN.State(true);
+                    MOTOR_ENABLE_PIN.State(true);
+                    motor.EnableRequest(true);
 
-                    // Set accel and target speed for given step
-                    accel_steps_s2 = (steps[currentStepIndex].accel / 60.0) * steps_per_rev;
-                    stepper.setAcceleration(accel_steps_s2);
-                    target_speed_steps_s = (steps[currentStepIndex].target_speed / 60.0) * steps_per_rev;
-                    stepper.setMaxSpeed(target_speed_steps_s);
-
-                    // set target position based on direction of spin required from step
-                    target_position = steps[currentStepIndex].is_CCW ? -MAX_REVS : MAX_REVS;
-                    stepper.moveTo(target_position);
+                    // Calculate speed and accel in steps for given step
+                    accel_steps_s2 = std::ceil((steps[currentStepIndex].accel * steps_per_rev) / 60.0);
+                    motor.AccelMax(accel_steps_s2);
+                    target_speed_steps_s = std::ceil((steps[currentStepIndex].target_speed * steps_per_rev) / 60.0);
                     
+                    SerialPort.Send("Accel steps/s^2: ");
+                    SerialPort.Send(accel_steps_s2);
+                    SerialPort.Send(" Target speed steps/s: ");
+                    SerialPort.SendLine(target_speed_steps_s);
+
+                    // In RUNNING state, after move command:
+                    if (motor.StatusReg().bit.AlertsPresent) {
+                        SerialPort.Send("Motor alert: ");
+                        PrintAlerts();
+                    }
                     // Reset flags for new step
                     isStepInitialized = true;
                     isTargetSpeedMet = false;
-                    isDwellOver = false;             
-                }
 
-                // Continuously run the stepper motor to ensure smooth movement
-                stepper.run();
-
-                // If target speed is zero, check if motor has stopped and handle dwell logic
-                if (target_speed_steps_s == 0 && fabs(stepper.speed()) < 0.1 && !isTargetSpeedMet) {
-                    // If target speed is zero, the motor should be stopped
-                    digitalWrite(MOTOR_ENABLE_PIN, LOW);
-                    isTargetSpeedMet = true;
-                    dwell_timer = 0;
-                }
-
-                // Check if non-zero target speed has been reached and handle dwell logic
-                if (!isTargetSpeedMet && fabs(stepper.speed()) >= 0.99 * target_speed_steps_s) {
-                    isTargetSpeedMet = true;
-                    dwell_timer = 0;
-                }
-
-                // If the dwell period is complete, mark the dwell as over
-                if (isTargetSpeedMet && dwell_timer >= steps[currentStepIndex].dwell_time * 1000) {
-                    if (target_speed_steps_s != 0 && !isDwellOver) {
-                        // If dwell is over and motor is still running then stop it
-                        stepper.stop();
+                    motor.MoveVelocity(target_speed_steps_s);
+                    if (target_speed_steps_s == 0) {
+                        motor.MoveStopDecel(accel_steps_s2);
                     }
-                    isDwellOver = true; 
+
                 }
 
-                // If dwell is over and the motor has reached a stop, move to the next step
-                if (isDwellOver && (target_speed_steps_s == 0 || stepper.distanceToGo() == 0)) {
-                    isStepInitialized = false;
-                    currentStepIndex = (currentStepIndex + 1) % size_steps;
+                if (!isTargetSpeedMet) {
+                    dwell_timer = 0;
+                    // For non-zero targets: check speed reached
+                    if (target_speed_steps_s != 0 && 
+                        fabs(motor.VelocityRefCommanded()) >= fabs(0.99 * target_speed_steps_s)) {
+                        isTargetSpeedMet = true;
+                    }
+                    // For zero targets: check full stop
+                    else if (target_speed_steps_s == 0 && motor.StepsComplete()) {
+                        isTargetSpeedMet = true;
+                    }
                 }
 
-                // Inform display controller of loop completion (after the last step)
-                if (currentStepIndex == 0 && !isStepInitialized) {
-                    // Briefly pulse the loop bus pin high
-                    digitalWrite(LOOP_BUS_PIN, HIGH);
-                    delay(1);  
-                    digitalWrite(LOOP_BUS_PIN, LOW);
+                // Handle dwell timing and step advancement
+                if (isTargetSpeedMet && dwell_timer >= steps[currentStepIndex].dwell_time * 1000) {
+                        isStepInitialized = false;
+                        currentStepIndex = (currentStepIndex + 1) % size_steps;
+                        isTargetSpeedMet = false;
                 }
 
                 // Transition to PAUSED state if necessary
                 if (!askingToRun) {
                     currentState = PAUSED;
+                    printCurrentState();
                     pause_timer = dwell_timer;
-                    current_speed = stepper.speed();
+                    current_speed = motor.VelocityRefCommanded();
                     current_accel = accel_steps_s2;
                 }
 
+                /*  // Inform display controller of loop completion (after the last step)
+                if (currentStepIndex == 0 && !isStepInitialized) {
+                    // Briefly pulse the loop bus pin high
+                    LOOP_BUS_PIN.State(true);
+                    Delay_ms(1); 
+                    LOOP_BUS_PIN.State(false);
+                } */
+
                 break;
+        }
     }
+
+return 0;
 }
-
-
 
 ///////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////Functions//////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////
 
-/******* RUN, RESET, PAUSE INTERRUPT FUNCTIONS *******/
-void reset_rising() {
-    attachInterrupt(digitalPinToInterrupt(PRGM_RESET_BUS_PIN), reset_falling, FALLING);
-    start_micros = micros();
-}
-
-void reset_falling() {
-    end_micros = micros();
-    duration = end_micros - start_micros;
-    attachInterrupt(digitalPinToInterrupt(PRGM_RESET_BUS_PIN), reset_rising, RISING);
-    // if reset button toggled for 10 millis, then switch to reset requested state.
-    if (duration >= 9900 && duration < 10100) {
-        currentState = RESET_REQUESTED;
-        printCurrentState();
+void display_srcfile_details(void) {
+    char buffer[128]; // Adjust size as needed
+    
+    snprintf(buffer, sizeof(buffer),
+        "%s  Compiled on: %s at %s\r\n",
+        SRC_FILE_VERSION, __DATE__, __TIME__
+    );
+    
+    if (SerialPort) {  // Only send if connected
+        SerialPort.Send(buffer);
     }
 }
 
-void run_rising() {
-    attachInterrupt(digitalPinToInterrupt(PRGM_RUN_BUS_PIN), run_falling, FALLING);
-    askingToRun = true;
-}
-
-void run_falling() {
-    attachInterrupt(digitalPinToInterrupt(PRGM_RUN_BUS_PIN), run_rising, RISING);
-    askingToRun = false;
-    currentState = PAUSED;
-    printCurrentState();
-}
-
-void display_srcfile_details(void) {
-    Serial.print(SRC_FILE_VERSION);
-    Serial.print("  Compiled on: ");
-    Serial.print(__DATE__);
-    Serial.print(" at ");
-    Serial.print(__TIME__);
-    Serial.print("\n");
-}
+void PrintAlerts(){
+    // report status of alerts
+    SerialPort.SendLine("Alerts present: ");
+    if(motor.AlertReg().bit.MotionCanceledInAlert){
+        SerialPort.SendLine("    MotionCanceledInAlert "); }
+    if(motor.AlertReg().bit.MotionCanceledPositiveLimit){
+        SerialPort.SendLine("    MotionCanceledPositiveLimit "); }
+    if(motor.AlertReg().bit.MotionCanceledNegativeLimit){
+        SerialPort.SendLine("    MotionCanceledNegativeLimit "); }
+    if(motor.AlertReg().bit.MotionCanceledSensorEStop){
+        SerialPort.SendLine("    MotionCanceledSensorEStop "); }
+    if(motor.AlertReg().bit.MotionCanceledMotorDisabled){
+        SerialPort.SendLine("    MotionCanceledMotorDisabled "); }
+    if(motor.AlertReg().bit.MotorFaulted){
+        SerialPort.SendLine("    MotorFaulted ");
+    }
+ }
 
 void debugStepInfo() {
-    Serial.print("Step ");
-    Serial.print(currentStepIndex + 1);
-    Serial.print("---->\tDir: ");
-    Serial.print(steps[currentStepIndex].is_CCW ? "CCW" : "CW");
-    Serial.print("\t\tTarget, revs: ");
-    Serial.print(steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS);
-    Serial.print("\t\tTime, s: ");
-    Serial.print(steps[currentStepIndex].dwell_time);
-    Serial.print("\tSpeed, rpm: ");
-    Serial.print(steps[currentStepIndex].target_speed);
-    Serial.print("\tAccel, rpm/s: ");
-    Serial.println(steps[currentStepIndex].accel);
+    SerialPort.Send("\nStep ");
+    SerialPort.Send(currentStepIndex + 1);  // Step index (1-based)
+    SerialPort.Send("\tTime, s: ");
+    SerialPort.Send(steps[currentStepIndex].dwell_time);  // Dwell time
+    SerialPort.Send("\tSpeed, rpm: ");
+    SerialPort.Send(steps[currentStepIndex].target_speed);  // Target speed
+    SerialPort.Send("\tAccel, rpm/s: ");
+    SerialPort.Send(steps[currentStepIndex].accel);  // Acceleration
+    SerialPort.Send("\r\n");  // Newline at the end
 }
 
 void printCurrentState() {
+    if (!SerialPort) return;  // Only send if USB is connected
+
+    const char *stateStr;
     switch (currentState) {
         case DEBUG:
-        Serial.println("Current State: DEBUG");
-        break;
+            stateStr = "Current State: DEBUG\r\n";
+            break;
         case IDLE:
-        Serial.println("Current State: IDLE");
-        break;
+            stateStr = "Current State: IDLE\r\n";
+            break;
         case RUNNING:
-        Serial.println("Current State: RUNNING");
-        break;
+            stateStr = "Current State: RUNNING\r\n";
+            break;
         case PAUSED:
-        Serial.println("Current State: PAUSED");
-        break;
+            stateStr = "Current State: PAUSED\r\n";
+            break;
         case RESET_REQUESTED:
-        Serial.println("Current State: RESET REQUESTED");
-        break;
+            stateStr = "Current State: RESET REQUESTED\r\n";
+            break;
         case RESUME:
-        Serial.println("Current State: RESUME");
-        break;
+            stateStr = "Current State: RESUME\r\n";
+            break;
         default:
-        Serial.println("Unknown State");
-        break;
+            stateStr = "Unknown State\r\n";
+            break;
     }
+    
+    SerialPort.Send(stateStr);
 }

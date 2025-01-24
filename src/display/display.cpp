@@ -12,13 +12,13 @@
 
 // define the board I/O pin numbers
 #define SD_DETECT_PIN 0
-#define LOOP_BUS_PIN 1
+#define LOOP_BUS_PIN 1 // Connect to ConnectorIO1
 #define MOTOR_HLFB_PIN 2
 #define HEAT_OUTPUT_PIN 6
 #define HEAT_SAFETY_PIN 7
 #define AIR_SUPPLY_PIN 8
 #define AIR_DUMP_PIN 9
-#define PRGM_RUN_BUS_PIN 10
+#define PRGM_RUN_BUS_PIN 10 // Connect to ConnectorDI6
 #define TORQ_FLAG_BUS_PIN 11
 #define HEAT_BUS_PIN 12
 #define AIR_SUPPLY_BUS_PIN 14
@@ -27,7 +27,7 @@
 #define RESET_SW_PIN 17
 #define SDA0_PIN 18
 #define SDL0_PIN 19
-#define PRGM_RESET_BUS_PIN 20
+#define PRGM_RESET_BUS_PIN 20 // Connect to ConnectorDI7
 
 // Initialize DisplayController
 DisplayController rtm;
@@ -88,7 +88,7 @@ void setup() {
 
     // Initialize bus pins and attach interrupts
     pinMode(LOOP_BUS_PIN, INPUT_PULLDOWN);
-    pinMode(TORQ_FLAG_BUS_PIN, INPUT_PULLDOWN);
+    // pinMode(TORQ_FLAG_BUS_PIN, INPUT_PULLDOWN);
     attachInterrupt(digitalPinToInterrupt(LOOP_BUS_PIN), loopPinRisingEdge, RISING);
     attachInterrupt(digitalPinToInterrupt(TORQ_FLAG_BUS_PIN), torquePinRisingEdge, RISING);
 
