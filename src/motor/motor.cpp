@@ -1,6 +1,8 @@
 #include "motor_config.h"
 #include "ClearCore.h"
 #include "ElapsedMillis.h"
+#include "SPI.h"
+#include "SD.h"
 
 // RTM Motor Controller Version - ClearCore
 // Last Update: 01/23/25
@@ -9,6 +11,16 @@
 // 01/23/25: Added ClearCore support
 
 #define SRC_FILE_VERSION "Torque Stand ClearCore v0.1"
+
+SPISettings spiConfig(80000, MSBFIRST, SPI_MODE3);
+#define NUM_ROWS 4
+#define NUM_COLS 20
+const uint8_t line1[21] = "Torque Stand Test   ";
+const uint8_t line2[21] = "                    ";
+char          line3[21] = "                    ";
+char          line4[21] = "                    ";
+
+File myFile;
 
 /******* I/O PINS *******/
 #define LOOP_BUS_PIN ConnectorIO1
@@ -51,8 +63,11 @@ uint32_t current_accel = 0;
 /******* FUNC DECLARATIONS *******/
 void display_srcfile_details();
 void debugStepInfo();
-void printCurrentState();
+void PrintCurrentState();
 void PrintAlerts();
+void SetBrightness(uint8_t level);
+void SetCursor(uint8_t row, uint8_t col);
+void ClearScreen();
 
 int main() {
     PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL); // docs suggest that pullup is default
@@ -72,6 +87,7 @@ int main() {
         // wait for serial port to connect. Needed for native USB port only
         continue;
     }
+    Delay_ms(1000);
     SerialPort.Send("Serial port connected\r\n");
 
     // Initialize stepper motor
@@ -82,15 +98,42 @@ int main() {
     motor.VelMax(MOTOR_MAX_VEL_RPM * steps_per_rev / 60);
     motor.AccelMax(MOTOR_MAX_VEL_RPM * steps_per_rev / 6);
 
-    Delay_ms(2000);
+    // Initialize display
+    SPI.begin();
+    ClearScreen();
+    SetBrightness(4);
+    SetCursor(0, 0);
+    SPI.beginTransaction(spiConfig);
+    // Send lines "out of order" to display them in the correct order
+    // without resetting the cursor position for each line, this is the
+    // order in which lines must be sent to be displayed correctly
+    SPI.transfer(line1, NULL, 20);
+    SPI.transfer(line3, NULL, 20);
+    SPI.transfer(line2, NULL, 20);
+    SPI.transfer(line4, NULL, 20);
+    SPI.endTransaction();
+
     display_srcfile_details();
 
     LED_timer = 0;
-    printCurrentState();
+    PrintCurrentState();
 
-    SerialPort.Send("Size of steps array: ");
-    SerialPort.Send(size_steps);
-    SerialPort.Send("\r\n");
+    SerialPort.SendLine("Initializing SD Card...");
+    if (!SD.begin()) {
+        SerialPort.SendLine("SD Card initialization failed!");
+        while (true) {
+            continue;
+        }
+    }
+    SerialPort.SendLine("SD Card initialized successfully!");
+    /* myFile = SD.open("test.txt", FILE_WRITE);
+    if (myFile) {
+        myFile.println("Testing 1, 2, 3...");
+        myFile.close();
+        SerialPort.SendLine("File written successfully!");
+    } else {
+        SerialPort.SendLine("Error opening file!");
+    } */
 
     while (true) {
         bool runActive = PRGM_RUN_BUS_PIN.State();
@@ -104,7 +147,7 @@ int main() {
                 reset_timer = 0;
                 lastDisplayedSecond = 5;
                 LED_PIN.State(true);            // Solid LED during countdown
-                SerialPort.Send("RESETTING in 5 seconds...\r\n");
+                SerialPort.SendLine("Resetting in 5 seconds...");
             }
         }
         prevResetActive = resetActive;
@@ -129,7 +172,7 @@ int main() {
                 // check for run request
                 if (askingToRun) {
                     currentState = RUNNING;
-                    printCurrentState();
+                    PrintCurrentState();
                 }
                 
                 break;
@@ -138,17 +181,32 @@ int main() {
                 if (!resetActive) {
                     SerialPort.Send("Reset cancelled\r\n");
                     currentState = preResetState;
-                    printCurrentState();
+                    PrintCurrentState();
                 } else if (reset_timer >= 5000) {
                     SerialPort.Send("Performing a full reset...\r\n");
-                    Delay_ms(100);
+                    // Send message to display here
+                    ClearScreen();
+                    SetCursor(0, 0);
+                    SPI.beginTransaction(spiConfig);
+                    SPI.transfer("Resetting board...  ", NULL, 20);
+                    Delay_ms(2000);
                     SysMgr.ResetBoard();
                 } else {
                     uint8_t remaining = 5 - (reset_timer / 1000);
                     if (remaining != lastDisplayedSecond) {
-                        SerialPort.Send("Resetting in ");
-                        SerialPort.Send(remaining);
-                        SerialPort.Send(" seconds...\r\n");
+                        snprintf(line3, sizeof(line3), "Resetting in %2d sec ", remaining);
+                        if (SerialPort) {
+                            SerialPort.SendLine(line3);
+                        }
+                        // Update the display
+                        SetCursor(0, 0);
+                        SPI.beginTransaction(spiConfig);
+                        SPI.transfer(line1, NULL, 20);
+                        SPI.transfer(line2, NULL, 20);
+                        SPI.transfer(line3, NULL, 20); // Display the updated line3
+                        SPI.transfer(line4, NULL, 20);
+                        SPI.endTransaction();
+
                         lastDisplayedSecond = remaining;
                     }
                     // Blink LED rapidly during countdown
@@ -167,6 +225,7 @@ int main() {
 
                 // upon entering a pause, call for a stop
                 if (!isPauseInitiated) {
+                    PrintCurrentState();
                     motor.MoveStopDecel((1000 / 60) * steps_per_rev);
                     isPauseInitiated = true;
                 }
@@ -181,7 +240,7 @@ int main() {
                 if (askingToRun && isFullyStopped) {
                     currentState = RESUME;
                     isPauseInitiated = false;
-                    printCurrentState();
+                    PrintCurrentState();
                 }
 
                 break;
@@ -196,7 +255,7 @@ int main() {
                 motor.EnableRequest(true);
                 
                 currentState = RUNNING;
-                printCurrentState();
+                PrintCurrentState();
                 
                 // re- initialize test step
                 motor.AccelMax(current_accel);
@@ -209,6 +268,7 @@ int main() {
                 // only perform these actions at start of test step
                 if (!isStepInitialized) {
                     debugStepInfo();
+                    PrintCurrentState();
                     LED_PIN.State(true);
                     MOTOR_ENABLE_PIN.State(true);
                     motor.EnableRequest(true);
@@ -262,7 +322,7 @@ int main() {
                 // Transition to PAUSED state if necessary
                 if (!askingToRun) {
                     currentState = PAUSED;
-                    printCurrentState();
+                    PrintCurrentState();
                     pause_timer = dwell_timer;
                     current_speed = motor.VelocityRefCommanded();
                     current_accel = accel_steps_s2;
@@ -330,33 +390,73 @@ void debugStepInfo() {
     SerialPort.Send("\r\n");  // Newline at the end
 }
 
-void printCurrentState() {
-    if (!SerialPort) return;  // Only send if USB is connected
+void SetBrightness(uint8_t level) {
+    SPI.beginTransaction(spiConfig);
+    SPI.transfer(0xfe);
+    SPI.transfer(0x53);
+    SPI.transfer(level);
+    SPI.endTransaction();
+}
 
-    const char *stateStr;
+void PrintCurrentState() {
+    const char* stateStr;
     switch (currentState) {
         case DEBUG:
-            stateStr = "Current State: DEBUG\r\n";
+            stateStr = "DEBUG";
             break;
         case IDLE:
-            stateStr = "Current State: IDLE\r\n";
+            stateStr = "IDLE";
             break;
         case RUNNING:
-            stateStr = "Current State: RUNNING\r\n";
+            stateStr = "RUNNING";
             break;
         case PAUSED:
-            stateStr = "Current State: PAUSED\r\n";
+            stateStr = "PAUSED";
             break;
         case RESET_REQUESTED:
-            stateStr = "Current State: RESET REQUESTED\r\n";
+            stateStr = "RESETTING";
             break;
         case RESUME:
-            stateStr = "Current State: RESUME\r\n";
+            stateStr = "RESUME";
             break;
         default:
-            stateStr = "Unknown State\r\n";
+            stateStr = "UNKNOWN!";
             break;
     }
     
-    SerialPort.Send(stateStr);
+    snprintf(line3, sizeof(line3), "Status: %-13s", stateStr);
+    snprintf(line4, sizeof(line4), "Current step:%7d", currentStepIndex + 1);
+    if (SerialPort) {
+        SerialPort.SendLine(line3);
+    }
+
+    SetCursor(0, 0);
+    SPI.beginTransaction(spiConfig);
+    SPI.transfer(line1, NULL, 20);
+    SPI.transfer(line2, NULL, 20);
+    SPI.transfer(line3, NULL, 20);
+    SPI.transfer(line4, NULL, 20);
+    SPI.endTransaction();
+}
+
+void SetCursor (uint8_t row, uint8_t col) {
+    if (row >= NUM_ROWS) {
+        row = 0;
+    }
+    if (col >= NUM_COLS) {
+        col = 0;
+    }
+    uint8_t position = row * NUM_COLS + col;
+    SPI.beginTransaction(spiConfig);
+    SPI.transfer(0xfe);
+    SPI.transfer(0x45);
+    SPI.transfer(position);
+    SPI.endTransaction();
+}
+
+void ClearScreen() {
+    SPI.beginTransaction(spiConfig);
+    SPI.transfer(0xfe);
+    SPI.transfer(0x51);
+    SPI.endTransaction();
 }

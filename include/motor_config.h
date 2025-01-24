@@ -5,11 +5,11 @@
 
 // Steps per Revolution
 #define MOTOR_MAX_VEL_RPM 3175
-const uint16_t SPR = 600;
+const uint16_t SPR = 3200;
 
 #define MAX_SPEED 1800          // RPM
 #define SWEEP_ACCEL 30          // RPM/sec
-#define BREAKIN_DURATION 300    // sec
+#define BREAKIN_DURATION 20//300// sec
 #define BASELINE_SPEED 30       // RPM
 #define BASELINE_DURATION 5     // sec
 #define DWELL_BETWEEN_STEPS 1   // sec
