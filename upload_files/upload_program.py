@@ -9,7 +9,10 @@ from pathlib import Path
 # IF NOT MOVE IT OR CHANGE THE PATH FOR project_dir
 
 user_profile = Path(os.environ["USERPROFILE"])
-project_dir = user_profile / "RTM"
+if os.path.exists("C:\\RTM"):
+    project_dir = Path("C:\\RTM")
+else:
+    project_dir = user_profile / "RTM"
 
 desktop = Path(os.path.join(os.environ["USERPROFILE"], "Desktop"))
 onedriveTSS_desktop = Path(os.path.join(os.environ["USERPROFILE"], "OneDrive - Trelleborg AB", "Desktop"))
