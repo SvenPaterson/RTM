@@ -4,12 +4,12 @@
 #include <cstdint>
 
 // Steps per Revolution
-#define MOTOR_MAX_VEL_RPM 3175
+#define MOTOR_MAX_VEL_RPM 3175 // 2760rpm for CPM-SDHP-N0563A-ELN
 const uint16_t SPR = 3200;
 
 #define MAX_SPEED 1800          // RPM
 #define SWEEP_ACCEL 30          // RPM/sec
-#define BREAKIN_DURATION 20//300// sec
+#define BREAKIN_DURATION 20     // sec
 #define BASELINE_SPEED 30       // RPM
 #define BASELINE_DURATION 5     // sec
 #define DWELL_BETWEEN_STEPS 1   // sec
@@ -21,7 +21,7 @@ struct Step {
     uint32_t dwell_time;   // amount of time to dwell after target speed is reached in sec
 };
 
-const Step steps[] = {
+const Step torque_steps[] = {
     // 1. CW TORQUE BASELINE
     {BASELINE_SPEED, BASELINE_SPEED, BASELINE_DURATION},
     {0, BASELINE_SPEED, DWELL_BETWEEN_STEPS},

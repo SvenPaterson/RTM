@@ -48,12 +48,13 @@ bool isPauseInitiated = false;
 bool isTargetSpeedMet = false;
 uint16_t currentStepIndex = 0;
 uint16_t lastDisplayedSecond = 5;
-elapsedMillis LED_timer, dwell_timer, pause_timer, reset_timer;
+uint64_t pause_time = 0;
+elapsedMillis LED_timer, dwell_timer, reset_timer;
 
 /******* STEPPER MOTOR INIT *******/
 #define motor ConnectorM0
 uint16_t steps_per_rev = SPR;
-uint8_t size_steps = sizeof(steps) / sizeof(steps[0]);
+uint8_t size_torque_steps = sizeof(torque_steps) / sizeof(torque_steps[0]);
 int32_t target_speed_steps_s = 0;
 uint64_t target_position = 0;
 uint32_t accel_steps_s2 = 0;
@@ -62,7 +63,7 @@ uint32_t current_accel = 0;
 
 /******* FUNC DECLARATIONS *******/
 void display_srcfile_details();
-void debugStepInfo();
+void debugTorqueStepInfo();
 void PrintCurrentState();
 void PrintAlerts();
 void SetBrightness(uint8_t level);
@@ -134,6 +135,9 @@ int main() {
     } else {
         SerialPort.SendLine("Error opening file!");
     } */
+
+    unsigned long lastDebugTime = 0; // Tracks the last time the debug message was sent
+    const unsigned long debugInterval = 500; // Interval in milliseconds for debug messages
 
     while (true) {
         bool runActive = PRGM_RUN_BUS_PIN.State();
@@ -247,7 +251,7 @@ int main() {
 
             case RESUME:
                 SerialPort.Send("\nResuming the following step:\r\n");
-                debugStepInfo();
+                debugTorqueStepInfo();
 
                 // re-initialize common test settings
                 LED_PIN.State(true);
@@ -260,23 +264,23 @@ int main() {
                 // re- initialize test step
                 motor.AccelMax(current_accel);
                 motor.MoveVelocity(current_speed);
-                dwell_timer = pause_timer;
+                dwell_timer = pause_time;
 
                 break;
 
             case RUNNING:
                 // only perform these actions at start of test step
                 if (!isStepInitialized) {
-                    debugStepInfo();
+                    debugTorqueStepInfo();
                     PrintCurrentState();
                     LED_PIN.State(true);
                     MOTOR_ENABLE_PIN.State(true);
                     motor.EnableRequest(true);
 
                     // Calculate speed and accel in steps for given step
-                    accel_steps_s2 = std::ceil((steps[currentStepIndex].accel * steps_per_rev) / 60.0);
+                    accel_steps_s2 = std::ceil((torque_steps[currentStepIndex].accel * steps_per_rev) / 60.0);
                     motor.AccelMax(accel_steps_s2);
-                    target_speed_steps_s = std::ceil((steps[currentStepIndex].target_speed * steps_per_rev) / 60.0);
+                    target_speed_steps_s = std::ceil((torque_steps[currentStepIndex].target_speed * steps_per_rev) / 60.0);
                     
                     SerialPort.Send("Accel steps/s^2: ");
                     SerialPort.Send(accel_steps_s2);
@@ -299,6 +303,14 @@ int main() {
 
                 }
 
+                if (Milliseconds() - lastDebugTime >= debugInterval) {
+                    SerialPort.Send("Dwell timer: ");
+                    SerialPort.SendLine(dwell_timer);
+                    // update last debug time
+                    lastDebugTime = Milliseconds();
+                }
+
+
                 if (!isTargetSpeedMet) {
                     dwell_timer = 0;
                     // For non-zero targets: check speed reached
@@ -313,9 +325,9 @@ int main() {
                 }
 
                 // Handle dwell timing and step advancement
-                if (isTargetSpeedMet && dwell_timer >= steps[currentStepIndex].dwell_time * 1000) {
+                if (isTargetSpeedMet && dwell_timer >= torque_steps[currentStepIndex].dwell_time * 1000) {
                         isStepInitialized = false;
-                        currentStepIndex = (currentStepIndex + 1) % size_steps;
+                        currentStepIndex = (currentStepIndex + 1) % size_torque_steps;
                         isTargetSpeedMet = false;
                 }
 
@@ -323,7 +335,7 @@ int main() {
                 if (!askingToRun) {
                     currentState = PAUSED;
                     PrintCurrentState();
-                    pause_timer = dwell_timer;
+                    pause_time = dwell_timer;
                     current_speed = motor.VelocityRefCommanded();
                     current_accel = accel_steps_s2;
                 }
@@ -378,15 +390,15 @@ void PrintAlerts(){
     }
  }
 
-void debugStepInfo() {
+void debugTorqueStepInfo() {
     SerialPort.Send("\nStep ");
     SerialPort.Send(currentStepIndex + 1);  // Step index (1-based)
     SerialPort.Send("\tTime, s: ");
-    SerialPort.Send(steps[currentStepIndex].dwell_time);  // Dwell time
+    SerialPort.Send(torque_steps[currentStepIndex].dwell_time);  // Dwell time
     SerialPort.Send("\tSpeed, rpm: ");
-    SerialPort.Send(steps[currentStepIndex].target_speed);  // Target speed
+    SerialPort.Send(torque_steps[currentStepIndex].target_speed);  // Target speed
     SerialPort.Send("\tAccel, rpm/s: ");
-    SerialPort.Send(steps[currentStepIndex].accel);  // Acceleration
+    SerialPort.Send(torque_steps[currentStepIndex].accel);  // Acceleration
     SerialPort.Send("\r\n");  // Newline at the end
 }
 
@@ -424,7 +436,7 @@ void PrintCurrentState() {
             break;
     }
     
-    snprintf(line3, sizeof(line3), "Status: %-13s", stateStr);
+    snprintf(line3, sizeof(line3), "Status: %-12s", stateStr);
     snprintf(line4, sizeof(line4), "Current step:%7d", currentStepIndex + 1);
     if (SerialPort) {
         SerialPort.SendLine(line3);
