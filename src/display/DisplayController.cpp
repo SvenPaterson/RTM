@@ -135,7 +135,7 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     pinMode(_loop_bus_pin, INPUT_PULLDOWN);
     pinMode(_run_sw_pin, INPUT_PULLDOWN);
     pinMode(_reset_sw_pin, INPUT_PULLDOWN);
-    pinMode(_heat_bus_pin, INPUT_PULLDOWN);
+    //pinMode(_heat_bus_pin, INPUT_PULLDOWN);
     pinMode(_heat_safety_pin, OUTPUT);
     pinMode(_heat_output_pin, OUTPUT);
     pinMode(LED_BUILTIN, OUTPUT);
@@ -307,6 +307,10 @@ uint32_t DisplayController::getCurrentLoopCount() {
 
 
 void DisplayController::computeHeaterOutput(const unsigned int& interval) {
+    Serial.print("Setpoint temp: ");
+    Serial.print(_setpoint_temp);
+    Serial.print(", _askingForHeat: ");
+    Serial.println(_askingForHeat);
     if (_setpoint_temp == 0 || !_askingForHeat) {
         turnOffHeaters();
     } 

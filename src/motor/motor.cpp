@@ -134,7 +134,9 @@ void loop() {
         
             // power down motor and heaters
             digitalWrite(MOTOR_ENABLE_PIN, LOW);
-            // digitalWrite(HEAT_BUS_PIN, LOW);
+            if (steps[0].turnOnHeat == true) {
+                digitalWrite(HEAT_BUS_PIN, HIGH);
+            } else digitalWrite(HEAT_BUS_PIN, LOW);
 
             // check for run request
             if (askingToRun) {
