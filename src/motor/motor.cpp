@@ -134,7 +134,7 @@ void loop() {
         
             // power down motor and heaters
             digitalWrite(MOTOR_ENABLE_PIN, LOW);
-            digitalWrite(HEAT_BUS_PIN, LOW);
+            // digitalWrite(HEAT_BUS_PIN, LOW);
 
             // check for run request
             if (askingToRun) {
