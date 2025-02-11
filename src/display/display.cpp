@@ -209,6 +209,7 @@ void loop() {
 
     case STATE_TEST_COMPLETED:
         rtm.stopProgram();  // don't remove this
+        rtm.turnOffHeaters();
         rtm.testCompleted(test_status_str);
         if (rtm.getResetSwitch()) {
             currentState = STATE_RESET_REQUESTED;
