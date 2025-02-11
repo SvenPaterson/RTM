@@ -23,7 +23,6 @@ char          line4[21] = "                    ";
 File myFile;
 
 /******* I/O PINS *******/
-#define LOOP_BUS_PIN ConnectorIO1
 #define PRGM_RUN_BUS_PIN ConnectorDI6
 #define LED_PIN ConnectorIO0
 #define MOTOR_ENABLE_PIN ConnectorIO2
@@ -69,13 +68,12 @@ void PrintAlerts();
 void SetBrightness(uint8_t level);
 void SetCursor(uint8_t row, uint8_t col);
 void ClearScreen();
+void PadString(char *str, size_t length);
 
 int main() {
     PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL); // docs suggest that pullup is default
     PRGM_RESET_BUS_PIN.Mode(Connector::INPUT_DIGITAL); // docs suggest that pullup is default
     MOTOR_ENABLE_PIN.Mode(Connector::OUTPUT_DIGITAL);
-    LOOP_BUS_PIN.Mode(Connector::OUTPUT_DIGITAL);
-    LOOP_BUS_PIN.State(false);
     LED_PIN.Mode(Connector::OUTPUT_DIGITAL);
     LED_PIN.State(true);
 
@@ -187,18 +185,25 @@ int main() {
                     currentState = preResetState;
                     PrintCurrentState();
                 } else if (reset_timer >= 5000) {
-                    SerialPort.Send("Performing a full reset...\r\n");
+                    sprintf(line3, "Resetting system...");
+                    SerialPort.SendLine(line3);
+
                     // Send message to display here
-                    ClearScreen();
+                    PadString(line3, 20);
                     SetCursor(0, 0);
                     SPI.beginTransaction(spiConfig);
-                    SPI.transfer("Resetting board...  ", NULL, 20);
+                    SPI.transfer(line3, NULL, 20); // First line
+                    SPI.transfer("                    ", NULL, 20); // Third line
+                    SPI.transfer("                    ", NULL, 20); // Second line
+                    SPI.transfer("                    ", NULL, 20); // Fourth line
+                    SPI.endTransaction();
                     Delay_ms(2000);
                     SysMgr.ResetBoard();
                 } else {
                     uint8_t remaining = 5 - (reset_timer / 1000);
                     if (remaining != lastDisplayedSecond) {
-                        snprintf(line3, sizeof(line3), "Resetting in %2d sec ", remaining);
+                        snprintf(line3, sizeof(line3), "Resetting in %d sec", remaining);
+                        PadString(line3, 20);
                         if (SerialPort) {
                             SerialPort.SendLine(line3);
                         }
@@ -471,4 +476,16 @@ void ClearScreen() {
     SPI.transfer(0xfe);
     SPI.transfer(0x51);
     SPI.endTransaction();
+}
+
+void PadString(char *str, size_t length) {
+    size_t strLen = strlen(str);
+
+    if (strLen < length) {
+        for (size_t i = strLen; i < length; i++) {
+            str[i] = ' '; // Add spaces
+        }
+    }
+
+    str[length] = '\0'; // Ensure the string is null-terminated
 }
