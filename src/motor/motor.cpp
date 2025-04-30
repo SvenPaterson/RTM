@@ -15,10 +15,10 @@
 SPISettings spiConfig(80000, MSBFIRST, SPI_MODE3);
 #define NUM_ROWS 4
 #define NUM_COLS 20
-const uint8_t line1[21] = "Torque Stand Test   ";
-const uint8_t line2[21] = "                    ";
-char          line3[21] = "                    ";
-char          line4[21] = "                    ";
+char line1[21] = " Torque Sweep Test  ";
+char line2[21] = "                    ";
+char line3[21] = "                    ";
+char line4[21] = "                    ";
 
 File myFile;
 
@@ -28,6 +28,7 @@ File myFile;
 #define MOTOR_ENABLE_PIN ConnectorIO2
 #define PRGM_RESET_BUS_PIN ConnectorDI7
 #define SerialPort ConnectorUsb
+#define SAFETY_PIN ConnectorDI8
 
 /******* SYSTEM STATE CONTROL *******/
 enum SystemState {
@@ -36,7 +37,8 @@ IDLE,   // normal mode: currentState = IDLE
 RUNNING,
 PAUSED,
 RESET_REQUESTED,
-RESUME
+RESUME,
+E_STOP
 };
 SystemState currentState = IDLE;
 SystemState preResetState = IDLE;
@@ -45,10 +47,11 @@ bool isFullyStopped = false;
 bool isStepInitialized = false;
 bool isPauseInitiated = false;
 bool isTargetSpeedMet = false;
+bool isEStop = false;
 uint16_t currentStepIndex = 0;
 uint16_t lastDisplayedSecond = 5;
 uint64_t pause_time = 0;
-elapsedMillis LED_timer, dwell_timer, reset_timer;
+elapsedMillis LED_timer, dwell_timer, reset_timer, debug_timer;
 
 /******* STEPPER MOTOR INIT *******/
 #define motor ConnectorM0
@@ -64,6 +67,7 @@ uint32_t current_accel = 0;
 void display_srcfile_details();
 void debugTorqueStepInfo();
 void PrintCurrentState();
+void RenderDisplay();
 void PrintAlerts();
 void SetBrightness(uint8_t level);
 void SetCursor(uint8_t row, uint8_t col);
@@ -71,9 +75,13 @@ void ClearScreen();
 void PadString(char *str, size_t length);
 
 int main() {
-    PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL); // docs suggest that pullup is default
-    PRGM_RESET_BUS_PIN.Mode(Connector::INPUT_DIGITAL); // docs suggest that pullup is default
-    MOTOR_ENABLE_PIN.Mode(Connector::OUTPUT_DIGITAL);
+    PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL); // docs suggest that pullup is default for INPUT_DIGITAL
+    //PRGM_RUN_BUS_PIN.FilterLength(10);
+    PRGM_RESET_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
+    //PRGM_RESET_BUS_PIN.FilterLength(10);
+    // MOTOR_ENABLE_PIN.Mode(Connector::OUTPUT_DIGITAL);
+    SAFETY_PIN.Mode(Connector::INPUT_DIGITAL);
+    //SAFETY_PIN.FilterLength(10);
     LED_PIN.Mode(Connector::OUTPUT_DIGITAL);
     LED_PIN.State(true);
 
@@ -101,16 +109,7 @@ int main() {
     SPI.begin();
     ClearScreen();
     SetBrightness(4);
-    SetCursor(0, 0);
-    SPI.beginTransaction(spiConfig);
-    // Send lines "out of order" to display them in the correct order
-    // without resetting the cursor position for each line, this is the
-    // order in which lines must be sent to be displayed correctly
-    SPI.transfer(line1, NULL, 20);
-    SPI.transfer(line3, NULL, 20);
-    SPI.transfer(line2, NULL, 20);
-    SPI.transfer(line4, NULL, 20);
-    SPI.endTransaction();
+    RenderDisplay();
 
     display_srcfile_details();
 
@@ -138,12 +137,23 @@ int main() {
     const unsigned long debugInterval = 500; // Interval in milliseconds for debug messages
 
     while (true) {
+        bool isSafetyActive = !SAFETY_PIN.State();
         bool runActive = PRGM_RUN_BUS_PIN.State();
         bool resetActive = PRGM_RESET_BUS_PIN.State();
         static bool prevResetActive = false;
 
-        if (resetActive && !prevResetActive) {  // Rising edge
-            if (currentState != RUNNING) {      // Only allow reset from non-running states
+        if (debug_timer >= 1000) {
+            // print whatever you like—here’s an example:
+            SerialPort.Send("isSafetyActive = ");
+            SerialPort.SendLine(isSafetyActive);
+            SerialPort.Send("resetActive = ");
+            SerialPort.SendLine(resetActive);
+
+            debug_timer = 0;
+        }
+
+        if (resetActive && !prevResetActive && currentState != E_STOP) {  // Rising edge
+            if (currentState != RUNNING) {      // Only allow reset from non-running, non-emergency states
                 preResetState = currentState;   // Remember previous state
                 currentState = RESET_REQUESTED;
                 reset_timer = 0;
@@ -155,9 +165,51 @@ int main() {
         prevResetActive = resetActive;
         askingToRun = runActive && (currentState != RESET_REQUESTED);
 
+        if (isSafetyActive && currentState != E_STOP) {
+            // immediately go to E_STOP
+            currentState = E_STOP;
+            current_speed = motor.VelocityRefCommanded();
+            current_accel = std::ceil((torque_steps[currentStepIndex].accel * steps_per_rev) / 60.0);;
+            motor.MoveStopDecel(0);
+            motor.EnableRequest(false);
+            pause_time = dwell_timer;
+        }
+
         switch (currentState) {
             case DEBUG:
                 // anything here you need
+                break;
+
+            case E_STOP:
+                // show a message on LCD
+                if (!isEStop) {
+                    snprintf(line1, sizeof(line1),  "   !!! E-STOP !!!   ");
+                    PadString(line1,20);
+                    sniprintf(line2, sizeof(line2), " ");
+                    PadString(line2,20);
+                    sniprintf(line3, sizeof(line3), "Reset the test to");
+                    PadString(line3,20);
+                    sniprintf(line4, sizeof(line4), "clear the e-stop");
+                    PadString(line4,20);
+                    RenderDisplay();
+                    isEStop = true;
+                }
+        
+                // If test is safe and user requests reset, then reset the system
+                if (!isSafetyActive && resetActive) { 
+                    ClearScreen();
+                    Delay_ms(100);
+                    SetCursor(0,0);
+                    SPI.beginTransaction(spiConfig);
+                    SPI.transfer("Resetting system... ", NULL, 20);
+                    // now blank the other three rows:
+                    SPI.transfer("                    ", NULL, 20);
+                    SPI.transfer("                    ", NULL, 20);
+                    SPI.transfer("                    ", NULL, 20);
+                    SPI.endTransaction();
+                    Delay_ms(2000);
+                    SysMgr.ResetBoard();
+                }
                 break;
             
             case IDLE:
@@ -169,7 +221,7 @@ int main() {
             
                 // power down motor and heaters
                 motor.EnableRequest(false);
-                MOTOR_ENABLE_PIN.State(false);
+                // MOTOR_ENABLE_PIN.State(false);
 
                 // check for run request
                 if (askingToRun) {
@@ -187,16 +239,8 @@ int main() {
                 } else if (reset_timer >= 5000) {
                     sprintf(line3, "Resetting system...");
                     SerialPort.SendLine(line3);
-
-                    // Send message to display here
                     PadString(line3, 20);
-                    SetCursor(0, 0);
-                    SPI.beginTransaction(spiConfig);
-                    SPI.transfer(line3, NULL, 20); // First line
-                    SPI.transfer("                    ", NULL, 20); // Third line
-                    SPI.transfer("                    ", NULL, 20); // Second line
-                    SPI.transfer("                    ", NULL, 20); // Fourth line
-                    SPI.endTransaction();
+                    RenderDisplay();
                     Delay_ms(2000);
                     SysMgr.ResetBoard();
                 } else {
@@ -207,14 +251,8 @@ int main() {
                         if (SerialPort) {
                             SerialPort.SendLine(line3);
                         }
-                        // Update the display
-                        SetCursor(0, 0);
-                        SPI.beginTransaction(spiConfig);
-                        SPI.transfer(line1, NULL, 20);
-                        SPI.transfer(line2, NULL, 20);
-                        SPI.transfer(line3, NULL, 20); // Display the updated line3
-                        SPI.transfer(line4, NULL, 20);
-                        SPI.endTransaction();
+                        
+                        RenderDisplay();
 
                         lastDisplayedSecond = remaining;
                     }
@@ -230,6 +268,8 @@ int main() {
                 if (LED_timer > 250) {
                     LED_PIN.State(!LED_PIN.State());
                     LED_timer = 0;
+                    SerialPort.Send("isFullyStopped: ");
+                    SerialPort.SendLine(isFullyStopped);
                 }
 
                 // upon entering a pause, call for a stop
@@ -240,7 +280,7 @@ int main() {
                 }
                 
                 if (motor.StepsComplete()) {
-                    MOTOR_ENABLE_PIN.State(false);
+                    // MOTOR_ENABLE_PIN.State(false);
                     motor.EnableRequest(false);
                     isFullyStopped = true;
                 }
@@ -260,7 +300,7 @@ int main() {
 
                 // re-initialize common test settings
                 LED_PIN.State(true);
-                MOTOR_ENABLE_PIN.State(true);
+                // MOTOR_ENABLE_PIN.State(true);
                 motor.EnableRequest(true);
                 
                 currentState = RUNNING;
@@ -279,7 +319,7 @@ int main() {
                     debugTorqueStepInfo();
                     PrintCurrentState();
                     LED_PIN.State(true);
-                    MOTOR_ENABLE_PIN.State(true);
+                    // MOTOR_ENABLE_PIN.State(true);
                     motor.EnableRequest(true);
 
                     // Calculate speed and accel in steps for given step
@@ -447,15 +487,19 @@ void PrintCurrentState() {
         SerialPort.SendLine(line3);
     }
 
-    SetCursor(0, 0);
-    SPI.beginTransaction(spiConfig);
-    SPI.transfer(line1, NULL, 20);
-    SPI.transfer(line2, NULL, 20);
-    SPI.transfer(line3, NULL, 20);
-    SPI.transfer(line4, NULL, 20);
-    SPI.endTransaction();
+    RenderDisplay();
 }
 
+void RenderDisplay() {
+    SetCursor(0,0);
+    SPI.beginTransaction(spiConfig);
+      SPI.transfer(line1, NULL, 20);
+      SPI.transfer(line3, NULL, 20);
+      SPI.transfer(line2, NULL, 20);
+      SPI.transfer(line4, NULL, 20);
+    SPI.endTransaction();
+  }
+  
 void SetCursor (uint8_t row, uint8_t col) {
     if (row >= NUM_ROWS) {
         row = 0;
