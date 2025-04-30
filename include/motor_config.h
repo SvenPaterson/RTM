@@ -3,25 +3,22 @@
 
 #include <cstdint>
 
-// Steps per Revolution
-#define MOTOR_MAX_VEL_RPM 3175 // 2760rpm for CPM-SDHP-N0563A-ELN
-const uint16_t SPR = 3200;
+/******* I/O PINS *******/
+#define PRGM_RUN_BUS_PIN ConnectorDI6
+#define LED_PIN ConnectorIO0
+#define MOTOR_ENABLE_PIN ConnectorIO2
+#define PRGM_RESET_BUS_PIN ConnectorDI7
+#define SerialPort ConnectorUsb
+#define SAFETY_PIN ConnectorDI8
 
-#define MAX_SPEED 1800          // RPM
-#define SWEEP_ACCEL 30          // RPM/sec
-#define BREAKIN_DURATION 300     // sec
-#define BASELINE_SPEED 30       // RPM
-#define BASELINE_DURATION 20     // sec
-#define DWELL_BETWEEN_STEPS 1   // sec
+//#define MAX_SPEED 1800          // RPM
+//#define SWEEP_ACCEL 30          // RPM/sec
+//#define BREAKIN_DURATION 300     // sec
+//#define BASELINE_SPEED 30       // RPM
+//#define BASELINE_DURATION 20     // sec
+//#define DWELL_BETWEEN_STEPS 1   // sec
 
-// Struct to define each step
-struct Step {
-    int32_t target_speed; 
-    uint32_t accel;        // Acceleration in RPM/sec
-    uint32_t dwell_time;   // amount of time to dwell after target speed is reached in sec
-};
-
-const Step torque_steps[] = {
+/* const Step torque_steps[] = {
     // 1. CW TORQUE BASELINE
     {BASELINE_SPEED, BASELINE_SPEED, BASELINE_DURATION},
     {0, BASELINE_SPEED, DWELL_BETWEEN_STEPS},
@@ -32,7 +29,7 @@ const Step torque_steps[] = {
 
     // 3. CW
     {BASELINE_SPEED, BASELINE_SPEED, BASELINE_DURATION},
-    {0, 30, DWELL_BETWEEN_STEPS},
+    {0, BASELINE_SPEED, DWELL_BETWEEN_STEPS},
 
     // 4. CW SWEEP
     {MAX_SPEED, SWEEP_ACCEL, DWELL_BETWEEN_STEPS},
@@ -53,6 +50,6 @@ const Step torque_steps[] = {
     // 8. Run baseline again but CCW
     {-BASELINE_SPEED, BASELINE_SPEED, BASELINE_DURATION},
     {0, 30, DWELL_BETWEEN_STEPS}
-};
+}; */
 
 #endif

@@ -20,16 +20,6 @@ char line2[21] = "                    ";
 char line3[21] = "                    ";
 char line4[21] = "                    ";
 
-File myFile;
-
-/******* I/O PINS *******/
-#define PRGM_RUN_BUS_PIN ConnectorDI6
-#define LED_PIN ConnectorIO0
-#define MOTOR_ENABLE_PIN ConnectorIO2
-#define PRGM_RESET_BUS_PIN ConnectorDI7
-#define SerialPort ConnectorUsb
-#define SAFETY_PIN ConnectorDI8
-
 /******* SYSTEM STATE CONTROL *******/
 enum SystemState {
 DEBUG,  // debug mode: currentState = DEBUG
@@ -38,6 +28,7 @@ RUNNING,
 PAUSED,
 RESET_REQUESTED,
 RESUME,
+COMPLETED,
 E_STOP
 };
 SystemState currentState = IDLE;
@@ -48,20 +39,33 @@ bool isStepInitialized = false;
 bool isPauseInitiated = false;
 bool isTargetSpeedMet = false;
 bool isEStop = false;
+bool isCompleted = false;
 uint16_t currentStepIndex = 0;
+uint16_t prevStepIndex = 0;
 uint16_t lastDisplayedSecond = 5;
 uint64_t pause_time = 0;
 elapsedMillis LED_timer, dwell_timer, reset_timer, debug_timer;
 
 /******* STEPPER MOTOR INIT *******/
 #define motor ConnectorM0
-uint16_t steps_per_rev = SPR;
-uint8_t size_torque_steps = sizeof(torque_steps) / sizeof(torque_steps[0]);
+#define MOTOR_MAX_VEL_RPM 2760 // 2760rpm for CPM-SDHP-N0563A-ELN
+const uint16_t steps_per_rev = 3200;
+// uint8_t torque_step_count = sizeof(torque_steps) / sizeof(torque_steps[0]);
 int32_t target_speed_steps_s = 0;
 uint64_t target_position = 0;
 uint32_t accel_steps_s2 = 0;
 int32_t current_speed = 0; 
 uint32_t current_accel = 0;
+
+// Struct to define each test step
+struct Step {
+    int32_t target_speed; 
+    uint32_t accel;        // Acceleration in RPM/sec
+    uint32_t dwell_time;   // amount of time to dwell after target speed is reached in sec
+};
+#define MAX_STEPS 50
+Step torque_steps[MAX_STEPS];
+uint16_t torque_step_count = 0;
 
 /******* FUNC DECLARATIONS *******/
 void display_srcfile_details();
@@ -124,17 +128,51 @@ int main() {
         }
     }
     SerialPort.SendLine("SD Card initialized successfully!");
-    /* myFile = SD.open("test.txt", FILE_WRITE);
-    if (myFile) {
-        myFile.println("Testing 1, 2, 3...");
-        myFile.close();
-        SerialPort.SendLine("File written successfully!");
-    } else {
-        SerialPort.SendLine("Error opening file!");
-    } */
 
-    unsigned long lastDebugTime = 0; // Tracks the last time the debug message was sent
-    const unsigned long debugInterval = 500; // Interval in milliseconds for debug messages
+    uint16_t loopCount = 0;
+    File cfg = SD.open("loop_count.txt", FILE_READ);
+    if (cfg) {
+        while (cfg.available()) {
+            String line = cfg.readStringUntil('\n');
+            if (line.startsWith("LOOP_COUNT=")) {
+                loopCount = line.substring(11).toInt();
+                SerialPort.Send("Loop count from file: ");
+            }
+        }
+    } else {
+        SerialPort.SendLine("Error opening loop_count.txt!");
+        // need to print to screen here to tell user that 
+        // the file is not found.
+    }
+    cfg.close();
+
+    File seq = SD.open("test_protocol.txt", FILE_READ);
+    while (seq.available()) {
+        String row = seq.readStringUntil('\n');
+        row.trim();
+        int c1 = row.indexOf(',');
+        int c2 = row.indexOf(',', c1 + 1);
+        if (c1 < 0 || c2 < 0) {
+            // malformed line, skip it
+            continue; // Skip if not enough commas
+        }
+        String sTargetSpeed = row.substring(0, c1);
+        sTargetSpeed.trim();
+        String sAccel = row.substring(c1 + 1, c2);
+        sAccel.trim();
+        String sDwell = row.substring(c2 + 1);
+        sDwell.trim();
+
+        int32_t nTargetSpeed = sTargetSpeed.toInt();
+        uint32_t nAccel = sAccel.toInt();
+        uint32_t nDwell = sDwell.toInt();
+
+        torque_steps[torque_step_count++] = {
+            nTargetSpeed,  // target speed
+            nAccel,        // acceleration
+            nDwell         // dwell time
+        };
+    }
 
     while (true) {
         bool isSafetyActive = !SAFETY_PIN.State();
@@ -142,14 +180,14 @@ int main() {
         bool resetActive = PRGM_RESET_BUS_PIN.State();
         static bool prevResetActive = false;
 
-        if (debug_timer >= 1000) {
-            // print whatever you like—here’s an example:
-            SerialPort.Send("isSafetyActive = ");
-            SerialPort.SendLine(isSafetyActive);
-            SerialPort.Send("resetActive = ");
-            SerialPort.SendLine(resetActive);
-
-            debug_timer = 0;
+        if (loopCount == 0) {
+            if (currentStepIndex == 0 && !isStepInitialized) {
+                motor.MoveStopDecel(0);
+                motor.EnableRequest(false);
+                currentState = COMPLETED;
+                PrintCurrentState();
+                break;
+            }
         }
 
         if (resetActive && !prevResetActive && currentState != E_STOP) {  // Rising edge
@@ -178,6 +216,23 @@ int main() {
         switch (currentState) {
             case DEBUG:
                 // anything here you need
+                break;
+
+            case COMPLETED:
+                // show a message on LCD
+                if (!isCompleted) {
+                    snprintf(line1, sizeof(line1),  "   Test Complete    ");
+                    PadString(line1,20);
+                    sniprintf(line2, sizeof(line2), " ");
+                    PadString(line2,20);
+                    sniprintf(line3, sizeof(line3), "Press reset to exit");
+                    PadString(line3,20);
+                    sniprintf(line4, sizeof(line4), "   or restart test  ");
+                    PadString(line4,20);
+                    RenderDisplay();
+                    isCompleted = true;
+                    //motor.EnableConnector
+                }
                 break;
 
             case E_STOP:
@@ -348,14 +403,6 @@ int main() {
 
                 }
 
-                if (Milliseconds() - lastDebugTime >= debugInterval) {
-                    SerialPort.Send("Dwell timer: ");
-                    SerialPort.SendLine(dwell_timer);
-                    // update last debug time
-                    lastDebugTime = Milliseconds();
-                }
-
-
                 if (!isTargetSpeedMet) {
                     dwell_timer = 0;
                     // For non-zero targets: check speed reached
@@ -372,8 +419,18 @@ int main() {
                 // Handle dwell timing and step advancement
                 if (isTargetSpeedMet && dwell_timer >= torque_steps[currentStepIndex].dwell_time * 1000) {
                         isStepInitialized = false;
-                        currentStepIndex = (currentStepIndex + 1) % size_torque_steps;
+                        prevStepIndex = currentStepIndex;
+                        currentStepIndex = (currentStepIndex + 1) % torque_step_count;
                         isTargetSpeedMet = false;
+
+                        // Check if we are at the end of the test sequence
+                        if (prevStepIndex == torque_step_count - 1 && currentStepIndex == 0) {
+                            if (loopCount > 1) {
+                                loopCount--;
+                            } else {
+                                currentState = COMPLETED;
+                            }
+                        }
                 }
 
                 // Transition to PAUSED state if necessary
@@ -384,14 +441,6 @@ int main() {
                     current_speed = motor.VelocityRefCommanded();
                     current_accel = accel_steps_s2;
                 }
-
-                /*  // Inform display controller of loop completion (after the last step)
-                if (currentStepIndex == 0 && !isStepInitialized) {
-                    // Briefly pulse the loop bus pin high
-                    LOOP_BUS_PIN.State(true);
-                    Delay_ms(1); 
-                    LOOP_BUS_PIN.State(false);
-                } */
 
                 break;
         }
