@@ -15,7 +15,7 @@
 SPISettings spiConfig(80000, MSBFIRST, SPI_MODE3);
 #define NUM_ROWS 4
 #define NUM_COLS 20
-char line1[21] = " Torque Sweep Test  ";
+char line1[21] = "                    ";
 char line2[21] = "                    ";
 char line3[21] = "                    ";
 char line4[21] = "                    ";
@@ -129,24 +129,73 @@ int main() {
     }
     SerialPort.SendLine("SD Card initialized successfully!");
 
-    uint16_t loopCount = 0;
-    File cfg = SD.open("loop_count.txt", FILE_READ);
-    if (cfg) {
-        while (cfg.available()) {
-            String line = cfg.readStringUntil('\n');
-            if (line.startsWith("LOOP_COUNT=")) {
-                loopCount = line.substring(11).toInt();
-                SerialPort.Send("Loop count from file: ");
-            }
+    String protocolName;
+    uint16_t loopCount = 1;
+
+    File seq = SD.open("test_protocol.csv", FILE_READ);
+    // handle file open error
+    if (!seq) {
+        SerialPort.SendLine("Failed to open test_protocol.csv!");
+        snprintf(line1, sizeof(line1), "  test_protocol.csv");
+        PadString(line1,20);
+        sniprintf(line2, sizeof(line2), "   not found!");
+        PadString(line2,20);
+        RenderDisplay();
+        while (true) {
+            continue;
         }
     } else {
-        SerialPort.SendLine("Error opening loop_count.txt!");
-        // need to print to screen here to tell user that 
-        // the file is not found.
+        SerialPort.SendLine("test_protocol.csv opened successfully!");
+        snprintf(line1, sizeof(line1), "  test_protocol.csv");
+        PadString(line1,20);
+        sniprintf(line2, sizeof(line2), "opened successfully!");
+        PadString(line2,20);
+        RenderDisplay();
+        Delay_ms(1000);
     }
-    cfg.close();
 
-    File seq = SD.open("test_protocol.txt", FILE_READ);
+    // --- 1) Read protocol name ---
+    String line = seq.readStringUntil('\n');
+    line.trim();
+    if (line.startsWith("PROTOCOL_NAME=")) {
+        protocolName = line.substring(strlen("PROTOCOL_NAME="));
+        SerialPort.Send("Protocol name: ");
+        SerialPort.SendLine(protocolName.c_str());
+    } else {
+        SerialPort.SendLine("Invalid protocol name format!");
+        snprintf(line1, sizeof(line1), "   Invalid protocol");
+        PadString(line1,20);
+        sniprintf(line2, sizeof(line2), "   name format!");
+        PadString(line2,20);
+        RenderDisplay();
+    }
+    Delay_ms(1000);
+    
+    // --- 2) Read loop count ---
+    line = seq.readStringUntil('\n');
+    line.trim();
+    if (line.startsWith("LOOP_COUNT=")) {
+        loopCount = line.substring(strlen("LOOP_COUNT=")).toInt();
+        SerialPort.Send("Loop count: ");
+        SerialPort.SendLine(loopCount);
+    } else {
+        SerialPort.SendLine("Invalid loop count format!");
+        snprintf(line1, sizeof(line1), "Loop count not read!");
+        PadString(line1,20);
+        sniprintf(line2, sizeof(line2), "Check file!");
+        PadString(line2,20);
+        sniprintf(line3, sizeof(line3), " ");
+        PadString(line3,20);
+        snprintf(line4, sizeof(line4), "Defaulting to 1");
+        PadString(line4,20);
+        RenderDisplay();
+        Delay_ms(1000);
+    }
+
+    // --- 3) Read torque steps ---
+    seq.readStringUntil('\n'); // Skip header line
+
+    // --- 4) Read each torque step ---
     while (seq.available()) {
         String row = seq.readStringUntil('\n');
         row.trim();
@@ -173,6 +222,9 @@ int main() {
             nDwell         // dwell time
         };
     }
+
+    sprintf(line1, sizeof(line1), "  %s", protocolName.c_str());
+    PadString(line1,20);
 
     while (true) {
         bool isSafetyActive = !SAFETY_PIN.State();
@@ -524,6 +576,12 @@ void PrintCurrentState() {
             break;
         case RESUME:
             stateStr = "RESUME";
+            break;
+        case COMPLETED:
+            stateStr = "COMPLETED";
+            break;
+        case E_STOP:
+            stateStr = "E-STOP";
             break;
         default:
             stateStr = "UNKNOWN!";
