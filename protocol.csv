@@ -1,3 +1,5 @@
+PROTOCOL_NAME=RDP110X Torque Test
+LOOP_COUNT=1
 TargetRPM,AccelRPMperSec,DwellSeconds
 30,30,20
 0,30,1

@@ -16,9 +16,10 @@ SPISettings spiConfig(80000, MSBFIRST, SPI_MODE3);
 #define NUM_ROWS 4
 #define NUM_COLS 20
 char line1[21] = "                    ";
-char line2[21] = "                    ";
-char line3[21] = "                    ";
+char line2[21] = "       BOOTING      ";
+char line3[21] = "       SYSTEM       ";
 char line4[21] = "                    ";
+char msg[21] =   "                    ";
 
 /******* SYSTEM STATE CONTROL *******/
 enum SystemState {
@@ -32,6 +33,7 @@ COMPLETED,
 E_STOP
 };
 SystemState currentState = IDLE;
+SystemState prevState = currentState;
 SystemState preResetState = IDLE;
 bool askingToRun = false;
 bool isFullyStopped = false;
@@ -58,6 +60,7 @@ int32_t current_speed = 0;
 uint32_t current_accel = 0;
 
 // Struct to define each test step
+String protocolName;
 struct Step {
     int32_t target_speed; 
     uint32_t accel;        // Acceleration in RPM/sec
@@ -66,26 +69,24 @@ struct Step {
 #define MAX_STEPS 50
 Step torque_steps[MAX_STEPS];
 uint16_t torque_step_count = 0;
+uint8_t loopCount = 1;
 
 /******* FUNC DECLARATIONS *******/
 void display_srcfile_details();
 void debugTorqueStepInfo();
-void PrintCurrentState();
+void PrintCurrentState(const char* msg_line = "");
 void RenderDisplay();
 void PrintAlerts();
 void SetBrightness(uint8_t level);
 void SetCursor(uint8_t row, uint8_t col);
 void ClearScreen();
+void ClearLines();
 void PadString(char *str, size_t length);
 
 int main() {
-    PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL); // docs suggest that pullup is default for INPUT_DIGITAL
-    //PRGM_RUN_BUS_PIN.FilterLength(10);
+    PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
     PRGM_RESET_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
-    //PRGM_RESET_BUS_PIN.FilterLength(10);
-    // MOTOR_ENABLE_PIN.Mode(Connector::OUTPUT_DIGITAL);
     SAFETY_PIN.Mode(Connector::INPUT_DIGITAL);
-    //SAFETY_PIN.FilterLength(10);
     LED_PIN.Mode(Connector::OUTPUT_DIGITAL);
     LED_PIN.State(true);
 
@@ -111,45 +112,61 @@ int main() {
 
     // Initialize display
     SPI.begin();
-    ClearScreen();
     SetBrightness(4);
+    Delay_ms(100);
+    ClearScreen();
+    Delay_ms(500);
     RenderDisplay();
-
+    Delay_ms(2000);
+    ClearLines();
     display_srcfile_details();
-
-    LED_timer = 0;
-    PrintCurrentState();
 
     SerialPort.SendLine("Initializing SD Card...");
     if (!SD.begin()) {
         SerialPort.SendLine("SD Card initialization failed!");
+        snprintf(msg, sizeof(msg), "SD Card init failed!");
+        PadString(msg,20);
+        PrintCurrentState(msg);
         while (true) {
-            continue;
+            // Do nothing until reset button is pressed
+            if (!PRGM_RESET_BUS_PIN.State()) {
+                continue;
+            } else {
+                SysMgr.ResetBoard();
+            }
         }
     }
     SerialPort.SendLine("SD Card initialized successfully!");
 
-    String protocolName;
-    uint16_t loopCount = 1;
-
-    File seq = SD.open("test_protocol.csv", FILE_READ);
-    // handle file open error
+    File seq = SD.open("protocol.csv", FILE_READ);
     if (!seq) {
-        SerialPort.SendLine("Failed to open test_protocol.csv!");
-        snprintf(line1, sizeof(line1), "  test_protocol.csv");
+        SerialPort.SendLine("Failed to open protocol.csv!");
+        snprintf(line1, sizeof(line1), "   !!! ERROR !!!   ");
         PadString(line1,20);
-        sniprintf(line2, sizeof(line2), "   not found!");
+        snprintf(line2, sizeof(line2), "protocol.csv not");
         PadString(line2,20);
+        snprintf(line3, sizeof(line3), "found! Check SD card");
+        PadString(line3,20);
+        snprintf(line4, sizeof(line4), "then restart system");
+        PadString(line4,20);
         RenderDisplay();
         while (true) {
-            continue;
+            // Do nothing until reset button is pressed
+            if (!PRGM_RESET_BUS_PIN.State()) {
+                continue;
+            } else {
+                SysMgr.ResetBoard();
+            }
         }
+        
     } else {
         SerialPort.SendLine("test_protocol.csv opened successfully!");
-        snprintf(line1, sizeof(line1), "  test_protocol.csv");
+        snprintf(line1, sizeof(line1), "SUCCESS:");
         PadString(line1,20);
-        sniprintf(line2, sizeof(line2), "opened successfully!");
-        PadString(line2,20);
+        sniprintf(line3, sizeof(line3), "  protocol.csv");
+        PadString(line3,20);
+        sniprintf(line4, sizeof(line4), "        uploaded!");
+        PadString(line4,20);
         RenderDisplay();
         Delay_ms(1000);
     }
@@ -157,38 +174,58 @@ int main() {
     // --- 1) Read protocol name ---
     String line = seq.readStringUntil('\n');
     line.trim();
-    if (line.startsWith("PROTOCOL_NAME=")) {
+    if (!line.startsWith("PROTOCOL_NAME=")) {
+        SerialPort.SendLine("Invalid protocol name format!");
+        snprintf(line1, sizeof(line1), "FAILED:");
+        PadString(line1,20);
+        snprintf(line3, sizeof(line4), "Invalid protocol");
+        PadString(line3,20);
+        sniprintf(line4, sizeof(line4), "name format!");
+        PadString(line4,20);
+        RenderDisplay();
+        while (true) {
+            // Do nothing until reset button is pressed
+            if (!PRGM_RESET_BUS_PIN.State()) {
+                continue;
+            } else {
+                SysMgr.ResetBoard();
+            }
+        }
+        
+    } else {
         protocolName = line.substring(strlen("PROTOCOL_NAME="));
         SerialPort.Send("Protocol name: ");
         SerialPort.SendLine(protocolName.c_str());
-    } else {
-        SerialPort.SendLine("Invalid protocol name format!");
-        snprintf(line1, sizeof(line1), "   Invalid protocol");
-        PadString(line1,20);
-        sniprintf(line2, sizeof(line2), "   name format!");
-        PadString(line2,20);
-        RenderDisplay();
+        Delay_ms(1000);
     }
-    Delay_ms(1000);
     
+
     // --- 2) Read loop count ---
     line = seq.readStringUntil('\n');
     line.trim();
-    if (line.startsWith("LOOP_COUNT=")) {
+    if (!line.startsWith("LOOP_COUNT=")) {
+        SerialPort.SendLine("Invalid loop count format!");
+        snprintf(line1, sizeof(line1), "ERROR:");
+        PadString(line1,20);
+        sniprintf(line2, sizeof(line2), " ");
+        PadString(line2,20);
+        sniprintf(line3, sizeof(line3), "Loop count not read!");
+        PadString(line3,20);
+        snprintf(line4, sizeof(line4), "Check file and reset");
+        PadString(line4,20);
+        RenderDisplay();
+        while (true) {
+            // Do nothing until reset button is pressed
+            if (!PRGM_RESET_BUS_PIN.State()) {
+                continue;
+            } else {
+                SysMgr.ResetBoard();
+            }
+        }  
+    } else {
         loopCount = line.substring(strlen("LOOP_COUNT=")).toInt();
         SerialPort.Send("Loop count: ");
         SerialPort.SendLine(loopCount);
-    } else {
-        SerialPort.SendLine("Invalid loop count format!");
-        snprintf(line1, sizeof(line1), "Loop count not read!");
-        PadString(line1,20);
-        sniprintf(line2, sizeof(line2), "Check file!");
-        PadString(line2,20);
-        sniprintf(line3, sizeof(line3), " ");
-        PadString(line3,20);
-        snprintf(line4, sizeof(line4), "Defaulting to 1");
-        PadString(line4,20);
-        RenderDisplay();
         Delay_ms(1000);
     }
 
@@ -223,14 +260,23 @@ int main() {
         };
     }
 
-    sprintf(line1, sizeof(line1), "  %s", protocolName.c_str());
-    PadString(line1,20);
+    SetCursor(0, 0);
+    PrintCurrentState();
+    LED_timer = 0;
 
     while (true) {
         bool isSafetyActive = !SAFETY_PIN.State();
         bool runActive = PRGM_RUN_BUS_PIN.State();
         bool resetActive = PRGM_RESET_BUS_PIN.State();
         static bool prevResetActive = false;
+
+        if (prevState != currentState) {
+            prevState = currentState;
+            if (SerialPort) {
+                PrintCurrentState();
+                SerialPort.SendLine(line3);
+            }
+        }
 
         if (loopCount == 0) {
             if (currentStepIndex == 0 && !isStepInitialized) {
@@ -273,14 +319,7 @@ int main() {
             case COMPLETED:
                 // show a message on LCD
                 if (!isCompleted) {
-                    snprintf(line1, sizeof(line1),  "   Test Complete    ");
-                    PadString(line1,20);
-                    sniprintf(line2, sizeof(line2), " ");
-                    PadString(line2,20);
-                    sniprintf(line3, sizeof(line3), "Press reset to exit");
-                    PadString(line3,20);
-                    sniprintf(line4, sizeof(line4), "   or restart test  ");
-                    PadString(line4,20);
+                    PrintCurrentState();
                     RenderDisplay();
                     isCompleted = true;
                     //motor.EnableConnector
@@ -290,20 +329,14 @@ int main() {
             case E_STOP:
                 // show a message on LCD
                 if (!isEStop) {
-                    snprintf(line1, sizeof(line1),  "   !!! E-STOP !!!   ");
-                    PadString(line1,20);
-                    sniprintf(line2, sizeof(line2), " ");
-                    PadString(line2,20);
-                    sniprintf(line3, sizeof(line3), "Reset the test to");
-                    PadString(line3,20);
-                    sniprintf(line4, sizeof(line4), "clear the e-stop");
-                    PadString(line4,20);
-                    RenderDisplay();
+                    sniprintf(msg, sizeof(msg), "Reset clears E-STOP");
+                    PrintCurrentState(msg);
                     isEStop = true;
                 }
         
                 // If test is safe and user requests reset, then reset the system
                 if (!isSafetyActive && resetActive) { 
+                    Delay_ms(100); // debounce
                     ClearScreen();
                     Delay_ms(100);
                     SetCursor(0,0);
@@ -344,6 +377,8 @@ int main() {
                     currentState = preResetState;
                     PrintCurrentState();
                 } else if (reset_timer >= 5000) {
+                    ClearScreen();
+                    Delay_ms(100);
                     sprintf(line3, "Resetting system...");
                     SerialPort.SendLine(line3);
                     PadString(line3, 20);
@@ -353,13 +388,11 @@ int main() {
                 } else {
                     uint8_t remaining = 5 - (reset_timer / 1000);
                     if (remaining != lastDisplayedSecond) {
-                        snprintf(line3, sizeof(line3), "Resetting in %d sec", remaining);
-                        PadString(line3, 20);
+                        snprintf(msg, sizeof(msg), "Resetting in %d sec", remaining);
                         if (SerialPort) {
-                            SerialPort.SendLine(line3);
+                            SerialPort.SendLine(msg);
                         }
-                        
-                        RenderDisplay();
+                        PrintCurrentState(msg);
 
                         lastDisplayedSecond = remaining;
                     }
@@ -375,8 +408,6 @@ int main() {
                 if (LED_timer > 250) {
                     LED_PIN.State(!LED_PIN.State());
                     LED_timer = 0;
-                    SerialPort.Send("isFullyStopped: ");
-                    SerialPort.SendLine(isFullyStopped);
                 }
 
                 // upon entering a pause, call for a stop
@@ -402,7 +433,7 @@ int main() {
                 break;
 
             case RESUME:
-                SerialPort.Send("\nResuming the following step:\r\n");
+                SerialPort.Send("\nResuming the following step:\r");
                 debugTorqueStepInfo();
 
                 // re-initialize common test settings
@@ -433,11 +464,6 @@ int main() {
                     accel_steps_s2 = std::ceil((torque_steps[currentStepIndex].accel * steps_per_rev) / 60.0);
                     motor.AccelMax(accel_steps_s2);
                     target_speed_steps_s = std::ceil((torque_steps[currentStepIndex].target_speed * steps_per_rev) / 60.0);
-                    
-                    SerialPort.Send("Accel steps/s^2: ");
-                    SerialPort.Send(accel_steps_s2);
-                    SerialPort.Send(" Target speed steps/s: ");
-                    SerialPort.SendLine(target_speed_steps_s);
 
                     // In RUNNING state, after move command:
                     if (motor.StatusReg().bit.AlertsPresent) {
@@ -474,12 +500,12 @@ int main() {
                         prevStepIndex = currentStepIndex;
                         currentStepIndex = (currentStepIndex + 1) % torque_step_count;
                         isTargetSpeedMet = false;
+                        PrintCurrentState();
 
                         // Check if we are at the end of the test sequence
                         if (prevStepIndex == torque_step_count - 1 && currentStepIndex == 0) {
-                            if (loopCount > 1) {
-                                loopCount--;
-                            } else {
+                            loopCount--;
+                            if (loopCount == 0) {
                                 currentState = COMPLETED;
                             }
                         }
@@ -539,13 +565,12 @@ void PrintAlerts(){
 void debugTorqueStepInfo() {
     SerialPort.Send("\nStep ");
     SerialPort.Send(currentStepIndex + 1);  // Step index (1-based)
-    SerialPort.Send("\tTime, s: ");
-    SerialPort.Send(torque_steps[currentStepIndex].dwell_time);  // Dwell time
-    SerialPort.Send("\tSpeed, rpm: ");
+    SerialPort.Send("\t\tSpeed, rpm: ");
     SerialPort.Send(torque_steps[currentStepIndex].target_speed);  // Target speed
-    SerialPort.Send("\tAccel, rpm/s: ");
+    SerialPort.Send("\t\tAccel, rpm/s: ");
     SerialPort.Send(torque_steps[currentStepIndex].accel);  // Acceleration
-    SerialPort.Send("\r\n");  // Newline at the end
+    SerialPort.Send("\t\tAdd'l Dwell Time, s: ");
+    SerialPort.SendLine(torque_steps[currentStepIndex].dwell_time);  // Dwell time
 }
 
 void SetBrightness(uint8_t level) {
@@ -556,7 +581,7 @@ void SetBrightness(uint8_t level) {
     SPI.endTransaction();
 }
 
-void PrintCurrentState() {
+void PrintCurrentState(const char* msg_line) {
     const char* stateStr;
     switch (currentState) {
         case DEBUG:
@@ -588,12 +613,57 @@ void PrintCurrentState() {
             break;
     }
     
-    snprintf(line3, sizeof(line3), "Status: %-12s", stateStr);
-    snprintf(line4, sizeof(line4), "Current step:%7d", currentStepIndex + 1);
-    if (SerialPort) {
-        SerialPort.SendLine(line3);
+    // build the first line
+    const char* rightStr = stateStr;
+    size_t rightLen = strlen(rightStr);
+
+    // truncate left side if too long
+    size_t maxLeft = DISPLAY_COLS - rightLen - 1;
+    char leftBuf[DISPLAY_COLS + 1];
+    size_t protoLen = protocolName.length();
+    if (protoLen > maxLeft) {
+        protocolName.substring(0, maxLeft)
+                    .toCharArray(leftBuf, maxLeft + 1);
+    } else {
+        protocolName.toCharArray(leftBuf, maxLeft + 1);
     }
 
+    // compute length of left side
+    size_t leftLen = strlen(leftBuf);
+
+    // pad space between left and right sides
+    int pad = DISPLAY_COLS - leftLen - rightLen;
+    if (pad < 1) pad = 1;
+
+    // create the line
+    snprintf(line1, sizeof(line1), "%s%*s%s", leftBuf, pad, "", rightStr);
+    PadString(line1,DISPLAY_COLS);
+
+    // build the second line
+    snprintf(line2, sizeof(line3), "%s", msg);
+    PadString(line2,DISPLAY_COLS);
+
+    // build the third line
+    snprintf(leftBuf, sizeof(leftBuf), "Remaining Loops:");
+    leftLen = strlen(leftBuf);
+    rightStr = String(loopCount).c_str();
+    rightLen = strlen(rightStr);
+    pad = DISPLAY_COLS - leftLen - rightLen;
+    if (pad < 1) pad = 1;
+    snprintf(line3, sizeof(line2), "%s%*s%s", leftBuf, pad, "", rightStr);
+    PadString(line3,DISPLAY_COLS);
+
+    // build the fourth line
+    snprintf(leftBuf, sizeof(leftBuf), "Current step:");
+    leftLen = strlen(leftBuf);
+    rightStr = String(currentStepIndex + 1).c_str(); // Step index (1-based)
+    rightLen = strlen(rightStr);
+    pad = DISPLAY_COLS - leftLen - rightLen;
+    if (pad < 1) pad = 1;
+    snprintf(line4, sizeof(line4), "%s%*s%s", leftBuf, pad, "", rightStr);
+    PadString(line4,DISPLAY_COLS);
+
+    // print all lines to the display
     RenderDisplay();
 }
 
@@ -627,6 +697,17 @@ void ClearScreen() {
     SPI.transfer(0xfe);
     SPI.transfer(0x51);
     SPI.endTransaction();
+}
+
+void ClearLines() {
+    snprintf(line1, sizeof(line1), "                    ");
+    PadString(line1,20);
+    snprintf(line2, sizeof(line2), "                    ");
+    PadString(line2,20);
+    snprintf(line3, sizeof(line3), "                    ");
+    PadString(line3,20);
+    snprintf(line4, sizeof(line4), "                    ");
+    PadString(line4,20);
 }
 
 void PadString(char *str, size_t length) {
