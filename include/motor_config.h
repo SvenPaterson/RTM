@@ -12,6 +12,6 @@
 #define SAFETY_PIN ConnectorDI8
 
 /******* DISPLAY CONFIGURATION *******/
-#define DISPLAY_COLS 20
+
 
 #endif

@@ -5,21 +5,23 @@
 #include "SD.h"
 
 // RTM Motor Controller Version - ClearCore
-// Last Update: 01/23/25
+// Last Update: 05/06/25
 // change log:
 // 12/13/24: Fixed pause, resume and restart logic
 // 01/23/25: Added ClearCore support
+// 05/05/25: Added SD card support
 
-#define SRC_FILE_VERSION "Torque Stand ClearCore v0.1"
+static constexpr char SRC_FILE_VERSION[] = "Torque Stand v2025.5.6";
 
 SPISettings spiConfig(80000, MSBFIRST, SPI_MODE3);
-#define NUM_ROWS 4
-#define NUM_COLS 20
-char line1[21] = "                    ";
-char line2[21] = "       BOOTING      ";
-char line3[21] = "       SYSTEM       ";
-char line4[21] = "                    ";
-char msg[21] =   "                    ";
+static constexpr uint8_t NUM_ROWS = 4;
+static constexpr uint8_t NUM_COLS = 20;
+char line1[NUM_COLS + 1] = "                    ";
+char line2[NUM_COLS + 1] = "       BOOTING      ";
+char line3[NUM_COLS + 1] = "       SYSTEM       ";
+char line4[NUM_COLS + 1] = "                    ";
+char msg[NUM_COLS + 1] =   "                    ";
+static constexpr char BLANK_LINE[NUM_COLS + 1] = "                    ";
 
 /******* SYSTEM STATE CONTROL *******/
 enum SystemState {
@@ -50,8 +52,8 @@ elapsedMillis LED_timer, dwell_timer, reset_timer, debug_timer;
 
 /******* STEPPER MOTOR INIT *******/
 #define motor ConnectorM0
-#define MOTOR_MAX_VEL_RPM 2760 // 2760rpm for CPM-SDHP-N0563A-ELN
-const uint16_t steps_per_rev = 3200;
+static constexpr uint32_t MOTOR_MAX_VEL_RPM = 2760; // 2760rpm for CPM-SDHP-N0563A-ELN
+static constexpr uint16_t STEPS_PER_REV = 3200;
 // uint8_t torque_step_count = sizeof(torque_steps) / sizeof(torque_steps[0]);
 int32_t target_speed_steps_s = 0;
 uint64_t target_position = 0;
@@ -66,8 +68,8 @@ struct Step {
     uint32_t accel;        // Acceleration in RPM/sec
     uint32_t dwell_time;   // amount of time to dwell after target speed is reached in sec
 };
-#define MAX_STEPS 50
-Step torque_steps[MAX_STEPS];
+static constexpr uint8_t MAX_PROTOCOL_STEPS = 50;
+Step torque_steps[MAX_PROTOCOL_STEPS];
 uint16_t torque_step_count = 0;
 uint8_t loopCount = 1;
 
@@ -107,8 +109,8 @@ int main() {
     MotorMgr.MotorModeSet(MotorManager::MOTOR_M0M1,
                           Connector::CPM_MODE_STEP_AND_DIR);
     motor.HlfbMode(MotorDriver::HLFB_MODE_STATIC);
-    motor.VelMax(MOTOR_MAX_VEL_RPM * steps_per_rev / 60);
-    motor.AccelMax(MOTOR_MAX_VEL_RPM * steps_per_rev / 6);
+    motor.VelMax(MOTOR_MAX_VEL_RPM * STEPS_PER_REV / 60);
+    motor.AccelMax(MOTOR_MAX_VEL_RPM * STEPS_PER_REV / 6);
 
     // Initialize display
     SPI.begin();
@@ -278,16 +280,7 @@ int main() {
             }
         }
 
-        if (loopCount == 0) {
-            if (currentStepIndex == 0 && !isStepInitialized) {
-                motor.MoveStopDecel(0);
-                motor.EnableRequest(false);
-                currentState = COMPLETED;
-                PrintCurrentState();
-                break;
-            }
-        }
-
+        // first check for a reset request
         if (resetActive && !prevResetActive && currentState != E_STOP) {  // Rising edge
             if (currentState != RUNNING) {      // Only allow reset from non-running, non-emergency states
                 preResetState = currentState;   // Remember previous state
@@ -301,16 +294,29 @@ int main() {
         prevResetActive = resetActive;
         askingToRun = runActive && (currentState != RESET_REQUESTED);
 
+        // then check to see if test is complete
+        if (loopCount == 0) {
+            if (currentStepIndex == 0 && !isStepInitialized) {
+                motor.MoveStopDecel(0);
+                motor.EnableRequest(false);
+                currentState = COMPLETED;
+                PrintCurrentState();
+                break;
+            }
+        }
+
+        // then check for an e-stop
         if (isSafetyActive && currentState != E_STOP) {
             // immediately go to E_STOP
             currentState = E_STOP;
             current_speed = motor.VelocityRefCommanded();
-            current_accel = std::ceil((torque_steps[currentStepIndex].accel * steps_per_rev) / 60.0);;
+            current_accel = std::ceil((torque_steps[currentStepIndex].accel * STEPS_PER_REV) / 60.0);;
             motor.MoveStopDecel(0);
             motor.EnableRequest(false);
             pause_time = dwell_timer;
         }
 
+        // proceed to run test
         switch (currentState) {
             case DEBUG:
                 // anything here you need
@@ -413,7 +419,7 @@ int main() {
                 // upon entering a pause, call for a stop
                 if (!isPauseInitiated) {
                     PrintCurrentState();
-                    motor.MoveStopDecel((1000 / 60) * steps_per_rev);
+                    motor.MoveStopDecel((1000 / 60) * STEPS_PER_REV);
                     isPauseInitiated = true;
                 }
                 
@@ -461,9 +467,9 @@ int main() {
                     motor.EnableRequest(true);
 
                     // Calculate speed and accel in steps for given step
-                    accel_steps_s2 = std::ceil((torque_steps[currentStepIndex].accel * steps_per_rev) / 60.0);
+                    accel_steps_s2 = std::ceil((torque_steps[currentStepIndex].accel * STEPS_PER_REV) / 60.0);
                     motor.AccelMax(accel_steps_s2);
-                    target_speed_steps_s = std::ceil((torque_steps[currentStepIndex].target_speed * steps_per_rev) / 60.0);
+                    target_speed_steps_s = std::ceil((torque_steps[currentStepIndex].target_speed * STEPS_PER_REV) / 60.0);
 
                     // In RUNNING state, after move command:
                     if (motor.StatusReg().bit.AlertsPresent) {
@@ -618,8 +624,8 @@ void PrintCurrentState(const char* msg_line) {
     size_t rightLen = strlen(rightStr);
 
     // truncate left side if too long
-    size_t maxLeft = DISPLAY_COLS - rightLen - 1;
-    char leftBuf[DISPLAY_COLS + 1];
+    size_t maxLeft = NUM_COLS - rightLen - 1;
+    char leftBuf[NUM_COLS + 1];
     size_t protoLen = protocolName.length();
     if (protoLen > maxLeft) {
         protocolName.substring(0, maxLeft)
@@ -632,36 +638,36 @@ void PrintCurrentState(const char* msg_line) {
     size_t leftLen = strlen(leftBuf);
 
     // pad space between left and right sides
-    int pad = DISPLAY_COLS - leftLen - rightLen;
+    int pad = NUM_COLS - leftLen - rightLen;
     if (pad < 1) pad = 1;
 
     // create the line
     snprintf(line1, sizeof(line1), "%s%*s%s", leftBuf, pad, "", rightStr);
-    PadString(line1,DISPLAY_COLS);
+    PadString(line1,NUM_COLS);
 
     // build the second line
-    snprintf(line2, sizeof(line3), "%s", msg);
-    PadString(line2,DISPLAY_COLS);
+    snprintf(line2, sizeof(line2), "%s", msg_line);
+    PadString(line2,NUM_COLS);
 
     // build the third line
     snprintf(leftBuf, sizeof(leftBuf), "Remaining Loops:");
     leftLen = strlen(leftBuf);
     rightStr = String(loopCount).c_str();
     rightLen = strlen(rightStr);
-    pad = DISPLAY_COLS - leftLen - rightLen;
+    pad = NUM_COLS - leftLen - rightLen;
     if (pad < 1) pad = 1;
-    snprintf(line3, sizeof(line2), "%s%*s%s", leftBuf, pad, "", rightStr);
-    PadString(line3,DISPLAY_COLS);
+    snprintf(line3, sizeof(line3), "%s%*s%s", leftBuf, pad, "", rightStr);
+    PadString(line3,NUM_COLS);
 
     // build the fourth line
     snprintf(leftBuf, sizeof(leftBuf), "Current step:");
     leftLen = strlen(leftBuf);
     rightStr = String(currentStepIndex + 1).c_str(); // Step index (1-based)
     rightLen = strlen(rightStr);
-    pad = DISPLAY_COLS - leftLen - rightLen;
+    pad = NUM_COLS - leftLen - rightLen;
     if (pad < 1) pad = 1;
     snprintf(line4, sizeof(line4), "%s%*s%s", leftBuf, pad, "", rightStr);
-    PadString(line4,DISPLAY_COLS);
+    PadString(line4,NUM_COLS);
 
     // print all lines to the display
     RenderDisplay();
