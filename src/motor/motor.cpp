@@ -301,7 +301,6 @@ int main() {
                 motor.EnableRequest(false);
                 currentState = COMPLETED;
                 PrintCurrentState();
-                break;
             }
         }
 
