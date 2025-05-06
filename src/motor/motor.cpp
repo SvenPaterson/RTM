@@ -1,4 +1,4 @@
-#include "motor_config.h"
+#include "MotorController.h"
 #include "ClearCore.h"
 #include "ElapsedMillis.h"
 #include "SPI.h"

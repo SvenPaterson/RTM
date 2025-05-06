@@ -6,7 +6,6 @@
  *  ▸ Call `tick()` from your loop – it is non‑blocking.
  */
 
-#include "motor_config.h"
 #include "ClearCore.h"
 #include "ElapsedMillis.h"   // <‑‑ added as requested
 #include "SPI.h"
@@ -58,7 +57,7 @@ private:
     /* === Private state ================================================= */
 
     // protocol
-    std::array<Step, kMaxSteps> steps_{};
+    std::array<Step, kMaxProtocolSteps> steps_{};
     uint8_t  stepCount_   {0};
     uint8_t  loopCount_   {1};
     String   protocolName_;
@@ -115,7 +114,7 @@ private:
 
         // 4) Steps
         stepCount_ = 0;
-        while (csv.available() && stepCount_ < kMaxSteps) {
+        while (csv.available() && stepCount_ < kMaxProtocolSteps) {
             String row = csv.readStringUntil('\n');
             row.trim();
             if (row.length() == 0) continue; // skip blanks
