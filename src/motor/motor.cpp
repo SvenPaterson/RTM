@@ -1,9 +1,3 @@
-#include "MotorController.h"
-#include "ClearCore.h"
-#include "ElapsedMillis.h"
-#include "SPI.h"
-#include "SD.h"
-
 // RTM Motor Controller Version - ClearCore
 // Last Update: 05/06/25
 // change log:
@@ -11,9 +5,19 @@
 // 01/23/25: Added ClearCore support
 // 05/05/25: Added SD card support
 
+#include "MotorController.h"
+#include "ClearCore.h"
+#include "ElapsedMillis.h"
+#include "SPI.h"
+#include "SD.h"
+
+MotorController gCtrl;
+// ─── SPI settings for the Newhaven LCD — 80 kHz, MODE3 ───
+// const SPISettings MotorController::spiCfg_{ 80000, MSBFIRST, SPI_MODE3 };
+
 static constexpr char SRC_FILE_VERSION[] = "Torque Stand v2025.5.6";
 
-SPISettings spiConfig(80000, MSBFIRST, SPI_MODE3);
+
 static constexpr uint8_t NUM_ROWS = 4;
 static constexpr uint8_t NUM_COLS = 20;
 char line1[NUM_COLS + 1] = "                    ";
@@ -75,198 +79,37 @@ uint8_t loopCount = 1;
 
 /******* FUNC DECLARATIONS *******/
 void display_srcfile_details();
-void debugTorqueStepInfo();
-void PrintCurrentState(const char* msg_line = "");
-void RenderDisplay();
-void PrintAlerts();
-void SetBrightness(uint8_t level);
-void SetCursor(uint8_t row, uint8_t col);
-void ClearScreen();
-void ClearLines();
-void PadString(char *str, size_t length);
+
+/* -----------------------------------------------------------------
+ *  Transitional wrappers – call through to gCtrl
+ * -----------------------------------------------------------------*/
+
+/* void SetCursor(uint8_t r, uint8_t c) { gCtrl.setCursor(r, c); }
+void ClearScreen() { gCtrl.clearScreen(); }
+void RenderDisplay() { gCtrl.render(); }
+void PadString(char *buf, size_t len = 20) { gCtrl.pad(buf); }   // default 20
+void PrintCurrentState(const char *msg = "") { gCtrl.printCurrent(msg); }
+void PrintAlerts() { gCtrl.printAlerts(); }
+void debugTorqueStepInfo() { gCtrl.debugTorqueStepInfo(); } */
 
 int main() {
-    PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
-    PRGM_RESET_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
-    SAFETY_PIN.Mode(Connector::INPUT_DIGITAL);
-    LED_PIN.Mode(Connector::OUTPUT_DIGITAL);
-    LED_PIN.State(true);
-
-    SerialPort.Mode(Connector::USB_CDC);
-    SerialPort.Speed(9600);
-    uint32_t timeout = 5000;
-    uint32_t startTime = Milliseconds();
-    SerialPort.PortOpen();
-    while (!SerialPort && Milliseconds() - startTime < timeout) {
-        // wait for serial port to connect. Needed for native USB port only
-        continue;
-    }
-    Delay_ms(1000);
-    SerialPort.Send("Serial port connected\r\n");
-
-    // Initialize stepper motor
-    MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
-    MotorMgr.MotorModeSet(MotorManager::MOTOR_M0M1,
-                          Connector::CPM_MODE_STEP_AND_DIR);
-    motor.HlfbMode(MotorDriver::HLFB_MODE_STATIC);
-    motor.VelMax(MOTOR_MAX_VEL_RPM * STEPS_PER_REV / 60);
-    motor.AccelMax(MOTOR_MAX_VEL_RPM * STEPS_PER_REV / 6);
-
-    // Initialize display
-    SPI.begin();
-    SetBrightness(4);
-    Delay_ms(100);
-    ClearScreen();
-    Delay_ms(500);
-    RenderDisplay();
-    Delay_ms(2000);
-    ClearLines();
-    display_srcfile_details();
-
-    SerialPort.SendLine("Initializing SD Card...");
-    if (!SD.begin()) {
-        SerialPort.SendLine("SD Card initialization failed!");
-        snprintf(msg, sizeof(msg), "SD Card init failed!");
-        PadString(msg,20);
-        PrintCurrentState(msg);
-        while (true) {
-            // Do nothing until reset button is pressed
-            if (!PRGM_RESET_BUS_PIN.State()) {
-                continue;
-            } else {
-                SysMgr.ResetBoard();
-            }
-        }
-    }
-    SerialPort.SendLine("SD Card initialized successfully!");
-
-    File seq = SD.open("protocol.csv", FILE_READ);
-    if (!seq) {
-        SerialPort.SendLine("Failed to open protocol.csv!");
-        snprintf(line1, sizeof(line1), "   !!! ERROR !!!   ");
-        PadString(line1,20);
-        snprintf(line2, sizeof(line2), "protocol.csv not");
-        PadString(line2,20);
-        snprintf(line3, sizeof(line3), "found! Check SD card");
-        PadString(line3,20);
-        snprintf(line4, sizeof(line4), "then restart system");
-        PadString(line4,20);
-        RenderDisplay();
-        while (true) {
-            // Do nothing until reset button is pressed
-            if (!PRGM_RESET_BUS_PIN.State()) {
-                continue;
-            } else {
-                SysMgr.ResetBoard();
-            }
-        }
-        
-    } else {
-        SerialPort.SendLine("test_protocol.csv opened successfully!");
-        snprintf(line1, sizeof(line1), "SUCCESS:");
-        PadString(line1,20);
-        sniprintf(line3, sizeof(line3), "  protocol.csv");
-        PadString(line3,20);
-        sniprintf(line4, sizeof(line4), "        uploaded!");
-        PadString(line4,20);
-        RenderDisplay();
-        Delay_ms(1000);
-    }
-
-    // --- 1) Read protocol name ---
-    String line = seq.readStringUntil('\n');
-    line.trim();
-    if (!line.startsWith("PROTOCOL_NAME=")) {
-        SerialPort.SendLine("Invalid protocol name format!");
-        snprintf(line1, sizeof(line1), "FAILED:");
-        PadString(line1,20);
-        snprintf(line3, sizeof(line4), "Invalid protocol");
-        PadString(line3,20);
-        sniprintf(line4, sizeof(line4), "name format!");
-        PadString(line4,20);
-        RenderDisplay();
-        while (true) {
-            // Do nothing until reset button is pressed
-            if (!PRGM_RESET_BUS_PIN.State()) {
-                continue;
-            } else {
-                SysMgr.ResetBoard();
-            }
-        }
-        
-    } else {
-        protocolName = line.substring(strlen("PROTOCOL_NAME="));
-        SerialPort.Send("Protocol name: ");
-        SerialPort.SendLine(protocolName.c_str());
-        Delay_ms(1000);
-    }
-    
-
-    // --- 2) Read loop count ---
-    line = seq.readStringUntil('\n');
-    line.trim();
-    if (!line.startsWith("LOOP_COUNT=")) {
-        SerialPort.SendLine("Invalid loop count format!");
-        snprintf(line1, sizeof(line1), "ERROR:");
-        PadString(line1,20);
-        sniprintf(line2, sizeof(line2), " ");
-        PadString(line2,20);
-        sniprintf(line3, sizeof(line3), "Loop count not read!");
-        PadString(line3,20);
-        snprintf(line4, sizeof(line4), "Check file and reset");
-        PadString(line4,20);
-        RenderDisplay();
-        while (true) {
-            // Do nothing until reset button is pressed
-            if (!PRGM_RESET_BUS_PIN.State()) {
-                continue;
-            } else {
-                SysMgr.ResetBoard();
-            }
-        }  
-    } else {
-        loopCount = line.substring(strlen("LOOP_COUNT=")).toInt();
-        SerialPort.Send("Loop count: ");
-        SerialPort.SendLine(loopCount);
-        Delay_ms(1000);
-    }
-
-    // --- 3) Read torque steps ---
-    seq.readStringUntil('\n'); // Skip header line
-
-    // --- 4) Read each torque step ---
-    while (seq.available()) {
-        String row = seq.readStringUntil('\n');
-        row.trim();
-        int c1 = row.indexOf(',');
-        int c2 = row.indexOf(',', c1 + 1);
-        if (c1 < 0 || c2 < 0) {
-            // malformed line, skip it
-            continue; // Skip if not enough commas
-        }
-        String sTargetSpeed = row.substring(0, c1);
-        sTargetSpeed.trim();
-        String sAccel = row.substring(c1 + 1, c2);
-        sAccel.trim();
-        String sDwell = row.substring(c2 + 1);
-        sDwell.trim();
-
-        int32_t nTargetSpeed = sTargetSpeed.toInt();
-        uint32_t nAccel = sAccel.toInt();
-        uint32_t nDwell = sDwell.toInt();
-
-        torque_steps[torque_step_count++] = {
-            nTargetSpeed,  // target speed
-            nAccel,        // acceleration
-            nDwell         // dwell time
-        };
-    }
-
-    SetCursor(0, 0);
-    PrintCurrentState();
-    LED_timer = 0;
+    if (!gCtrl.begin()) {
+        LED_PIN.State(true); // turn on LED
+        while (true) { /* hang */}
+        // need to allow user to reset the board
+    };
 
     while (true) {
+        gCtrl.tick(); 
+    }
+}
+    /* 
+
+    LED_timer = 0; 
+} 
+*/
+
+/*     while (true) {
         bool isSafetyActive = !SAFETY_PIN.State();
         bool runActive = PRGM_RUN_BUS_PIN.State();
         bool resetActive = PRGM_RESET_BUS_PIN.State();
@@ -530,12 +373,13 @@ int main() {
     }
 
 return 0;
-}
+} */
 
 ///////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////Functions//////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////
 
+#if 0
 void display_srcfile_details(void) {
     char buffer[128]; // Adjust size as needed
     
@@ -726,3 +570,5 @@ void PadString(char *str, size_t length) {
 
     str[length] = '\0'; // Ensure the string is null-terminated
 }
+
+#endif
