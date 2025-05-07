@@ -247,6 +247,9 @@ inline void MotorController::renderScreen() {
         lcdLineLeft(3, buf);
         // commit
         lcdFlush();
+
+        SerialPort.Send("State: ");
+        SerialPort.SendLine(stateToString(state_));
     }
 
 
@@ -374,6 +377,7 @@ inline void MotorController::tick() {
         if (state_ != State::Running) {
             preReset_ = state_; // capture current state before reset
             state_ = State::ResetRequested;
+            renderScreen();
             resetTmr_ = 0;
         }
     }
@@ -555,23 +559,21 @@ inline void MotorController::handleRunning(bool runActive, bool justEntered_) {
     if (justEntered_) {
         // solid LED
         LED_PIN.State(true);
-
-        /**** a test to just set motor to 100rpm ****/
-        // motor.EnableRequest(true);
-        // motor.MoveVelocity(100 * kStepsPerRev / 60); // 100 RPM
+        renderScreen();
     }
     
     if (!runActive) {
         state_ = State::Paused;
-        currentSpeed_ = motor.VelocityRefCommanded();
-        currentAccel_ = targetAccel_;
+        // currentSpeed_ = motor.VelocityRefCommanded();
+        // currentAccel_ = targetAccel_;
         pause_time_ = dwellTmr_;
         renderScreen();
         return;
     }
 
-    // toggle display every 3S
+    // toggle display every 3secs
     if (streenTmr_ > 3000 && state_ != State::EStop) {
+
         streenTmr_ = 0;
         screenToggle_ = !screenToggle_;
         renderScreen();
@@ -630,6 +632,7 @@ inline void MotorController::handleRunning(bool runActive, bool justEntered_) {
 inline void MotorController::handlePaused(bool runActive, bool justEntered_) {
     if (justEntered_) {
         SerialPort.SendLine("Entered Pause for first time");
+        renderScreen();
         motor.MoveStopDecel((1000 * kStepsPerRev) / 60); // decel to 0 RPM
     }
 
@@ -659,10 +662,12 @@ inline void MotorController::handlePaused(bool runActive, bool justEntered_) {
 
 inline void MotorController::handleReset(bool resetActive, bool justEntered_) {
     if (!resetActive) {
-        state_ = preReset_; // reset to previous state
-        justEntered_ = true;
-        // stepInit_ = false;
-        renderScreen();
+        SerialPort.SendLine("Reset cancelled");
+        motor.EnableRequest(true);
+        if (state_ != preReset_) {
+            prevState_ = State::Debug; // force a mismatch
+        }
+        state_ = preReset_;           // restore previous state
         return;
     }
 
@@ -692,12 +697,18 @@ inline void MotorController::handleReset(bool resetActive, bool justEntered_) {
 
 inline void MotorController::handleResume(bool runActive, bool justEntered_) {
     if (justEntered_) {
-        renderScreen();
+        
         SerialPort.SendLine("Just asked to resume");
+        SerialPort.Send("targetAccel: ");
+        SerialPort.Send(targetAccel_);
+        SerialPort.Send("targetSpeed: ");
+        SerialPort.SendLine(targetSpeed_);
+
         motor.EnableRequest(true);
         motor.AccelMax(targetAccel_);
         motor.MoveVelocity(targetSpeed_);
         dwellTmr_ = pause_time_;
+        renderScreen();
     }
     state_ = State::Running;
 }
