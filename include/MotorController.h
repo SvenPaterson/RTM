@@ -104,16 +104,19 @@ private:
     String   protocolName_;
 
     /* ——— runtime state ——— */
-    State    state_{State::Idle}, preReset_{State::Idle};
+    State    state_{State::Idle}, prevState_{State::Idle}, preReset_{State::Idle};
     uint16_t currentStep_ {0};
-    bool     stepInit_{false}, targetMet_{false};;
+    uint8_t  lastResetSec_{0}, prevStepIndex_{0};
+    bool     stepInit_{false}, targetMet_{false}, prevResetActive_{false};
     int32_t  targetSpeed_ {0}, currentSpeed_{0};
     uint32_t targetAccel_ {0}, currentAccel_{0};
+    uint64_t pause_time_{0};
 
     /* ——— timers ——— */
     elapsedMillis ledTmr_, dwellTmr_, resetTmr_, streenTmr_;
 
     /* ——— LCD front/shadow buffers ——— */
+    char buf_[kNumCols + 1] = {};
     char front_[kNumRows][kNumCols + 1] = {};
     char sent_ [kNumRows][kNumCols + 1] = {};
     bool dirty_[kNumRows]               = {true, true, true, true};
@@ -124,22 +127,24 @@ private:
 
     /* ——— LCD helpers ——— */
     static inline uint8_t fastLen_(const char *s) { uint8_t n = 0; while (n < kNumCols && s[n]) ++n; return n; }
-    void lcdBlank_(char *dst);
-    void lcdLineBlank(uint8_t row); // blank a line in the front buffer
-    void lcdLineLeft  (uint8_t row, const char *txt);
-    void lcdLineRight (uint8_t row, const char *txt);
-    void lcdLineCenter(uint8_t row, const char *txt);
-    void lcdLineLR    (uint8_t row, const char *l, const char *r);
-    void lcdFlush();
+    void lcdBlank_     (char *dst);
+    void lcdLineBlank  (uint8_t row); // blank a line in the front buffer
+    void lcdLineLeft   (uint8_t row, const char *txt);
+    void lcdLineRight  (uint8_t row, const char *txt);
+    void lcdLineCenter (uint8_t row, const char *txt);
+    void lcdLineLR     (uint8_t row, const char *l, const char *r);
+    void lcdFlush      ();
     void lcdClearScreen();
-    void renderScreen();
+    void renderScreen  ();
 
     /* ——— state handlers ——— */
-    void handleIdle(bool runBtn);
-    void handleRunning(bool runBtn);
-    void handlePaused(bool runBtn);
-    void handleReset(bool resetBtn);
-    void handleEStop(bool safetyBtn, bool resetBtn);
+    void handleIdle     (bool runActive, bool justEntered_);
+    void handleRunning  (bool runActive, bool justEntered_);
+    void handlePaused   (bool runActive, bool justEntered_);
+    void handleReset    (bool resetActive, bool justEntered_);
+    void handleEStop    (bool resetActive, bool justEntered_);
+    void handleResume   (bool runActive, bool justEntered_);
+    void handleCompleted(bool resetActive, bool justEntered_);
 };
 
 /* ——— static data definitions (link-time) ——— */
@@ -213,31 +218,37 @@ inline void MotorController::renderScreen() {
     char buf[kNumCols+1];
         // line 1: name and state
         lcdLineLR(0, protocolName_.c_str(), stateToString(state_));
-        // line 2: pressure & loop count
-        float pressure = 0.00f;
+        // line 2: current step & loop count
+        uint16_t step = stepCount_;
         uint16_t loop = loopCount_;
-        snprintf(buf, sizeof(buf), "P:%5.2fpsi LOOP:%4u", pressure, loop);
+        snprintf(buf, sizeof(buf), "STEP:%3u LOOP:%6u", step, loop);
         lcdLineLeft(1, buf);
         // line 3: toggle torque vs setpoint
         if (screenToggle_) {
             float torqueA = 0.00f, torqueB = 0.00f;
             snprintf(buf, sizeof(buf), "Torque:%6.2f/%6.2f", torqueA, torqueB);
         } else {
-            int setpoint = 0;
-            snprintf(buf, sizeof(buf), "Setpoint:%12u°F", setpoint);
+            int setpoint = 300;     // PLACEHOLDER  
+            float pressure = 14.1f; // PLACEHOLDER
+            if (pressure < 100) {
+                snprintf(buf, sizeof(buf), "Heat:%3u\xDF""F P:%3.1fpsi", setpoint, pressure);
+            } else {
+            snprintf(buf, sizeof(buf), "Heat:%3u\xDF""F Pr:%3.0fpsi", setpoint, pressure);
+            }
         }
         lcdLineLeft(2, buf);
         // line 4: temps, drop ° if three-digit
-        int seal = 74, sump = 73;
+        int seal = 120, sump = 140; // PLACEHOLDERS
         if (sump < 100) {
-            snprintf(buf, sizeof(buf), "Seal:%3u°F Sump:%3u°F", seal, sump);
+            snprintf(buf, sizeof(buf), "Seal:%3u\xDF""F Sump:%2u\xDF""F", seal, sump);
         } else {
-            snprintf(buf, sizeof(buf), "Seal:%3u°F Sump:%4u", seal, sump);
+            snprintf(buf, sizeof(buf), "Seal:%3u\xDF""F Sump:%3uF", seal, sump);
         }
         lcdLineLeft(3, buf);
         // commit
         lcdFlush();
     }
+
 
 /* ——— API Definitions ——— */
 inline bool MotorController::begin() {
@@ -313,74 +324,106 @@ inline bool MotorController::begin() {
 
     lcdLineCenter(3, protocolName_.c_str());
     lcdFlush();
+    Delay_ms(1000);
 
     return true;
 }
 
-
 inline void MotorController::tick() {
-    /* // read the state of the buttons
-    bool runBtn   = PRGM_RUN_BUS_PIN.State();
-    bool resetBtn = PRGM_RESET_BUS_PIN.State();
-    bool safetyBtn = SAFETY_PIN.State();
+    bool estopActive  = !SAFETY_PIN.State();
+    bool runActive    = PRGM_RUN_BUS_PIN.State();
+    bool resetActive  = PRGM_RESET_BUS_PIN.State();
 
-    // handle the current state
+    /* // 1) first check for E-Stop
+    if (estopActive && state_ != State::EStop) {
+        state_ =        State::EStop;
+        //justEntered_ =  true;
+    } 
+    // 2) The RESET throws you into reset-countdown
+    else if (resetActive && state_ != State::EStop && state_ != State::ResetRequested) {
+        preReset_    = state_;
+        state_       = State::ResetRequested;
+        resetTmr_    = 0;
+        //justEntered_ = true;
+    } 
+    // Then hitting Run switch starts test or resumes from paused 
+    else if (runActive && state_ != State::EStop) {
+        state_ = State::Running;
+        //justEntered_ = true;
+        if (state_      == State::Paused) {
+            state_       = State::Resume;
+            justEntered_ = true;
+        } else if (state_ == State::Idle) {
+            state_       = State::Running;
+            justEntered_ = true;
+        }
+    }
+    // Rocker switch in the middle pos for Pause
+    else if (!runActive && !resetActive && state_ == State::Running) {
+        state_       = State::Paused;
+        //justEntered_ = true;
+    } */
+
+    // first check for E-Stop
+    if (estopActive && state_ != State::EStop) {
+        state_ = State::EStop;
+    }
+
+    // check for reset request
+    if (resetActive && !prevResetActive_ && state_ != State::EStop) {
+        if (state_ != State::Running) {
+            preReset_ = state_; // capture current state before reset
+            state_ = State::ResetRequested;
+            resetTmr_ = 0;
+        }
+    }
+    prevResetActive_ = resetActive;
+
+    // transition logic for pause / resume / start
+    if (!runActive && !resetActive && state_ == State::Running) {
+            // middle‐position ⇒ pause
+            state_ = State::Paused;
+    }
+    else if (runActive && state_ == State::Paused) {
+            // runBackUp from paused ⇒ go to Resume
+            state_ = State::Resume;
+    }
+    else if (runActive && state_ == State::Idle) {
+            // first run
+            state_ = State::Running;
+    }
+
+    bool justEntered_ = (state_ != prevState_);
+    prevState_        = state_;
+    // if (justEntered_) renderScreen();
+
+    // dispatch to state handlers
     switch (state_) {
         case State::Idle:
-            handleIdle(runBtn);
+            handleIdle(runActive, justEntered_);
             break;
         case State::Running:
-            handleRunning(runBtn);
+            handleRunning(runActive, justEntered_);
             break;
         case State::Paused:
-            handlePaused(runBtn);
+            handlePaused(runActive, justEntered_);
             break;
         case State::ResetRequested:
-            handleReset(resetBtn);
+            handleReset(resetActive, justEntered_);
             break;
         case State::EStop:
-            handleEStop(safetyBtn, resetBtn);
+            handleEStop(resetActive, justEntered_);
+            break;
+        case State::Resume:
+            handleResume(runActive, justEntered_);
+            break;
+        case State::Completed:
+            handleCompleted(resetActive, justEntered_);
             break;
         default:
             break;
-    } */
-    const char *stateStr = stateToString(state_);
-    
-    if (state_ == State::Idle) {
-        lcdLineLR(0, "Reading SD...", stateStr);
-    } else if (state_ == State::Running) {
-        lcdLineLR(0, "Running...", stateStr);
-    } else if (state_ == State::Paused) {
-        lcdLineLR(0, "Paused...", stateStr);
-    } else if (state_ == State::ResetRequested) {
-        lcdLineLR(0, "Resetting...", stateStr);
-    } else if (state_ == State::EStop) {
-        lcdLineLR(0, "E-Stop...", stateStr);
-    } else {
-        lcdLineLR(0, "Unknown...", stateStr);
     }
-
-    // toggle display every 2000ms
-    if (streenTmr_ > 2000) {
-        streenTmr_ = 0;
-        screenToggle_ = !screenToggle_;
-        renderScreen();
-    }
-
-    if (ledTmr_ > 500) {
-        ledTmr_ = 0;
-        LED_PIN.State(!LED_PIN.State()); // toggle LED
-    }
-
-    bool isSafetyActive = SAFETY_PIN.State();
-    bool runActive = PRGM_RUN_BUS_PIN.State();
-    bool resetActive = PRGM_RESET_BUS_PIN.State();
-    bool prevResetActive = false;
-
-    
-
 }
-
 
 inline bool MotorController::loadProtocol(File &csv) {
     if (!csv) return false;
@@ -457,4 +500,208 @@ inline bool MotorController::loadProtocol(File &csv) {
     }
 
     return (stepCount_ > 0);
+}
+
+inline void MotorController::handleEStop(bool resetActive, bool justEntered_) {
+    
+    if (justEntered_) {
+        lcdClearScreen();
+        lcdLineCenter(0, "!!! E-STOP !!!");
+        lcdLineCenter(1, "Press Reset to Clear");
+        lcdLineBlank (2);
+        lcdLineCenter(3, "Test is now void!");
+        lcdFlush();
+        motor.MoveStopAbrupt();
+        motor.EnableRequest(false);
+    }
+    
+
+    // flash LED rapidly
+    if (ledTmr_ > 50) {
+        ledTmr_ = 0;
+        LED_PIN.State(!LED_PIN.State());
+    }
+
+    if (resetActive) {
+        lcdClearScreen();
+        lcdLineCenter(1, "Resetting board...");
+        lcdFlush();
+        SysMgr.ResetBoard();
+    }
+    return;
+}
+
+inline void MotorController::handleIdle(bool, bool justEntered_) {
+    if (justEntered_) {
+        renderScreen();
+    }
+    
+    // flash LED slowly
+    if (ledTmr_ > 500) {
+        ledTmr_ = 0;
+        LED_PIN.State(!LED_PIN.State());
+    }
+
+    // toggle display every 3S
+    if (streenTmr_ > 3000 && state_ != State::EStop) {
+        streenTmr_ = 0;
+        screenToggle_ = !screenToggle_;
+        renderScreen();
+    }
+    return;
+}
+
+inline void MotorController::handleRunning(bool runActive, bool justEntered_) {
+    if (justEntered_) {
+        // solid LED
+        LED_PIN.State(true);
+
+        /**** a test to just set motor to 100rpm ****/
+        // motor.EnableRequest(true);
+        // motor.MoveVelocity(100 * kStepsPerRev / 60); // 100 RPM
+    }
+    
+    if (!runActive) {
+        state_ = State::Paused;
+        currentSpeed_ = motor.VelocityRefCommanded();
+        currentAccel_ = targetAccel_;
+        pause_time_ = dwellTmr_;
+        renderScreen();
+        return;
+    }
+
+    // toggle display every 3S
+    if (streenTmr_ > 3000 && state_ != State::EStop) {
+        streenTmr_ = 0;
+        screenToggle_ = !screenToggle_;
+        renderScreen();
+    }
+
+    // Only run at start of step
+    if (!stepInit_) {
+        motor.EnableRequest(true);
+
+        targetAccel_ = steps_[currentStep_].accelSteps_s2;
+        motor.AccelMax(targetAccel_);
+        targetSpeed_ = steps_[currentStep_].speedSteps_s;
+        motor.VelMax(targetSpeed_);
+        stepInit_ = true;
+        targetMet_ = false;
+
+        motor.MoveVelocity(targetSpeed_);
+        if (targetSpeed_ == 0) {
+            motor.MoveStopDecel(targetAccel_);
+        }
+    }
+
+    // run step until target speed reached
+    if (!targetMet_) {
+        dwellTmr_ = 0;
+        // for non-zero targets, check speed reached
+        if (targetSpeed_ != 0 && 
+            fabs(motor.VelocityRefCommanded()) >= fabs(0.99 * targetSpeed_)) {
+            targetMet_ = true;
+        }
+        // For zero targets, check full stop reached
+        else if (targetSpeed_ == 0 && motor.StepsComplete()) {
+            targetMet_ = true;
+        }
+
+    }
+
+    // once target speed reached, check dwell time reached
+    if (targetMet_ && dwellTmr_ >= steps_[currentStep_].dwellMs) {
+        stepInit_ = false;
+        prevStepIndex_ = currentStep_;
+        currentStep_ = (currentStep_ + 1) % stepCount_;
+        targetMet_ = false;
+        // check if we are at the end of the protocol
+        if (prevStepIndex_ == stepCount_ - 1 && currentStep_ == 0) {
+            loopCount_--;
+            if (loopCount_ ==0) {
+                state_ = State::Completed;
+                renderScreen();
+            }
+        }
+    }
+    return;
+}
+
+inline void MotorController::handlePaused(bool runActive, bool justEntered_) {
+    if (justEntered_) {
+        SerialPort.SendLine("Entered Pause for first time");
+        motor.MoveStopDecel((1000 * kStepsPerRev) / 60); // decel to 0 RPM
+    }
+
+    // flash LED slowly
+    if (ledTmr_ > 500) {
+        ledTmr_ = 0;
+        LED_PIN.State(!LED_PIN.State());
+    }
+
+    // toggle display every 3S
+    if (streenTmr_ > 3000 && state_ != State::EStop) {
+        streenTmr_ = 0;
+        screenToggle_ = !screenToggle_;
+        renderScreen();
+    }
+
+    if (motor.StepsComplete()) {
+        if (runActive) {
+            state_ = State::Resume;
+            renderScreen();
+        } else {
+            motor.EnableRequest(false);
+        }
+    }
+    return;
+}
+
+inline void MotorController::handleReset(bool resetActive, bool justEntered_) {
+    if (!resetActive) {
+        state_ = preReset_; // reset to previous state
+        justEntered_ = true;
+        // stepInit_ = false;
+        renderScreen();
+        return;
+    }
+
+    if (resetTmr_ >= 5000) {
+        lcdClearScreen();
+        lcdLineCenter(1, "Resetting board...");
+        lcdFlush();
+        Delay_ms(1000);
+        SysMgr.ResetBoard();
+        return; // we'll never get here...
+    }
+
+    uint8_t remaining = 5 - (resetTmr_ / 1000);
+    if (remaining != lastResetSec_) {
+        lastResetSec_ = remaining;
+        snprintf(buf_, sizeof(buf_), "...in %1u sec", remaining);
+        lcdLineLR(0, "RESET", buf_);
+        lcdFlush();
+    }
+
+    if (ledTmr_ > 100) {
+        ledTmr_ = 0;
+        LED_PIN.State(!LED_PIN.State());
+    }
+    return;
+}
+
+inline void MotorController::handleResume(bool runActive, bool justEntered_) {
+    if (justEntered_) {
+        renderScreen();
+        SerialPort.SendLine("Just asked to resume");
+        motor.EnableRequest(true);
+        motor.AccelMax(targetAccel_);
+        motor.MoveVelocity(targetSpeed_);
+        dwellTmr_ = pause_time_;
+    }
+    state_ = State::Running;
+}
+
+inline void MotorController::handleCompleted(bool resetActive, bool justEntered_) {
+    return;
 }

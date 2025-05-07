@@ -18,7 +18,7 @@ MotorController gCtrl;
 static constexpr char SRC_FILE_VERSION[] = "Torque Stand v2025.5.6";
 
 
-static constexpr uint8_t NUM_ROWS = 4;
+/* static constexpr uint8_t NUM_ROWS = 4;
 static constexpr uint8_t NUM_COLS = 20;
 char line1[NUM_COLS + 1] = "                    ";
 char line2[NUM_COLS + 1] = "       BOOTING      ";
@@ -28,7 +28,7 @@ char msg[NUM_COLS + 1] =   "                    ";
 static constexpr char BLANK_LINE[NUM_COLS + 1] = "                    ";
 
 /******* SYSTEM STATE CONTROL *******/
-enum SystemState {
+/* enum SystemState {
 DEBUG,  // debug mode: currentState = DEBUG
 IDLE,   // normal mode: currentState = IDLE
 RUNNING,
@@ -52,10 +52,10 @@ uint16_t currentStepIndex = 0;
 uint16_t prevStepIndex = 0;
 uint16_t lastDisplayedSecond = 5;
 uint64_t pause_time = 0;
-elapsedMillis LED_timer, dwell_timer, reset_timer, debug_timer;
+elapsedMillis LED_timer, dwell_timer, reset_timer, debug_timer; */
 
 /******* STEPPER MOTOR INIT *******/
-#define motor ConnectorM0
+/* #define motor ConnectorM0
 static constexpr uint32_t MOTOR_MAX_VEL_RPM = 2760; // 2760rpm for CPM-SDHP-N0563A-ELN
 static constexpr uint16_t STEPS_PER_REV = 3200;
 // uint8_t torque_step_count = sizeof(torque_steps) / sizeof(torque_steps[0]);
@@ -75,7 +75,7 @@ struct Step {
 static constexpr uint8_t MAX_PROTOCOL_STEPS = 50;
 Step torque_steps[MAX_PROTOCOL_STEPS];
 uint16_t torque_step_count = 0;
-uint8_t loopCount = 1;
+uint8_t loopCount = 1;  */
 
 /******* FUNC DECLARATIONS *******/
 void display_srcfile_details();
@@ -110,31 +110,10 @@ int main() {
 */
 
 /*     while (true) {
-        bool isSafetyActive = !SAFETY_PIN.State();
-        bool runActive = PRGM_RUN_BUS_PIN.State();
-        bool resetActive = PRGM_RESET_BUS_PIN.State();
-        static bool prevResetActive = false;
 
-        if (prevState != currentState) {
-            prevState = currentState;
-            if (SerialPort) {
-                PrintCurrentState();
-                SerialPort.SendLine(line3);
-            }
-        }
 
         // first check for a reset request
-        if (resetActive && !prevResetActive && currentState != E_STOP) {  // Rising edge
-            if (currentState != RUNNING) {      // Only allow reset from non-running, non-emergency states
-                preResetState = currentState;   // Remember previous state
-                currentState = RESET_REQUESTED;
-                reset_timer = 0;
-                lastDisplayedSecond = 5;
-                LED_PIN.State(true);            // Solid LED during countdown
-                SerialPort.SendLine("Resetting in 5 seconds...");
-            }
-        }
-        prevResetActive = resetActive;
+        // done
         askingToRun = runActive && (currentState != RESET_REQUESTED);
 
         // then check to see if test is complete
@@ -145,17 +124,6 @@ int main() {
                 currentState = COMPLETED;
                 PrintCurrentState();
             }
-        }
-
-        // then check for an e-stop
-        if (isSafetyActive && currentState != E_STOP) {
-            // immediately go to E_STOP
-            currentState = E_STOP;
-            current_speed = motor.VelocityRefCommanded();
-            current_accel = std::ceil((torque_steps[currentStepIndex].accel * STEPS_PER_REV) / 60.0);;
-            motor.MoveStopDecel(0);
-            motor.EnableRequest(false);
-            pause_time = dwell_timer;
         }
 
         // proceed to run test
