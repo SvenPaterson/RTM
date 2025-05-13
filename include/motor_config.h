@@ -15,6 +15,7 @@ struct Step {
 };
 
 // Updated Steps Array
+/*
 const Step steps[] = {
     // 1. Baseline: 20s at 30 RPM with accel of 30 RPM/s CW, then stop
     {false, 30.0, 30.0, 20.0},
@@ -40,6 +41,54 @@ const Step steps[] = {
 
     // 8. Run baseline again but CCW
     {true, 30.0, 30.0, 20.0},
-};
+}; */
 
+// Dana Torque Test ES-0276
+// Updated Steps Array
+/*
+const Step steps[] = {
+    // 1. Baseline: 20s at 30 RPM with accel of 30 RPM/s CW, then stop
+    {false, 10.0, 10.0, 50.0},
+
+    {false, 30.0, 30.0, 50.0},
+
+    {false, 45.0, 45.0, 50.0},
+
+    {false, 60.0, 60.0, 50.0},
+
+    {false, 100.0, 100.0, 50.0},
+
+    {false, 200.0, 200.0, 50.0},
+
+    {false, 300.0, 300.0, 50.0},
+
+    {false, 400.0, 400.0, 50.0},
+
+    {false, 60.0, 60.0, 50.0},
+
+    {false, 30.0, 30.0, 50.0}
+}; */
+
+// Dana Torque Test ES-0276
+// Updated Steps Array
+const Step steps[] = {
+    // 1. Baseline: 20s at 30 RPM with accel of 30 RPM/s CW, then stop
+    {false, 10.0, 10.0, 50.0},
+
+    {false, 30.0, 30.0, 50.0},
+
+    {false, 60.0, 60.0, 50.0},
+
+    {false, 100.0, 100.0, 50.0},
+
+    {false, 500.0, 500.0, 50.0},
+
+    {false, 1000.0, 1000.0, 50.0},
+
+    {false, 1500.0, 1500.0, 50.0},
+
+    {false, 2000.0, 2000.0, 50.0},
+
+    {false, 2650.0, 2650.0, 50.0}
+};
 #endif
