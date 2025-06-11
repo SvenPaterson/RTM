@@ -544,7 +544,7 @@ inline bool MotorController::loadProtocol(File &csv) {
         s.speedSteps_s = (rpmTarget >= 0) // round‑nearest
                        ? (rpmTarget * kStepsPerRev + 30) / 60
                        : (rpmTarget * kStepsPerRev - 30) / 60;
-        s.accelSteps_s2 = (rpmAccel  * kStepsPerRev + 30) / 60 ;
+        s.accelSteps_s2 = (1.5 * (rpmAccel  * kStepsPerRev + 30) / 60) ; // 1.5 compensates for motor settings
         s.dwellMs       = dwellS     * 1000UL;
     }
 
