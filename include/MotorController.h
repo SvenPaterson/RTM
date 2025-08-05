@@ -63,7 +63,7 @@ public:
 
 private:
     /* ——— LCD SPI settings ——— */
-    static const SPISettings spiCfg_;
+    static const SPISettings LCDspiCfg_;
 
     /* ——— runtime states ——— */
     enum class State : uint8_t {
@@ -158,7 +158,7 @@ private:
 
 /* ——— static data definitions (link-time) ——— */
 // for debugging via USB and Terminal
-const SPISettings MotorController::spiCfg_{ 80000, MSBFIRST, SPI_MODE3 };
+const SPISettings MotorController::LCDspiCfg_{ 1000, MSBFIRST, SPI_MODE3 }; //Docs say up to 100000 for this disp, tried 80000, 1000 for prototyping
 
 /* ——— row base addresses for the 4-line Nehaven LCD Module ——— */
 const uint8_t MotorController::kRowAddr[MotorController::kNumRows] = {0x00, 0x40, 0x14, 0x54};
@@ -201,7 +201,7 @@ inline void MotorController::lcdLineLR(uint8_t row, const char *left, const char
 }
 
 inline void MotorController::lcdFlush() {
-    SPI.beginTransaction(spiCfg_);
+    SPI.beginTransaction(LCDspiCfg_);
     for (uint8_t row = 0; row < kNumRows; ++row) {
         if (!dirty_[row]) continue;
         SPI.transfer(0xFE); SPI.transfer(0x45); SPI.transfer(kRowAddr[row]);
@@ -342,7 +342,7 @@ inline bool MotorController::begin() {
     SPI.begin();
     Delay_ms(120); // power up delay
 
-    SPI.beginTransaction(spiCfg_);
+    SPI.beginTransaction(LCDspiCfg_);
     SPI.transfer(0xFE);
     SPI.transfer(0x53);
     SPI.transfer(4); // brightness = 4
