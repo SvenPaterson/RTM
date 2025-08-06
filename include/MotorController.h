@@ -24,7 +24,7 @@
  * ================================================================ */
 
 #include "ClearCore.h"
-#include "ElapsedMillis.h"   // <‑‑ added as requested
+#include "ClearCoreElapsedMillis.h"
 #include "SPI.h"
 #include "SD.h"
 
@@ -63,7 +63,8 @@ public:
 
 private:
     /* ——— LCD SPI settings ——— */
-    static const SPISettings LCDspiCfg_;
+    // static const SPISettings LCDspiCfg_;
+
 
     /* ——— runtime states ——— */
     enum class State : uint8_t {
@@ -134,6 +135,7 @@ private:
     bool loadProtocol(File &csv);
 
     /* ——— LCD helpers ——— */
+    static void sendCommand(uint8_t cmd, const uint8_t* params = nullptr, uint8_t pLen = 0);
     static inline uint8_t fastLen_(const char *s) { uint8_t n = 0; while (n < kNumCols && s[n]) ++n; return n; }
     void lcdBlank_     (char *dst);
     void lcdLineBlank  (uint8_t row);                                   // blank a line in the front buffer
@@ -158,7 +160,7 @@ private:
 
 /* ——— static data definitions (link-time) ——— */
 // for debugging via USB and Terminal
-const SPISettings MotorController::LCDspiCfg_{ 1000, MSBFIRST, SPI_MODE3 }; //Docs say up to 100000 for this disp, tried 80000, 1000 for prototyping
+// const SPISettings MotorController::LCDspiCfg_{ 1000, MSBFIRST, SPI_MODE3 }; //Docs say up to 100000 for this disp, tried 80000, 1000 for prototyping
 
 /* ——— row base addresses for the 4-line Nehaven LCD Module ——— */
 const uint8_t MotorController::kRowAddr[MotorController::kNumRows] = {0x00, 0x40, 0x14, 0x54};
@@ -200,7 +202,7 @@ inline void MotorController::lcdLineLR(uint8_t row, const char *left, const char
     if (memcmp(front_[row], sent_[row], kNumCols)) dirty_[row] = true;
 }
 
-inline void MotorController::lcdFlush() {
+/* inline void MotorController::lcdFlush() {
     SPI.beginTransaction(LCDspiCfg_);
     for (uint8_t row = 0; row < kNumRows; ++row) {
         if (!dirty_[row]) continue;
@@ -210,18 +212,47 @@ inline void MotorController::lcdFlush() {
         dirty_[row] = false;
     }
     SPI.endTransaction();
+} */
+
+inline void MotorController::lcdFlush() {
+    for (uint8_t row = 0; row < kNumRows; ++row) {
+        if (!dirty_[row]) continue;
+
+        // 0x45 = “set cursor” command
+        sendCommand(0x45, &kRowAddr[row], 1);
+
+        // now send the raw character bytes…
+        ConnectorCOM0.Send(front_[row], kNumCols);
+        // …and wait 100 µs per byte so the display can keep up
+        Delay_us(100 * kNumCols);
+
+        memcpy(sent_[row], front_[row], kNumCols + 1);
+        dirty_[row] = false;
+    }
 }
+
 
 inline void MotorController::lcdLineBlank(uint8_t row) {
     lcdBlank_(front_[row]);
     if (memcmp(front_[row], sent_[row], kNumCols)) dirty_[row] = true;
 }
 
-inline void MotorController::lcdClearScreen() {
+/* inline void MotorController::lcdClearScreen() {
     for (uint8_t i = 0; i < kNumRows; ++i) {
         lcdLineBlank(i); // clear front buffer
     }
     lcdFlush();
+} */
+
+// replace your existing lcdClearScreen() with:
+inline void MotorController::lcdClearScreen() {
+    // sendCommand knows that 0x51 needs a ≥1.5 ms pause
+    sendCommand(0x51);
+
+    // clear our “sent_” buffer so every line shows up dirty next flush
+    for (uint8_t i = 0; i < kNumRows; ++i) {
+        lcdBlank_(sent_[i]);
+    }
 }
 
 inline void MotorController::renderScreen() {
@@ -339,14 +370,25 @@ inline bool MotorController::begin() {
     SerialPort.SendLine("Motor ready");
 
     // ----------- DISPLAY ---------
-    SPI.begin();
+    // Configure COM-0 for RS-232
+    Delay_ms(120);
+    ConnectorCOM0.Mode(Connector::TTL);
+    ConnectorCOM0.Speed(9600);
+    ConnectorCOM0.StopBits(1);
+    ConnectorCOM0.Parity(SerialBase::PARITY_N);
+    ConnectorCOM0.FlowControl(false);
+    //ConnectorCOM0.DataBits(8);
+    //ConnectorCOM0.StopBits(1);
+    //ConnectorCOM0.Parity(SerialBase::PARITY_N);
+    ConnectorCOM0.PortOpen();
     Delay_ms(120); // power up delay
 
-    SPI.beginTransaction(LCDspiCfg_);
-    SPI.transfer(0xFE);
-    SPI.transfer(0x53);
-    SPI.transfer(4); // brightness = 4
-    SPI.endTransaction();
+    // Set brightness
+    // instead of raw Send sequences, do:
+    sendCommand(0x41);            // Display ON
+    uint8_t brightness = 8;         // ← here
+    sendCommand(0x53, &brightness, 1);  // brightness = 4
+
     SerialPort.SendLine("LCD ready");
 
     lcdClearScreen();
@@ -882,4 +924,63 @@ inline void MotorController::handleCompleted(bool resetActive, bool justEntered_
     }
 
     return;
+}
+
+// In your MotorController class (or a utils header)
+void MotorController::sendCommand(uint8_t cmd, const uint8_t* params, uint8_t pLen) {
+    // 0xFE is always the command prefix
+    ConnectorCOM0.Send(0xFE);
+    ConnectorCOM0.Send(cmd);
+
+    // send any parameters
+    for (uint8_t i = 0; i < pLen; ++i)
+        ConnectorCOM0.Send(params[i]);
+
+    // now delay the required amount
+    switch (cmd) {
+        case 0x41: // Display on
+        case 0x42: // Display off
+        case 0x45: // Set cursor
+        case 0x49: // Move cursor left
+        case 0x4A: // Move cursor right
+        case 0x4B: // Blinking cursor on
+        case 0x4C: // Blinking cursor off
+        case 0x4E: // Backspace
+        case 0x53: // Set backlight brightness
+        case 0x55: // Move display left
+        case 0x56: // Move display right
+            Delay_us(100);
+            break;
+        case 0x52: // Set contrast
+            Delay_us(500);
+            break;
+        case 0x46: // Cursor home
+        case 0x47: // Underline on
+        case 0x48: // Underline off
+        case 0x51: // Clear screen
+            Delay_ms(2);  // ≥1.5 ms
+            break;
+        case 0x61: // Change BAUD
+            Delay_ms(3);
+            break;
+        case 0x62: // Change I2C addr
+            Delay_ms(3);
+            break;
+        case 0x70: // Firmware version
+            Delay_ms(4);
+            break;
+        case 0x71: // Display BAUD rate
+            Delay_ms(10);
+            break;
+        case 0x72: // Display I2C addr
+            Delay_ms(4);
+            break;
+        case 0x54: // Load custom char (9 bytes)
+            Delay_us(200);
+            break;
+        default:
+            // 1 byte data writes take 100 µs per byte
+            // if you want, add: Delay_us(100 * (pLen ? pLen : 1));
+            break;
+    }
 }
