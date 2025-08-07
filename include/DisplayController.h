@@ -34,16 +34,33 @@ private:
   static constexpr uint8_t  kNumRows_ = 4;
   const uint8_t kRowAddr_[kNumRows_] = {0x00, 0x40, 0x14, 0x54};
 
+  /// Send 0xFE, the 'cmd' byte, then any params, then wait required time
+  void sendLCDCommand(uint8_t cmd, const uint8_t *params = nullptr, 
+                      uint8_t pLen = 0);
+  void sendLCDData(const char *data, size_t len);
+
+  /// high-level wrappers per p7 of NHD-0420D3Z-NSW-BBW-V3 manual
+  inline void displayOn()                     { sendLCDCommand(0x41); }
+  inline void displayOff()                    { sendLCDCommand(0x42); }
+  inline void moveCursor()                    { sendLCDCommand(0x45); }
+  inline void displayFirmware()               { sendLCDCommand(0x70); }
+  inline void setBrightness(uint8_t lvl = 8)  { sendLCDCommand(0x53, &lvl, 1); }
+  inline void clearScreen()                   { for (uint8_t i = 0; i < kNumRows_; ++i) {
+                                                lcdLineBlank(i);
+                                                } sendLCDCommand(0x51); 
+                                              }
+
   /* ——— LCD front/shadow buffers ——— */
-  char buf_[kNumCols_ + 1]             = {};
+  char buf_[kNumCols_ + 1]              = {};
   char front_[kNumRows_][kNumCols_ + 1] = {};
   char sent_ [kNumRows_][kNumCols_ + 1] = {};
-  bool dirty_[kNumRows_]               = {true, true, true, true};
+  bool dirty_[kNumRows_]                = {true, true, true, true};
 
   /* ——— LCD behaviour toggles ——— */
-  bool lcdToggle_{false}, lcdRuntimeToggle_{false}, modeTorqueToggle_{false}; // torque mode is for torque stand only
+  bool lcdToggle_{false}, lcdRuntimeToggle_{false};
+  bool modeTorqueToggle_{false}; // torque mode is for torque stand only
   elapsedMillis lcdTmr_;
-  uint16_t lcdToggle_ms_{2000}; // default to every 3s
+  uint16_t lcdToggle_ms_{2000};
   uint32_t runMins_{42};
 
   /* ——— protocol steps ——— */
@@ -65,7 +82,9 @@ private:
 
     
   /* ——— LCD helpers ——— */
-  static inline uint8_t fastLen_(const char *s) { uint8_t n = 0; while (n < kNumCols_ && s[n]) ++n; return n; }
+  static inline uint8_t fastLen_(const char *s) { uint8_t n = 0;
+                                                  while (n < kNumCols_ && s[n]) ++n; 
+                                                  return n; }
   void lcdBlank      (char *dst);
   void lcdLineBlank  (uint8_t row);                                   // blank a line in the front buffer
   void lcdLineLeft   (uint8_t row, const char *txt);                  // fill a line w/ a left justified string

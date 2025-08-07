@@ -8,40 +8,20 @@ void DisplayController::setDataInterval(uint16_t milli_secs) {
 
 bool DisplayController::begin() {
     Serial.begin(9600);
-    while (!Serial) {
-        // wait for serial bus to start
-        delay(1);
-    }
+    while (!Serial) delay(1);
     Serial.println("\nUSB Serial Connected!");
 
     Serial.print("Initializing LCD Screen...");
     pinMode(LCD_CS_, OUTPUT);
     digitalWrite(LCD_CS_, HIGH);
-    delay(200);
     SPI.begin();
     delay(200);
 
-    lcdClearScreen();
+    // init display
+    clearScreen();
+    displayOn();
+    setBrightness();
 
-    // Turn display on
-    digitalWrite(LCD_CS_, LOW);
-    SPI.beginTransaction(LCDspiCfg_);
-        SPI.transfer(0xFE); 
-        SPI.transfer(0x41);
-    SPI.endTransaction();
-    digitalWrite(LCD_CS_, HIGH);
-
-    // Set backlight brightness
-    digitalWrite(LCD_CS_, LOW);
-    SPI.beginTransaction(LCDspiCfg_);
-        SPI.transfer(0xFE); 
-        SPI.transfer(0x53); 
-        SPI.transfer(4);
-    SPI.endTransaction();
-    digitalWrite(LCD_CS_, HIGH);
-
-    // Initial screen
-    lcdClearScreen();
     lcdLineLR(0, "Nano Every Demo", "");
     lcdLineLR(1, "Initializing...", "");
     lcdFlush();
@@ -52,18 +32,20 @@ bool DisplayController::begin() {
     // wait for MAX chip to stabilize
     delay(500);
 
-
+    Serial.print("Initializing TC1...");
     if (!tc1_.begin()) {
         Serial.println("ERROR.");
         while (1) delay(10);
     } else Serial.println("DONE");
 
-    /* if (!tc2_.begin()) {
+    /*Serial.print("Initializing TC2...");
+    if (!tc2_.begin()) {
         Serial.println("ERROR.");
         while (1) delay(10);
     } else Serial.println("DONE"); */
 
-    tc1_.setFaultChecks(MAX31855_FAULT_ALL);  // short to GND fault is ignored
+    tc1_.setFaultChecks(MAX31855_FAULT_ALL);
+    //tc2_.setFaultChecks(MAX31855_FAULT_ALL);
 }
 
 void DisplayController::tick() {
@@ -100,10 +82,115 @@ void DisplayController::updateData() {
     dataTmr_ = 0;
 
     latestSealC_ = readTC(tc1_, "TC1");
-    latestSumpC_ = readTC(tc2_, "TC2");
+    latestSumpC_ = 120; //readTC(tc2_, "TC2"); // PLACEHOLDER
 }
 
 /* ——— LCD helpers ——— */
+// See Table of Commands, p7 of NHD-0420D3Z-NSW-BBW-V3 manual 
+// lookup the built-in execution times (in µs or ms) for each command:
+static uint16_t lcdExecTime(uint8_t cmd) {
+  switch (cmd) {
+    case 0x70:      // Display Firmware
+      return 4000;  /// 4ms
+
+    case 0x46:      // Home
+    case 0x47:      // Underline on
+    case 0x48:      // Underline off
+    case 0x51:
+      return 1500;  /// 1.5ms
+
+    case 0x52:      // Contrast
+      return 500;   /// 0.5ms
+
+                    // …add others as needed…
+    default:
+      return 100;   /// 0.1ms for all other writes
+  }
+}
+
+void DisplayController::sendLCDCommand(uint8_t cmd, const uint8_t *params,
+                                       uint8_t pLen) {
+    digitalWrite(LCD_CS_, LOW);
+    SPI.beginTransaction(LCDspiCfg_);
+        SPI.transfer(0xFE);
+        SPI.transfer(cmd);
+        for (uint8_t i = 0; i < pLen; ++i) 
+        SPI.transfer(params[i]);
+
+    // wait the required execution time:
+    uint16_t t = lcdExecTime(cmd);
+    if (t >= 1000) {
+        delay(t/1000);
+    } else {
+        delayMicroseconds(t);
+    }
+
+    SPI.endTransaction();
+    digitalWrite(LCD_CS_, HIGH);
+}
+
+void DisplayController::sendLCDData(const char *data, size_t len) {
+    digitalWrite(LCD_CS_, LOW);
+    SPI.beginTransaction(LCDspiCfg_);
+    for (size_t i = 0; i < len; ++i) {
+        SPI.transfer(data[i]);
+        delayMicroseconds(100); // req per-byte execution gap
+    }
+    SPI.endTransaction();
+    digitalWrite(LCD_CS_, HIGH);
+}
+
+void DisplayController::lcdFlush() {
+  for (uint8_t row = 0; row < kNumRows_; ++row) {
+    if (!dirty_[row]) continue;
+
+    // 1) move the cursor to the start of this row
+    sendLCDCommand(0x45, &kRowAddr_[row], 1);
+
+    // 2) blast out the 20 characters, with the 100 µs/byte delay
+    sendLCDData(front_[row], kNumCols_);
+
+    // 3) mark it clean
+    memcpy(sent_[row], front_[row], kNumCols_);
+    dirty_[row] = false;
+  }
+}
+
+
+/* void DisplayController::lcdFlush() {
+  for (uint8_t row = 0; row < kNumRows_; ++row) {
+    if (!dirty_[row]) continue;
+
+    // 1) Lower CS & begin SPI
+    digitalWrite(LCD_CS_, LOW);
+    SPI.beginTransaction(LCDspiCfg_);
+
+    // 2) Send the 'Set Cursor' command and address in one shot
+    SPI.transfer(0xFE);
+    SPI.transfer(0x45);
+    SPI.transfer(kRowAddr_[row]);
+
+    // 3) Send the entire line of text
+    for (uint8_t i = 0; i < kNumCols_; ++i) {
+      SPI.transfer(front_[row][i]);
+      delayMicroseconds(100);
+    }
+
+    // 4) End transaction & raise CS
+    SPI.endTransaction();
+    digitalWrite(LCD_CS_, HIGH);
+
+    // 5) Wait out the exec time: cursor set 100 µs + 100 µs × num chars
+    // (Set Cursor is 100 µs; each char write ~100 µs)
+    uint16_t wait = 100 + (100 * kNumCols_);
+    delayMicroseconds(wait);
+
+    // Mark row clean
+    memcpy(sent_[row], front_[row], kNumCols_);
+    dirty_[row] = false;
+  }
+} */
+
 void DisplayController::lcdBlank(char *dst) {
     memset(dst, ' ', kNumCols_);
     dst[kNumCols_] = '\0';
@@ -140,43 +227,9 @@ void DisplayController::lcdLineLR(uint8_t row, const char *left, const char *rig
     if (memcmp(front_[row], sent_[row], kNumCols_)) dirty_[row] = true;
 }
 
-void DisplayController::lcdFlush() {
-  for (uint8_t row = 0; row < kNumRows_; ++row) {
-    if (!dirty_[row]) continue;
-    digitalWrite(LCD_CS_, LOW);
-    SPI.beginTransaction(LCDspiCfg_);
-    SPI.transfer(0xFE);
-    SPI.transfer(0x45);
-    SPI.transfer(kRowAddr_[row]);     // set cursor
-    // SPI.transfer(front_[row], DisplayController::kNumCols_); // write characters
-    for (uint8_t i = 0; i < kNumCols_; i++) {
-        SPI.transfer(front_[row][i]);
-        delayMicroseconds(100);  // give the PIC time to clock it through
-    }
-    SPI.endTransaction();
-    digitalWrite(LCD_CS_, HIGH);
-    memcpy(sent_[row], front_[row], kNumCols_);
-    dirty_[row] = false;
-    delayMicroseconds(100 * kNumCols_);  // optional pacing
-  }
-}
-
 void DisplayController::lcdLineBlank(uint8_t row) {
     lcdBlank(front_[row]);
     if (memcmp(front_[row], sent_[row], kNumCols_)) dirty_[row] = true;
-}
-
-void DisplayController::lcdClearScreen() {
-    for (uint8_t i = 0; i < kNumRows_; ++i) {
-        lcdLineBlank(i); // clear front buffer
-    }
-    digitalWrite(LCD_CS_, LOW);
-    SPI.beginTransaction(LCDspiCfg_);
-    SPI.transfer(0xFE);
-    SPI.transfer(0x51);    // clear screen
-    SPI.endTransaction();
-    digitalWrite(LCD_CS_, HIGH);
-    delay(5);                // ≥1.5 ms per datasheet
 }
 
 void DisplayController::renderScreen() {
