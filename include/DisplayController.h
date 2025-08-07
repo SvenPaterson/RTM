@@ -13,14 +13,20 @@ public:
   /// Call from loop()
   void tick();
 
+  void setDataInterval(uint16_t milli_secs);
+
 private:
   /* ——— pinouts ——— */
   static constexpr uint8_t LCD_CS_ = 8;
   static constexpr uint8_t TC1_CS_ = 9;
   static constexpr uint8_t TC2_CS_ = 10;
 
-  /* ——— Thermocouple Sensors ——— */
+  /* ——— Sensor Settings ——— */
   Adafruit_MAX31855 tc1_{TC1_CS_}, tc2_{TC2_CS_};
+  uint16_t kDataIntervalMs_ = 100;
+  elapsedMillis   dataTmr_;  
+  double          latestSealC_     = NAN;
+  double          latestSumpC_     = NAN;
 
   /* ——— LCD Display Settings ——— */
   const SPISettings LCDspiCfg_{ 100000, MSBFIRST, SPI_MODE3 };
@@ -37,7 +43,7 @@ private:
   /* ——— LCD behaviour toggles ——— */
   bool lcdToggle_{false}, lcdRuntimeToggle_{false}, modeTorqueToggle_{false}; // torque mode is for torque stand only
   elapsedMillis lcdTmr_;
-  uint16_t lcdToggle_ms_{3000}; // default to every 3s
+  uint16_t lcdToggle_ms_{2000}; // default to every 3s
   uint32_t runMins_{42};
 
   /* ——— protocol steps ——— */
@@ -72,6 +78,6 @@ private:
 
   /* ——— Sensor helpers ——— */
   double readTC(Adafruit_MAX31855 &TC, const char *label);
-
+  void updateData();
 
 };

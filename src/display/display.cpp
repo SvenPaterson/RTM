@@ -2,6 +2,9 @@
 #include <Arduino.h>
 #include <SPI.h>
 
+void DisplayController::setDataInterval(uint16_t milli_secs) {
+    kDataIntervalMs_ = milli_secs;
+}
 
 bool DisplayController::begin() {
     Serial.begin(9600);
@@ -64,34 +67,13 @@ bool DisplayController::begin() {
 }
 
 void DisplayController::tick() {
-    // 1) Update line 1 with a flipping demo caption
-    lcdLineLeft(0, lcdToggle_ ? "SPI + TC Demo A" : "SPI + TC Demo B");
-
-    // 2) Read and format TC1
-    double t = readTC(tc1_, "TC1");
-    char tbuf[21];
-    if (isnan(t)) {
-        strcpy(tbuf, "TC1: FAULT      ");
-    } else {
-        // convert the float into a string yourself
-        char tmp[10];
-        dtostrf(t, 6, 2, tmp);             // width=6, precision=2 → e.g. " 23.45"
-        snprintf(tbuf, sizeof(tbuf),
-                "TC1: %s C   ", tmp);     // now inject that into your buffer
-    }
-    lcdLineLeft(1, tbuf);
-
-    // 3) (optional) show a static footer
-    lcdLineLR(2, "Line 3 static", "");
-    lcdLineLR(3, "Line 4 static", "");
-
-    // 4) Flush to LCD
-    lcdFlush();
-
-    // 5) Toggle for next pass
-    lcdToggle_ = !lcdToggle_;
-    Serial.println(tbuf);
-    delay(lcdToggle_ms_);
+    updateData();
+    
+    if (lcdTmr_ >= lcdToggle_ms_) {
+        lcdTmr_ = 0;
+        lcdToggle_ = !lcdToggle_;
+    } renderScreen();
+    
 }
 
 
@@ -113,6 +95,13 @@ double DisplayController::readTC(Adafruit_MAX31855 &TC, const char *label) {
   return c;
 }
 
+void DisplayController::updateData() {
+    if (dataTmr_ < kDataIntervalMs_) return;
+    dataTmr_ = 0;
+
+    latestSealC_ = readTC(tc1_, "TC1");
+    latestSumpC_ = readTC(tc2_, "TC2");
+}
 
 /* ——— LCD helpers ——— */
 void DisplayController::lcdBlank(char *dst) {
@@ -255,18 +244,26 @@ void DisplayController::renderScreen() {
             int setpoint = 300;     // PLACEHOLDER  
             float pressure = 14.1f; // PLACEHOLDER
             if (pressure < 100) {
-                snprintf(buf_1, sizeof(buf_1), "Heat:%3u\xDF""F P:%3.1fpsi", setpoint, pressure);
+                snprintf(buf_1, sizeof(buf_1), "Heat:%3u\xDF""C P:%3.1fpsi", setpoint, pressure);
             } else {
-            snprintf(buf_1, sizeof(buf_1), "Heat:%3u\xDF""F Pr:%3.0fpsi", setpoint, pressure);
+            snprintf(buf_1, sizeof(buf_1), "Heat:%3u\xDF""C Pr:%3.0fpsi", setpoint, pressure);
             }
         }
         lcdLineLeft(2, buf_1);
         // line 4: temps, drop ° if three-digit
-        int seal = 120, sump = 140; // PLACEHOLDERS
-        if (sump < 100) {
-            snprintf(buf_1, sizeof(buf_1), "Seal:%3u\xDF""F Sump:%2u\xDF""F", seal, sump);
+        int latestSumpC_ = 140.4; // PLACEHOLDER
+
+        uint16_t sealInt = isnan(latestSealC_)
+                           ? 0
+                           : uint16_t(latestSealC_ + 0.5);
+        uint16_t sumpInt = isnan(latestSumpC_)
+                           ? 0
+                           : uint16_t(latestSumpC_ + 0.5);
+        
+        if (sumpInt < 100) {
+            snprintf(buf_1, sizeof(buf_1), "Seal:%3u\xDF""C Sump:%2u\xDF""C", sealInt, sumpInt);
         } else {
-            snprintf(buf_1, sizeof(buf_1), "Seal:%3u\xDF""F Sump:%3uF", seal, sump);
+            snprintf(buf_1, sizeof(buf_1), "Seal:%3u\xDF""C Sump:%3uC", sealInt, sumpInt);
         }
         lcdLineLeft(3, buf_1);
     }
