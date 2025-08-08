@@ -1,17 +1,19 @@
-#include "DisplayController.h"
+#include "ExpansionBoard.h"
 #include <Arduino.h>
 #include <SPI.h>
 
-void DisplayController::setDataInterval(uint16_t milli_secs) {
+void ExpansionBoard::setDataInterval(uint16_t milli_secs) {
     kDataIntervalMs_ = milli_secs;
 }
 
-bool DisplayController::begin() {
-    Serial.begin(9600);
+bool ExpansionBoard::begin() {
     while (!Serial) delay(1);
     Serial.println("\nUSB Serial Connected!");
 
-    lcd_.begin();
+    if (!lcd_.begin()) {
+        Serial.println("FATAL: LCD initialization failed!");
+        return false;    
+    }
 
     /* Serial.print("Initializing LCD Screen...");
     pinMode(LCD_CS_, OUTPUT);
@@ -48,9 +50,11 @@ bool DisplayController::begin() {
 
     tc1_.setFaultChecks(MAX31855_FAULT_ALL);
     //tc2_.setFaultChecks(MAX31855_FAULT_ALL);
+
+    return true;
 }
 
-void DisplayController::tick() {
+void ExpansionBoard::tick() {
     updateData();
     
     if (lcdTmr_ >= lcdToggle_ms_) {
@@ -65,7 +69,7 @@ void DisplayController::tick() {
 /*********************** HELPERS ***********************/
 
 /* ——— Sensor helpers ——— */
-double DisplayController::readTC(Adafruit_MAX31855 &TC, const char *label) {
+double ExpansionBoard::readTC(Adafruit_MAX31855 &TC, const char *label) {
   double c = TC.readCelsius();
   if (isnan(c)) {
     uint8_t e = TC.readError();
@@ -79,7 +83,7 @@ double DisplayController::readTC(Adafruit_MAX31855 &TC, const char *label) {
   return c;
 }
 
-void DisplayController::updateData() {
+void ExpansionBoard::updateData() {
     if (dataTmr_ < kDataIntervalMs_) return;
     dataTmr_ = 0;
 
@@ -87,7 +91,7 @@ void DisplayController::updateData() {
     latestSumpC_ = 120; //readTC(tc2_, "TC2"); // PLACEHOLDER
 }
 
-void DisplayController::renderScreen() {
+void ExpansionBoard::renderScreen() {
     // line 1: toggle between protocol name and runtime
     char buff[LCDDriver::kNumCols+1];
     if (lcdToggle_) {

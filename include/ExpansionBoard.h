@@ -6,7 +6,7 @@
 #include "LCDDriver.h"
 #include <elapsedMillis.h>
 
-class DisplayController {
+class ExpansionBoard {
 public:
   /// Call once from main (or setup())
   bool begin();

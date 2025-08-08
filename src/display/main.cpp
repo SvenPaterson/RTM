@@ -1,12 +1,15 @@
 #include <Arduino.h>
-#include "DisplayController.h"
+#include "ExpansionBoard.h"
 
-DisplayController displayController;
+ExpansionBoard board;
 
 void setup() {
-    displayController.begin();
+    Serial.begin(9600);
+    if (!board.begin()) {
+        Serial.println("FATAL: Display Controller initialization failed!");
+    } 
 }
 
 void loop() {
-    displayController.tick();
+    board.tick();
 }
