@@ -2,10 +2,8 @@
 #include <Arduino.h>
 #include <SPI.h>
 
-void ExpansionBoard::setDataInterval(uint16_t milli_secs) {
-    kDataIntervalMs_ = milli_secs;
-}
 
+// public:
 bool ExpansionBoard::begin() {
     while (!Serial) delay(1);
     Serial.println("\nUSB Serial Connected!");
@@ -14,23 +12,6 @@ bool ExpansionBoard::begin() {
         Serial.println("FATAL: LCD initialization failed!");
         return false;    
     }
-
-    /* Serial.print("Initializing LCD Screen...");
-    pinMode(LCD_CS_, OUTPUT);
-    digitalWrite(LCD_CS_, HIGH);
-    SPI.begin();
-    delay(200);
-
-    // init display
-    clearScreen();
-    displayOn();
-    setBrightness();
-
-    lcdLineLR(0, "Nano Every Demo", "");
-    lcdLineLR(1, "Initializing...", "");
-    lcdFlush();
-    delay(1000);
-    Serial.println("DONE"); */
 
     Serial.print("Initializing MAX31855 sensor...");
     // wait for MAX chip to stabilize
@@ -64,11 +45,14 @@ void ExpansionBoard::tick() {
     
 }
 
+void ExpansionBoard::setDataInterval(uint16_t milli_secs) {
+    kDataIntervalMs_ = milli_secs;
+}
 
+/*********************/
 
-/*********************** HELPERS ***********************/
+// private:
 
-/* ——— Sensor helpers ——— */
 double ExpansionBoard::readTC(Adafruit_MAX31855 &TC, const char *label) {
   double c = TC.readCelsius();
   if (isnan(c)) {
@@ -158,6 +142,7 @@ void ExpansionBoard::renderScreen() {
             }
         }
         lcd_.setLineLeft(2, buff);
+        
         // line 4: temps, drop ° if three-digit
         int latestSumpC_ = 140.4; // PLACEHOLDER
 
@@ -178,16 +163,4 @@ void ExpansionBoard::renderScreen() {
     
     // commit
     lcd_.flush();
-
-    /* snprintf(debugBuf_, sizeof(debugBuf_),
-        "State: %9s | Loop: %3u | Step: %3u | Speed: %5d RPM | Accel: %4u RPM/s² | Total Runtime: %5u | dwellTmr: %lu",// | VelRef: %li",
-        stateToString(state_),
-        (unsigned)loopCount_,
-        (unsigned)currentStep_,
-        v,
-        (unsigned)a,
-        (unsigned)runMins_,
-        (unsigned long int)(uint32_t)dwellTmr_);
-        //(signed long)(motor.VelocityRefCommanded()));
-    SerialPort.SendLine(debugBuf_); */
 }

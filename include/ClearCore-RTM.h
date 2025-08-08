@@ -1,6 +1,6 @@
 #pragma once
 /*
- * MotorController – state‑machine wrapper around the torque‑stand firmware.
+ * ClearCoreRTM – state‑machine wrapper around the torque‑stand firmware.
  *
  *  ▸ Call `begin()` once from `main()` after the hardware is up.
  *  ▸ Call `tick()` from your loop – it is non‑blocking.
@@ -9,7 +9,7 @@
 /* ================================================================
  * Example usage inside your main.cpp
  *
- *  MotorController ctrl;
+ *  ClearCoreRTM ctrl;
  *
  *  int main() {
  *      ... // hardware init
@@ -50,7 +50,7 @@
 #define SerialPort          ConnectorUsb
 #define SAFETY_PIN          ConnectorDI8
 
-class MotorController {
+class ClearCoreRTM {
 public:
     /* ——— Public API ——— */
     bool begin();       // call once from main() after hardware init
@@ -160,31 +160,31 @@ private:
 
 /* ——— static data definitions (link-time) ——— */
 // for debugging via USB and Terminal
-// const SPISettings MotorController::LCDspiCfg_{ 1000, MSBFIRST, SPI_MODE3 }; //Docs say up to 100000 for this disp, tried 80000, 1000 for prototyping
+// const SPISettings ClearCoreRTM::LCDspiCfg_{ 1000, MSBFIRST, SPI_MODE3 }; //Docs say up to 100000 for this disp, tried 80000, 1000 for prototyping
 
 /* ——— row base addresses for the 4-line Nehaven LCD Module ——— */
-const uint8_t MotorController::kRowAddr[MotorController::kNumRows] = {0x00, 0x40, 0x14, 0x54};
+const uint8_t ClearCoreRTM::kRowAddr[ClearCoreRTM::kNumRows] = {0x00, 0x40, 0x14, 0x54};
 
 /* ——— LCD helpers ——— */
-inline void MotorController::lcdBlank_(char *dst) {
+inline void ClearCoreRTM::lcdBlank_(char *dst) {
     memset(dst, ' ', kNumCols);
     dst[kNumCols] = '\0';
 }
 
-inline void MotorController::lcdLineLeft(uint8_t row, const char *txt) {
+inline void ClearCoreRTM::lcdLineLeft(uint8_t row, const char *txt) {
     lcdBlank_(front_[row]);
     memcpy(front_[row], txt, fastLen_(txt));
     if (memcmp(front_[row], sent_[row], kNumCols)) dirty_[row] = true;
 }
 
-inline void MotorController::lcdLineRight(uint8_t row, const char *txt) {
+inline void ClearCoreRTM::lcdLineRight(uint8_t row, const char *txt) {
     lcdBlank_(front_[row]);
     uint8_t len = fastLen_(txt);
     memcpy(front_[row] + kNumCols - len, txt, len);
     if (memcmp(front_[row], sent_[row], kNumCols)) dirty_[row] = true;
 }
 
-inline void MotorController::lcdLineCenter(uint8_t row, const char *txt) {
+inline void ClearCoreRTM::lcdLineCenter(uint8_t row, const char *txt) {
     lcdBlank_(front_[row]);
     uint8_t len = fastLen_(txt);
     uint8_t start = (kNumCols - len) / 2;
@@ -192,7 +192,7 @@ inline void MotorController::lcdLineCenter(uint8_t row, const char *txt) {
     if (memcmp(front_[row], sent_[row], kNumCols)) dirty_[row] = true;
 }
 
-inline void MotorController::lcdLineLR(uint8_t row, const char *left, const char *right) {
+inline void ClearCoreRTM::lcdLineLR(uint8_t row, const char *left, const char *right) {
     lcdBlank_(front_[row]);
     uint8_t rLen = fastLen_(right);
     uint8_t lMax = (rLen < kNumCols) ? kNumCols - rLen - 1 : 0;
@@ -202,7 +202,7 @@ inline void MotorController::lcdLineLR(uint8_t row, const char *left, const char
     if (memcmp(front_[row], sent_[row], kNumCols)) dirty_[row] = true;
 }
 
-/* inline void MotorController::lcdFlush() {
+/* inline void ClearCoreRTM::lcdFlush() {
     SPI.beginTransaction(LCDspiCfg_);
     for (uint8_t row = 0; row < kNumRows; ++row) {
         if (!dirty_[row]) continue;
@@ -214,7 +214,7 @@ inline void MotorController::lcdLineLR(uint8_t row, const char *left, const char
     SPI.endTransaction();
 } */
 
-inline void MotorController::lcdFlush() {
+inline void ClearCoreRTM::lcdFlush() {
     for (uint8_t row = 0; row < kNumRows; ++row) {
         if (!dirty_[row]) continue;
 
@@ -232,12 +232,12 @@ inline void MotorController::lcdFlush() {
 }
 
 
-inline void MotorController::lcdLineBlank(uint8_t row) {
+inline void ClearCoreRTM::lcdLineBlank(uint8_t row) {
     lcdBlank_(front_[row]);
     if (memcmp(front_[row], sent_[row], kNumCols)) dirty_[row] = true;
 }
 
-/* inline void MotorController::lcdClearScreen() {
+/* inline void ClearCoreRTM::lcdClearScreen() {
     for (uint8_t i = 0; i < kNumRows; ++i) {
         lcdLineBlank(i); // clear front buffer
     }
@@ -245,7 +245,7 @@ inline void MotorController::lcdLineBlank(uint8_t row) {
 } */
 
 // replace your existing lcdClearScreen() with:
-inline void MotorController::lcdClearScreen() {
+inline void ClearCoreRTM::lcdClearScreen() {
     // sendCommand knows that 0x51 needs a ≥1.5 ms pause
     sendCommand(0x51);
 
@@ -255,7 +255,7 @@ inline void MotorController::lcdClearScreen() {
     }
 }
 
-inline void MotorController::renderScreen() {
+inline void ClearCoreRTM::renderScreen() {
     char buf_1[kNumCols+1];
     /* char buf_2[kNumCols+1];
     snprintf(buf_2, sizeof(buf_2), "%s", protocolName_.c_str()) */
@@ -347,7 +347,7 @@ inline void MotorController::renderScreen() {
 
 
 /* ——— API Definitions ——— */
-inline bool MotorController::begin() {
+inline bool ClearCoreRTM::begin() {
     /* Serial */
     SerialPort.Mode(Connector::USB_CDC); SerialPort.Speed(9600); SerialPort.PortOpen();
     uint32_t t0 = Milliseconds(); while (!SerialPort && Milliseconds() - t0 < 5000) {}
@@ -437,7 +437,7 @@ inline bool MotorController::begin() {
     return true;
 }
 
-inline void MotorController::tick() {
+inline void ClearCoreRTM::tick() {
     bool estopActive  = !SAFETY_PIN.State();
     bool runActive    = PRGM_RUN_BUS_PIN.State();
     bool resetActive  = PRGM_RESET_BUS_PIN.State();
@@ -507,7 +507,7 @@ inline void MotorController::tick() {
     }
 }
 
-inline bool MotorController::loadProtocol(File &csv) {
+inline bool ClearCoreRTM::loadProtocol(File &csv) {
     if (!csv) return false;
 
     // 0) validation helpers
@@ -615,7 +615,7 @@ inline bool MotorController::loadProtocol(File &csv) {
     return (stepCount_ > 0);
 }
 
-inline void MotorController::handleEStop(bool resetActive, bool justEntered_) {
+inline void ClearCoreRTM::handleEStop(bool resetActive, bool justEntered_) {
     
     if (justEntered_) {
         lcdClearScreen();
@@ -643,7 +643,7 @@ inline void MotorController::handleEStop(bool resetActive, bool justEntered_) {
     return;
 }
 
-inline void MotorController::handleIdle(bool, bool justEntered_) {
+inline void ClearCoreRTM::handleIdle(bool, bool justEntered_) {
     if (justEntered_) {
         renderScreen(); // no need to update the screen before a test starts
     }
@@ -664,7 +664,7 @@ inline void MotorController::handleIdle(bool, bool justEntered_) {
     return;
 }
 
-/* inline void MotorController::handleRunningAlt(bool runActive, bool justEntered_) {
+/* inline void ClearCoreRTM::handleRunningAlt(bool runActive, bool justEntered_) {
     if (justEntered_) {
         // solid LED
         LED_PIN.State(true);
@@ -739,7 +739,7 @@ inline void MotorController::handleIdle(bool, bool justEntered_) {
 }
  */
 
- inline void MotorController::handleRunning(bool runActive, bool justEntered_) {
+ inline void ClearCoreRTM::handleRunning(bool runActive, bool justEntered_) {
     if (justEntered_) {
         // solid LED
         LED_PIN.State(true);
@@ -829,7 +829,7 @@ inline void MotorController::handleIdle(bool, bool justEntered_) {
     }
 }
 
-inline void MotorController::handlePaused(bool runActive, bool justEntered_) {
+inline void ClearCoreRTM::handlePaused(bool runActive, bool justEntered_) {
     if (justEntered_) {
         renderScreen();
         motor.MoveStopDecel((1000 * kStepsPerRev) / 60); // decel to 0 RPM
@@ -860,7 +860,7 @@ inline void MotorController::handlePaused(bool runActive, bool justEntered_) {
     return;
 }
 
-inline void MotorController::handleReset(bool resetActive, bool justEntered_) {
+inline void ClearCoreRTM::handleReset(bool resetActive, bool justEntered_) {
     if (!resetActive) {
         motor.EnableRequest(true);
         if (state_ != preReset_) {
@@ -895,7 +895,7 @@ inline void MotorController::handleReset(bool resetActive, bool justEntered_) {
     return;
 }
 
-inline void MotorController::handleResume(bool runActive, bool justEntered_) {
+inline void ClearCoreRTM::handleResume(bool runActive, bool justEntered_) {
     if (justEntered_) {
         motor.EnableRequest(true);
         motor.AccelMax(targetAccel_);
@@ -913,7 +913,7 @@ inline void MotorController::handleResume(bool runActive, bool justEntered_) {
     
 }
 
-inline void MotorController::handleCompleted(bool resetActive, bool justEntered_) {
+inline void ClearCoreRTM::handleCompleted(bool resetActive, bool justEntered_) {
     if (justEntered_) {
         renderScreen();
         motor.MoveStopDecel(targetAccel_); // decel to 0 RPM
@@ -926,8 +926,8 @@ inline void MotorController::handleCompleted(bool resetActive, bool justEntered_
     return;
 }
 
-// In your MotorController class (or a utils header)
-void MotorController::sendCommand(uint8_t cmd, const uint8_t* params, uint8_t pLen) {
+// In your ClearCoreRTM class (or a utils header)
+void ClearCoreRTM::sendCommand(uint8_t cmd, const uint8_t* params, uint8_t pLen) {
     // 0xFE is always the command prefix
     ConnectorCOM0.Send(0xFE);
     ConnectorCOM0.Send(cmd);

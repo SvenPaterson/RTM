@@ -6,9 +6,9 @@
 // 05/05/25: Added SD card support
 // 05/08/25: Converted logic to
 
-#include "MotorController.h"
+#include "ClearCore-RTM.h"
 
-MotorController gCtrl;
+ClearCoreRTM gCtrl;
 
 static constexpr char SRC_FILE_VERSION[] = "Torque Stand v2025.5.6";
 
