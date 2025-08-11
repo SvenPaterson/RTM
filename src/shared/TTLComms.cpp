@@ -1,11 +1,32 @@
 // TTLComms.cpp
 #include "TTLComms.h"
 
-void TTLComms::sendMessage(const char* data) {
+void TTLComms::sendMessage(const char* data, bool needsAck) {
     char msg[80];
     uint8_t checksum = calculateXOR(data);
     snprintf(msg, sizeof(msg), "%s:%02X\n", data, checksum);
+    if (needsAck) {
+        pendingMsg_ = {data, millis(), 0, MAX_RETRIES, true};
+        waitingForAck_ = true;
+    }
     serialSend(msg);
+}
+
+void TTLComms::sendMessage(const char* data, MessageType type) {
+    bool needsAck = (type != MessageType::INFO);
+    sendMessage(data, needsAck);
+}
+
+void TTLComms::checkRetries() {
+    if (!waitingForAck_) return;
+
+    if (millis() - pendingMsg_.sentTime > ACK_TIMEOUT_MS) {
+        if (pendingMsg_.retryCount < pendingMsg_.maxRetries) {
+            pendingMsg_.retryCount++;
+            pendingMsg_.sentTime = millis();
+            serialSend(pendingMsg_.data.c_str());
+        }
+    }
 }
 
 void TTLComms::checkForMessages() {
