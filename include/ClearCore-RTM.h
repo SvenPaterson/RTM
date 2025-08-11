@@ -27,6 +27,7 @@
 #include "ClearCoreElapsedMillis.h"
 #include "SPI.h"
 #include "SD.h"
+#include "TTLComms.h"
 
 // ClearCore (and other Arduino cores) define min/max macros that clash with
 // <algorithm> templates in <array> on GCC. Undef them before any STL headers
@@ -138,6 +139,53 @@ private:
     void handleEStop    (bool resetActive, bool justEntered_);
     void handleResume   (bool runActive, bool justEntered_);
     void handleCompleted(bool resetActive, bool justEntered_);
+
+    class ClearCoreTTL : public TTLComms {
+    public:
+        void begin() {
+            ConnectorCOM1.Mode(Connector::TTL);
+            ConnectorCOM1.Speed(9600);
+            ConnectorCOM1.PortOpen();
+        }
+        
+        // Implement serial interface for ClearCore COM1
+        void serialSend(const char* data) override {
+            SerialPort.Send("CC -> XPB: ");
+            SerialPort.Send(data);  // Debug output
+            ConnectorCOM1.Send(data);
+        }
+        
+        bool serialAvailable() override {
+            return (ConnectorCOM1.CharPeek() != -1);
+        }
+        
+        char serialRead() override {
+            return ConnectorCOM1.CharGet();
+        }
+        
+        int serialPeek() override {
+            return ConnectorCOM1.CharPeek();
+        }
+        
+        // Handle received messages
+        void onMessageReceived(const String& data) override {
+            // Send ACK first
+            sendMessage("ACK:OK");
+            
+            SerialPort.Send("Received valid message from ExpansionBoard: ");
+            SerialPort.SendLine(data.c_str());
+        }
+        
+        void onBadChecksum(const String& rawMsg) override {
+            sendMessage("ACK:BAD_CHECKSUM");
+            SerialPort.Send("Bad checksum from ExpansionBoard: ");
+            SerialPort.SendLine(rawMsg.c_str());
+        }
+    };
+
+    // In ClearCore-RTM.h private members:
+    ClearCoreTTL ttlComms_;
+    elapsedMillis heartbeatTmr_;
 };
 
 

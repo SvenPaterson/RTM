@@ -22,7 +22,7 @@ bool LCDDriver::begin() {
     flush();
     delay(1000);
 
-    Serial.print("DONE");
+    Serial.println("DONE");
     return true;
 }
 

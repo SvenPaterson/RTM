@@ -13,17 +13,15 @@ bool ExpansionBoard::begin() {
         return false;    
     }
 
-    Serial.print("Initializing MAX31855 sensor...");
+    Serial.print("Initializing MAX31855 sensor - TC1...");
     // wait for MAX chip to stabilize
     delay(500);
-
-    Serial.print("Initializing TC1...");
     if (!tc1_.begin()) {
         Serial.println("ERROR.");
         while (1) delay(10);
     } else Serial.println("DONE");
 
-    /*Serial.print("Initializing TC2...");
+    /*Serial.print("Initializing MAX31855 sensor - TC2...");
     if (!tc2_.begin()) {
         Serial.println("ERROR.");
         while (1) delay(10);
@@ -31,6 +29,9 @@ bool ExpansionBoard::begin() {
 
     tc1_.setFaultChecks(MAX31855_FAULT_ALL);
     //tc2_.setFaultChecks(MAX31855_FAULT_ALL);
+
+    ttlComms_.begin();
+    Serial.println("TTL Listening - Ready for ClearCore");
 
     return true;
 }
@@ -42,7 +43,12 @@ void ExpansionBoard::tick() {
         lcdTmr_ = 0;
         lcdToggle_ = !lcdToggle_;
     } renderScreen();
-    
+
+    if (heartbeatTmr_ >= 2000) {
+        heartbeatTmr_ = 0;
+        ttlComms_.checkForMessages();
+        ttlComms_.sendMessage("STATUS TEST TO CC FROM XPB");
+    }
 }
 
 void ExpansionBoard::setDataInterval(uint16_t milli_secs) {

@@ -18,7 +18,7 @@ int main() {
         while (true) { /* hang */}
         // need to allow user to reset the board
     };
-    gCtrl.torqueMode();
+    //gCtrl.torqueMode();
 
     while (true) {
         gCtrl.tick(); 

@@ -18,7 +18,8 @@ bool ClearCoreRTM::begin() {
     SerialPort.SendLine("GPIO ready");
 
     /* TTL Comms */
-    // todo
+    ttlComms_.begin();
+    SerialPort.SendLine("TTL Ready");
 
     /* MOTOR */
     MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
@@ -132,6 +133,13 @@ void ClearCoreRTM::tick() {
         default:
             break;
     }
+
+    if (heartbeatTmr_ >= 2000) {
+        heartbeatTmr_ = 0;
+        ttlComms_.sendMessage("STATUS TEST TO XPB FROM CC");
+        ttlComms_.checkForMessages();
+    }
+    
 }
 
 // this will drastically change once exp-board is reading protocol

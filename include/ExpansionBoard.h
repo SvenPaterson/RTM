@@ -1,9 +1,10 @@
-// DaughterController.h
+// ExpansionBoard.h
 #pragma once
 
 #include <SPI.h>
 #include "Adafruit_MAX31855.h"
 #include "LCDDriver.h"
+#include "TTLComms.h"
 #include <elapsedMillis.h>
 
 class ExpansionBoard {
@@ -59,4 +60,54 @@ private:
   double readTC(Adafruit_MAX31855 &TC, const char *label);
   void updateData();
 
+    class ExpansionBoardTTL : public TTLComms {
+    public:
+        void begin() {
+            Serial1.begin(9600);
+            delay(100);
+        }
+        
+        // Implement serial interface for Arduino Serial1
+        void serialSend(const char* data) override {
+            Serial1.print(data);
+            Serial.print("XPB -> CC: ");
+            Serial.print(data);  // Debug output
+        }
+        
+        bool serialAvailable() override {
+            return Serial1.available();
+        }
+        
+        char serialRead() override {
+            return Serial1.read();
+        }
+        
+        int serialPeek() override {
+            return Serial1.peek();
+        }
+        
+        // Handle received messages
+        void onMessageReceived(const String& data) override {
+            if (data.startsWith("ACK:")) {
+                String ackType = data.substring(4);
+                if (ackType == "OK") {
+                    Serial.println("ClearCore acknowledged message OK");
+                } else if (ackType == "BAD_CHECKSUM") {
+                    Serial.println("ClearCore reported bad checksum!");
+                }
+            } else if (data == "HEARTBEAT") {
+                Serial.println("Received valid heartbeat with checksum!");
+            } else {
+                Serial.print("Received valid message: ");
+                Serial.println(data);
+            }
+        }
+        
+        void onBadChecksum(const String& rawMsg) override {
+            Serial.print("Bad checksum: ");
+            Serial.println(rawMsg);
+        }
+    };
+    ExpansionBoardTTL ttlComms_;
+    elapsedMillis heartbeatTmr_;
 };
