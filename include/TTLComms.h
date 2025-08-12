@@ -33,7 +33,8 @@ public:
     void checkRetries();
     void checkForMessages();
 
-    
+    void setRxUsbLogging(bool enabled, const char *peerTag = nullptr);
+
     // Message callback - override in derived classes
     // probably not needed, or move to universal TTLComms definition
     virtual void onMessageReceived(const String& data) = 0;
@@ -44,6 +45,11 @@ protected:
     uint8_t calculateXOR(const char* data);
     bool validateMessage(const String& msg);
     void processMessage(const String& msg);
+    String kvGet(const String &frame, const char *key);
+    int kvGetIntClamped(const String &frame, const char *key,
+                        int defVal, int minV, int maxV);
+    double kvGetDouble(const String &frame, const char *key, double defVal);
+    virtual void usbLog(const char *s) { /* default: no-op */}
     
 private:
     static constexpr uint32_t ACK_TIMEOUT_MS = 300;
@@ -54,4 +60,7 @@ private:
 
     static constexpr size_t MAX_MSG_LEN = 79;
     String incomingMsg_ = ""; 
+
+    bool        logRx_ = false;
+    const char *rxTag_ = nullptr;
 };

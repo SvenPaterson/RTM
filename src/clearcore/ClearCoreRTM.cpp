@@ -21,6 +21,7 @@ bool ClearCoreRTM::begin() {
 
     /* TTL Comms */
     ttlComms_.begin();
+    ttlComms_.setRxUsbLogging(true, "XPB");
     dbgln("TTL Ready");
 
     /* MOTOR */
@@ -62,14 +63,14 @@ bool ClearCoreRTM::begin() {
 }
 
 void ClearCoreRTM::tick() {
-    bool estopActive  = !SAFETY_PIN.State();
-    bool runActive    = PRGM_RUN_BUS_PIN.State();
-    bool resetActive  = PRGM_RESET_BUS_PIN.State();
+    bool eStopActive  = !SAFETY_PIN.State();
+    bool runActive    = runActiveRemote_;
+    bool resetActive  = resetActiveRemote_;
 
     // heartbeat to exp-board here, not sure of minimum interval needed
 
     // first check for E-Stop
-    if (estopActive && state_ != State::EStop) {
+    if (eStopActive && state_ != State::EStop) {
         state_ = State::EStop;
     }
 
@@ -132,10 +133,23 @@ void ClearCoreRTM::tick() {
             break;
     }
 
-    if (heartbeatTmr_ >= 2000) {
+    if (heartbeatTmr_ >= 1000) {
         heartbeatTmr_ = 0;
         // ttcComms_.sendMessag(SEND HEARTBEAT INFO HERE)
+        const char *stateStr = stateToString(state_);
+        char msg[96];
+        snprintf(msg, sizeof(msg),
+                 "HB;SEQ=%u;STATE=%s;E=%d;STEP=%u;LOOP=%lu/%lu;SW_AGE=%lu",
+                 hbSeq_++,
+                 stateStr,
+                 eStopActive ? 1 : 0,
+                 (unsigned)(currentStep_ + 1),
+                 (unsigned long)(totalLoops_ - loopCount_ + 1),
+                 (unsigned long)totalLoops_,
+                 (unsigned long)(Milliseconds() - swLastUpdateMs_));
+        ttlComms_.sendMessage(msg, MessageType::INFO);
         ttlComms_.checkForMessages(); // receive fast ACK
+        //dbgln(msg);
     }
     ttlComms_.checkForMessages();
     ttlComms_.checkRetries();
@@ -396,35 +410,49 @@ void ClearCoreRTM::handlePaused(bool runActive, bool justEntered_) {
 
 void ClearCoreRTM::handleReset(bool resetActive, bool justEntered_) {
     if (!resetActive) {
+        ttlComms_.sendMessage("CMD;RESET=CANCEL", MessageType::CRITICAL);
         motor.EnableRequest(true);
         if (state_ != preReset_) {
             prevState_ = State::Debug; // force a mismatch, check o3 to see if this makes sense anymore!
         }
         state_ = preReset_;           // restore previous state
+        resetPhase_ = ResetPhase::Idle;
         return;
     }
 
-    // this logic will need to reside on the exp-board now
-    /*
-    if (resetTmr_ >= 5000) {
-        lcdClearScreen();
-        lcdLineCenter(1, "Resetting board...");
-        lcdFlush();
-        Delay_ms(1000);
-        SysMgr.ResetBoard();
-        return; // we'll never get here
+    if (justEntered_) {
+        // 1) Arm: ask XPB to show countdown UI
+        char line[40];
+        snprintf(line, sizeof(line), "CMD;RESET=ARM;SECS=%u", (unsigned)resetArmSecs_);
+        ttlComms_.sendMessage(line, MessageType::CRITICAL);
+        resetPhase_ = ResetPhase::Armed;
+        resetTmr_ = 0;
+        xpbBootSeen_ = false;
     }
 
-    
-    // Switch in Reset position for 5secs to reset system
-    uint8_t remaining = 5 - (resetTmr_ / 1000);
-    if (remaining != lastResetSec_) {
-        lastResetSec_ = remaining;
-        snprintf(buf_, sizeof(buf_), "...in %1u sec", remaining);
-        lcdLineLR(0, "RESET", buf_);
-        lcdFlush();
-    } 
-    */
+    switch (resetPhase_) {
+        case ResetPhase::Armed:
+            // Let XPB own the countdown visuals; we just wait out the time.
+            if (resetTmr_ >= (uint32_t)resetArmSecs_ * 1000UL) {
+                // 2) Tell XPB to actually reset now
+                ttlComms_.sendMessage("CMD;RESET=EXEC", MessageType::CRITICAL);
+                resetPhase_ = ResetPhase::ExecSent;
+                xpbBootWaitTmr_ = 0;
+            }
+            break;
+
+        case ResetPhase::ExecSent:
+            // 3) Wait a bit for XPB to reboot and announce itself
+            if (xpbBootSeen_ || xpbBootWaitTmr_ >= 1500) {
+                // 4) Now reset ClearCore itself
+                // (Optional: briefly tell XPB we're about to reset, but EXEC already happened.)
+                SysMgr.ResetBoard(); // we won’t return
+            }
+            break;
+
+        default:
+            break;
+    }
 
     if (ledTmr_ > 100) { // rapidly flash LED
         ledTmr_ = 0;

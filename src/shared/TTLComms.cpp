@@ -86,5 +86,43 @@ void TTLComms::processMessage(const String& msg) {
         return;
     }
 
+    // Optional RX log on the receiver’s USB
+    if (logRx_) {
+        char line[96];
+        if (rxTag_) snprintf(line, sizeof(line), "[RX %s] %s", rxTag_, data.c_str());
+        else        snprintf(line, sizeof(line), "[RX] %s", data.c_str());
+        usbLog(line);
+    }
+
     onMessageReceived(data);
+}
+
+
+String TTLComms::kvGet(const String &frame, const char *key) {
+    int k = frame.indexOf(key);
+    if (k < 0) return String();
+    k += (int)strlen(key);
+    int e = frame.indexOf(';', k);
+    if (e < 0) e = frame.length();
+    return frame.substring(k, e);
+}
+
+int TTLComms::kvGetIntClamped(const String &frame, const char *key,
+                                int defVal, int minV, int maxV) {
+    String s = kvGet(frame, key);
+    if (!s.length()) return defVal;
+    long v = s.toInt();
+    if (v < minV) v = minV;
+    if (v > maxV) v = maxV;
+    return (int)v;
+}
+
+double TTLComms::kvGetDouble(const String &frame, const char *key, double defVal) {
+        String s = kvGet(frame, key);
+        return s.length() ? s.toFloat() : defVal;
+    }
+
+void TTLComms::setRxUsbLogging(bool enabled, const char *peerTag) {
+    logRx_ = enabled;
+    rxTag_ = peerTag;
 }

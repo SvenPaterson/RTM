@@ -51,6 +51,8 @@
 #define PRGM_RESET_BUS_PIN  ConnectorDI7
 #define SerialPort          ConnectorUsb
 #define SAFETY_PIN          ConnectorDI8
+#define HEATER_OUTPUT_PIN   ConnectorIO4
+#define HEATER_SAFETY_PIN   ConnectorIO2
 
 class ClearCoreRTM {
 public:
@@ -58,28 +60,37 @@ public:
     bool begin();       // call once from main() after hardware init
     void tick();        // call from your loop() – non‑blocking
     inline void torqueMode() {modeTorqueToggle_ = true; lcdToggle_ms_ = 1000;} // setup device for torque stand, defaults to RTM controller
-
+    //inline void setHeaterOutput() {HEATER_OUTPUT_PIN.OUTPUT_ANALOG} ... TODO
     /* ——— compile‑time LCD dimensions (exposed for other modules) ——— */
     static constexpr uint8_t  kNumCols = 20;
     static constexpr uint8_t  kNumRows = 4;
 
+    ClearCoreRTM() : ttlComms_(this) {} // ctor
+
 private:
+    // heartbeat sequence (CC -> XPB)
+    uint16_t hbSeq_ = 0;
+
     /* ——— debug helpers ——— */
     char debugBuf_[150];
     // ---- Debug helpers (USB-CDC guarded) ----
-    inline void dbg(const char *s)  { if (SerialPort) SerialPort.Send(s); }
-    inline void dbgln(const char *s){ if (SerialPort) SerialPort.SendLine(s); }
+    inline void dbg(const char *s)               { if (SerialPort) SerialPort.Send(s); }
+    inline void dbgln(const char *s)             { if (SerialPort) SerialPort.SendLine(s); }
 
-    // Key/Value overloads
-    inline void dbgkv(const char *k, const char *v)         { if (SerialPort) { SerialPort.Send(k); SerialPort.SendLine(v); } }
-    inline void dbgkv(const char *k, const String &v)       { dbgkv(k, v.c_str()); }
-    template <typename T,
-            typename = typename std::enable_if<std::is_integral<T>::value>::type>
-    inline void dbgkv(const char *k, T v) {
-        if (!SerialPort) return;
-        SerialPort.Send(k);
-        SerialPort.SendLine(static_cast<int32_t>(v));
-    }
+    inline void dbgkv(const char *k, const char *v)   { if (SerialPort) { SerialPort.Send(k); SerialPort.SendLine(v); } }
+    inline void dbgkv(const char *k, const String &v) { dbgkv(k, v.c_str()); }
+    inline void dbgkv(const char *k, int32_t v)       { if (SerialPort) { SerialPort.Send(k); SerialPort.SendLine(v); } }
+    inline void dbgkv(const char *k, uint32_t v)      { if (SerialPort) { SerialPort.Send(k); SerialPort.SendLine(v); } }
+    inline void dbgkv(const char *k, uint16_t v)      { dbgkv(k, (uint32_t)v); }
+    inline void dbgkv(const char *k, uint8_t v)       { dbgkv(k, (uint32_t)v); }
+
+    /* ——— Reset / Reboot ——— */
+    enum class ResetPhase : uint8_t { Idle, Armed, ExecSent, AwaitXpbBoot };
+    ResetPhase resetPhase_{ResetPhase::Idle};
+    uint8_t    resetArmSecs_{5};      // UI seconds to show on XPB
+    elapsedMillis resetTmr_;          // tick between phase transitions
+    bool       xpbBootSeen_{false};   // saw BOOT;ID=XPB
+    elapsedMillis xpbBootWaitTmr_;    // how long we’ve waited after EXEC
 
     /* ——— runtime states ——— */
     enum class State : uint8_t {
@@ -92,6 +103,11 @@ private:
         Completed,
         EStop
     };
+
+    /* ——— user input ——— */
+    bool        runActiveRemote_   = false;
+    bool        resetActiveRemote_ = false;
+    uint32_t    swLastUpdateMs_    = 0;
 
     // string mapping for displaying active state on LCD
     static inline constexpr const char *kStateNames[8] = {
@@ -112,7 +128,6 @@ private:
     static constexpr uint8_t  kMaxProtocolSteps = 50;
     static constexpr uint16_t kStepsPerRev      = 3200; // set this using ClearPath software on Stepper Motor, don't go lower than 3200
     static constexpr uint16_t kMotorMaxRpm      = 2760;
-    static const uint8_t kRowAddr[kNumRows];
 
     /* ——— protocol state ——— */
     std::array<Step, kMaxProtocolSteps> steps_{};
@@ -132,7 +147,7 @@ private:
     uint32_t pause_time_{0}, test_run_time_{0};
 
     /* ——— timers ——— */
-    elapsedMillis ledTmr_, dwellTmr_, resetTmr_, lcdTmr_, testRunTmr_;
+    elapsedMillis ledTmr_, dwellTmr_, testRunTmr_, lcdTmr_;
     uint16_t lcdToggle_ms_{3000}; // default to every 3s
     uint32_t runMins_{0};
 
@@ -159,6 +174,7 @@ private:
 
     class ClearCoreTTL : public TTLComms {
     public:
+        explicit ClearCoreTTL(ClearCoreRTM *owner) : owner_(owner) {}
         void begin() {
             ConnectorCOM1.Mode(Connector::TTL);
             ConnectorCOM1.Speed(9600);
@@ -185,40 +201,43 @@ private:
         
         // Handle received messages
         void onMessageReceived(const String& data) override {
-            // Send ACK first
             sendMessage("ACK:OK");
-            
-            if (!data.startsWith("STAT;")) return;
 
-            auto get = [&](const char *key)->String {
-                int k = data.indexOf(key);
-                if (k < 0) return String();
-                k += strlen(key);
-                int e = data.indexOf(';', k);
-                if (e < 0) e = data.length();
-                return data.substring(k, e);
-            };
-
-            static int lastSeq = -1;
-            int seq = -1;
-            String sSEQ = get("SEQ=");
-            if (sSEQ.length()) seq = sSEQ.toInt();
-
-            String sOUT = get("OUT=");
-            if (!sOUT.length()) return; // nothing to do
-            int out = sOUT.toInt();
-            if (out < 0)    out = 0;
-            if (out > 150)  out = 150;
-
-            bool dup = (seq >= 0 && seq == lastSeq);
-            if (seq >= 0) lastSeq = seq;
-
-            if (SerialPort) {
-                SerialPort.Send("Heater OUT = ");
-                SerialPort.Send(out);
-                if (dup) SerialPort.Send("  (duplicate)");
-                SerialPort.SendLine("");
+            // Switch state pushed from XPB (critical edges)
+            if (data.startsWith("SW;")) {
+                int run = kvGetIntClamped(data, "RUN=", 0, 0, 1);
+                int rst = kvGetIntClamped(data, "RST=", 0, 0, 1);
+                if (owner_) {
+                    owner_->runActiveRemote_   = (run != 0);
+                    owner_->resetActiveRemote_ = (rst != 0);
+                    owner_->swLastUpdateMs_    = Milliseconds();
+                }
+                return;
             }
+
+            // CC has confirmation of XPB boot or reboot
+            if (data.startsWith("BOOT;ID=XPB")) {
+                if (owner_) {
+                    owner_->xpbBootSeen_ = true;
+                }
+                return;
+            }
+
+            // Telemetry from XPB (heartbeat)
+            if (data.startsWith("STAT;")) {
+                static int lastSeq = -1;
+                int seq = kvGet(data, "SEQ=").toInt();
+                int out = kvGetIntClamped(data, "OUT=", 0, 0, 150);
+
+                bool dup = (seq >= 0 && seq == lastSeq);
+                if (seq >= 0) lastSeq = seq;
+
+                // setHeaterOutput(out); // TODO: drive AO/PWM
+
+                return;
+            }
+
+            // else ignore silently
         }
         
         void onBadChecksum(const String& rawMsg) override {
@@ -226,6 +245,14 @@ private:
             SerialPort.Send("BAD CHKSUM: ");
             SerialPort.SendLine(rawMsg.c_str());
         }
+
+    protected:
+        void usbLog(const char *s) override {
+            if (SerialPort) SerialPort.SendLine(s);
+        }
+
+    private:
+        ClearCoreRTM *owner_{nullptr};
     };
 
     // In ClearCore-RTM.h private members:

@@ -7,6 +7,31 @@
 #include "TTLComms.h"
 #include <elapsedMillis.h>
 #include <PID_v1.h>
+#include <Bounce2.h>
+#include <avr/io.h>
+#include <avr/wdt.h>
+#include <avr/cpufunc.h>  // for _PROTECTED_WRITE (megaAVR-0)
+
+// Unified soft reset for AVR targets
+static void xpbSoftResetNow() {
+#if defined(__AVR_ATmega4809__) || defined(ARDUINO_AVR_NANO_EVERY)
+  // megaAVR-0 (Nano Every): use software reset register
+  // Some cores name it SWRST, some SWRR – guard both.
+  #if defined(RSTCTRL_SWRST)
+    _PROTECTED_WRITE(RSTCTRL.SWRST, 1);
+  #elif defined(RSTCTRL_SWRR)
+    _PROTECTED_WRITE(RSTCTRL.SWRR, 1);
+  #else
+    // Fallback to WDT if symbol names differ
+    wdt_enable(WDTO_15MS);
+    for (;;) {}
+  #endif
+#else
+  // Classic AVRs (e.g., ATmega328P): WDT nuke
+  wdt_enable(WDTO_15MS);
+  for (;;) {}
+#endif
+}
 
 class ExpansionBoard {
 public:
@@ -23,8 +48,14 @@ public:
 
 private:
 
+    /* ——— Resetting ——— */
+    bool          resetUiActive_ = false;
+    uint8_t       resetUiSecs_   = 0;         // total seconds armed
+    elapsedMillis resetUiTmr_;                // for 1 Hz decrement
+    uint8_t       resetUiRemaining_ = 0;      // current ETA to show
+
+
     /* ——— debug helpers ——— */
-    // ---- Debug helpers (USB guarded) ----
     inline void dbg(const char *s)   { if (Serial) Serial.print(s); }
     inline void dbgln(const char *s) { if (Serial) Serial.println(s); }
     inline void dbgln()              { if (Serial) Serial.println(); }
@@ -46,15 +77,28 @@ private:
         Completed,
         EStop
     };
-    //char debugBuf_[150]; // for debugging to Serial
-    bool usbAvail_ = false;
-    //elapsedMillis usbPollTmr_;
     uint16_t hbSeq_ = 0;
+    
+    /* ——— CC heartbeat mirror for LCD ——— */
+    char     ccState_[12] = "IDLE";
+    uint8_t  ccStep_ = 0;
+    uint32_t ccLoopCur_ = 0, ccLoopTot_ = 0;
+    uint32_t ccSwAgeMs_ = 0;
+    bool     ccEstop_ = false;
+    uint16_t ccHbSeqPrev_ = 0, ccHbSeq_ = 0;
 
     /* ——— pinouts ——— */
     static constexpr uint8_t LCD_CS_ = 8;
     static constexpr uint8_t TC1_CS_ = 9;
     static constexpr uint8_t TC2_CS_ = 10;
+    static constexpr uint8_t RUN_SW_PIN = 2;
+    static constexpr uint8_t RESET_SW_PIN = 3;
+
+    /* ——— User Input ——— */
+    Bounce runSw_;
+    Bounce resetSw_;
+    void publishSwitchState_(bool force = false);
+    uint32_t lastSwPublishMs_ = 0;
 
     /* ——— Sensor Settings ——— */
     Adafruit_MAX31855 tc1_{TC1_CS_}, tc2_{TC2_CS_};
@@ -83,11 +127,11 @@ private:
     static constexpr uint8_t  kMaxProtocolSteps_ = 50;
     Step steps_[kMaxProtocolSteps_] = {};
 
-    uint8_t stepCount_      {0};
-    uint8_t loopCount_      {1};
-    uint8_t totalLoops_     {1};
-    String  protocolName_   {"Test Code"};
-    bool    targetMet_      {false};
+    uint8_t  stepCount_    {0};
+    uint32_t loopCount_    {1};
+    uint32_t totalLoops_   {1};
+    String   protocolName_ {"Test Code"};
+    bool     targetMet_    {false};
 
     /* ——— Sensor helpers ——— */
     double readTC(Adafruit_MAX31855 &TC, const char *label);
@@ -115,22 +159,90 @@ private:
         
         // RX: parse commands from CC, no prints here
         void onMessageReceived(const String& data) override {
-            // Example command schema: "CMD;SP=120.0" (set heater setpoint °C)
-            if (data.startsWith("CMD;")) {
-                int k = data.indexOf("SP=");
-                if (k >= 0 && owner_) {
-                    k += 3;
-                    int e = data.indexOf(';', k);
-                    if (e < 0) e = data.length();
-                    double sp = data.substring(k, e).toFloat();
-                    owner_->setHeaterTarget(sp);
-                }
+            sendMessage("ACK:OK");
+
+            // Assert switches if requested
+            if (data == "REQ:SW") {
+                if (owner_) owner_->publishSwitchState_(true);
                 return;
             }
 
-            // Add other commands as needed, e.g. "CMD;MODE=TORQUE"
-            // else: ignore silently
+            // ----- Unified command block -----
+            if (data.startsWith("CMD;") && owner_) {
+                // 1) RESET flow (may come with SECS)
+                String reset = kvGet(data, "RESET=");
+                if (reset.length()) {
+                    if (reset == "ARM") {
+                        int secs = kvGetIntClamped(data, "SECS=", 5, 1, 30);
+                        owner_->resetUiActive_    = true;
+                        owner_->resetUiSecs_      = (uint8_t)secs;
+                        owner_->resetUiRemaining_ = (uint8_t)secs;
+                        owner_->resetUiTmr_       = 0;     // start 1 Hz UI countdown
+                    }
+                    else if (reset == "CANCEL") {
+                        owner_->resetUiActive_ = false;
+                    }
+                    else if (reset == "EXEC") {
+                        // Reboot XPB now (watchdog)
+                        delay(5);
+                        xpbSoftResetNow();
+                    }
+                    // No return — allow other keys in the same frame to apply too.
+                }
+
+                // 2) Heater setpoint (°C)
+                String sSP = kvGet(data, "SP=");
+                if (sSP.length()) {
+                    owner_->setHeaterTarget(sSP.toFloat());
+                }
+
+                // 3) Display mode
+                String mode = kvGet(data, "MODE=");
+                if (mode.length()) {
+                    owner_->modeTorqueToggle_ = (mode == "TORQUE");
+                }
+
+                return;
+            }
+
+            // ----- Heartbeat from ClearCore (for LCD/status) -----
+            if (data.startsWith("HB;") && owner_) {
+                String sSTATE = kvGet(data, "STATE=");
+                String sE     = kvGet(data, "E=");
+                String sSTEP  = kvGet(data, "STEP=");
+                String sLOOP  = kvGet(data, "LOOP=");
+                String sAGE   = kvGet(data, "SW_AGE=");
+
+                if (sSTATE.length()) sSTATE.toCharArray(owner_->ccState_, sizeof(owner_->ccState_));
+                if (sE.length())     owner_->ccEstop_ = (sE.toInt() != 0);
+
+                if (sSTEP.length()) {
+                    long v = sSTEP.toInt();
+                    if (v < 0) v = 0; if (v > 255) v = 255;
+                    owner_->ccStep_ = (uint8_t)v;
+                }
+
+                if (sLOOP.length()) {
+                    int slash = sLOOP.indexOf('/');
+                    if (slash > 0) {
+                        const char *cstr = sLOOP.c_str();
+                        char *endp = nullptr;
+                        unsigned long cur = strtoul(cstr, &endp, 10);
+                        unsigned long tot = 0;
+                        if (endp && *endp == '/') tot = strtoul(endp + 1, nullptr, 10);
+                        owner_->ccLoopCur_ = (uint32_t)cur;
+                        owner_->ccLoopTot_ = (uint32_t)tot;
+                    }
+                }
+
+                if (sAGE.length()) owner_->ccSwAgeMs_ = (uint32_t)sAGE.toInt();
+                return;
+            }
+
+            // else ignore quietly
         }
+
+
         
         void onBadChecksum(const String& rawMsg) override {
                 ++badCrcCount_;
@@ -138,11 +250,16 @@ private:
                     Serial.println("WARN: TTL bad checksum (rate-limited)");
                 }
             }
+    
+    protected:
+        void usbLog(const char *s) override {
+            if (Serial) Serial.println(s);
+        }
 
-        private:
-            ExpansionBoard *owner_{nullptr};
-            //bool usbAvail_{false};
-            uint32_t badCrcCount_{0};
+    private:
+        ExpansionBoard *owner_{nullptr};
+        uint32_t badCrcCount_{0};
+
     };
     ExpansionBoardTTL ttlComms_;
     elapsedMillis heartbeatTmr_;
