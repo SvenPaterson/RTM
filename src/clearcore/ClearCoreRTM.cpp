@@ -5,9 +5,11 @@ bool ClearCoreRTM::begin() {
     SerialPort.Mode(Connector::USB_CDC);
     SerialPort.Speed(9600);
     SerialPort.PortOpen();
+
     uint32_t t0 = Milliseconds();
     while (!SerialPort && Milliseconds() - t0 < 5000) {}
-    SerialPort.SendLine("SerialReady");
+
+    dbgln("SerialReady");
 
     /* GPIO */
     PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
@@ -15,11 +17,11 @@ bool ClearCoreRTM::begin() {
     SAFETY_PIN.Mode(Connector::INPUT_DIGITAL);
     LED_PIN.Mode(Connector::OUTPUT_DIGITAL); 
     LED_PIN.State(true);
-    SerialPort.SendLine("GPIO ready");
+    dbgln("GPIO ready");
 
     /* TTL Comms */
     ttlComms_.begin();
-    SerialPort.SendLine("TTL Ready");
+    dbgln("TTL Ready");
 
     /* MOTOR */
     MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
@@ -28,14 +30,14 @@ bool ClearCoreRTM::begin() {
     motor.VelMax(kMotorMaxRpm * kStepsPerRev / 60);
     motor.AccelMax(kMotorMaxRpm * kStepsPerRev / 60);
     motor.EStopDecelMax(kMotorMaxRpm * kStepsPerRev / 60);
-    SerialPort.SendLine("Motor ready");
+    dbgln("Motor ready");
 
     /* SD CARD */
     if (!SD.begin()) {
-        SerialPort.SendLine("SD begin failed");
+        dbgln("SD begin failed");
         // send update to disp
         return false;
-    } SerialPort.SendLine("SD ready");
+    } dbgln("SD ready");
     // send update to disp
     
     Delay_ms(250);
@@ -46,21 +48,17 @@ bool ClearCoreRTM::begin() {
 
     File csv = SD.open("protocol.csv", FILE_READ);
     if (!loadProtocol(csv)) {
-        SerialPort.SendLine("Load config failed");
+        dbgln("Load config failed");
         // send update to disp
         return false;
     };
     csv.close();
-    SerialPort.SendLine("Load config done");
+    dbgln("Load config done");
     // send update to disp
     Delay_ms(250);
 
-    // send update to disp
-    Delay_ms(1000);
-
     dwellTmr_ = 0;
     return true;
-
 }
 
 void ClearCoreRTM::tick() {
@@ -136,9 +134,11 @@ void ClearCoreRTM::tick() {
 
     if (heartbeatTmr_ >= 2000) {
         heartbeatTmr_ = 0;
-        ttlComms_.sendMessage("STATUS TEST TO XPB FROM CC");
-        ttlComms_.checkForMessages();
+        // ttcComms_.sendMessag(SEND HEARTBEAT INFO HERE)
+        ttlComms_.checkForMessages(); // receive fast ACK
     }
+    ttlComms_.checkForMessages();
+    ttlComms_.checkRetries();
     
 }
 
@@ -227,10 +227,11 @@ bool ClearCoreRTM::loadProtocol(File &csv) {
     }
 
     // 5) Print out protocol to Serial
-    SerialPort.SendLine("==== Loaded Protocol ====");
-    SerialPort.Send("Protocol Name: "); SerialPort.SendLine(protocolName_.c_str());
-    SerialPort.Send("Loop Count: "); SerialPort.SendLine(loopCount_);
-    SerialPort.SendLine("Step Count: "); SerialPort.SendLine(stepCount_);
+    dbgln("==== Loaded Protocol ====");
+    dbgkv("Protocol Name: ", protocolName_.c_str());
+    dbgkv("Loop Count: ", loopCount_);
+    dbgkv("Step Count: ", stepCount_);
+
 
     totalLoops_ = loopCount_; // to help display current test state
 
@@ -242,10 +243,10 @@ bool ClearCoreRTM::loadProtocol(File &csv) {
 
         snprintf(debugBuf_, sizeof(debugBuf_), "Step %2u: %6ld RPM  %4lu RPM/s²  %3lu s",
                  i + 1, rpm, accel, dwell);
-        SerialPort.SendLine(debugBuf_);
+        dbgln(debugBuf_);
     }
 
-    SerialPort.SendLine("=========================");
+    dbgln("=========================");
     
     return (stepCount_ > 0);
 }

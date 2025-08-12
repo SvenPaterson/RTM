@@ -28,6 +28,7 @@
 #include "SPI.h"
 #include "SD.h"
 #include "TTLComms.h"
+#include <type_traits>
 
 // ClearCore (and other Arduino cores) define min/max macros that clash with
 // <algorithm> templates in <array> on GCC. Undef them before any STL headers
@@ -63,6 +64,23 @@ public:
     static constexpr uint8_t  kNumRows = 4;
 
 private:
+    /* ——— debug helpers ——— */
+    char debugBuf_[150];
+    // ---- Debug helpers (USB-CDC guarded) ----
+    inline void dbg(const char *s)  { if (SerialPort) SerialPort.Send(s); }
+    inline void dbgln(const char *s){ if (SerialPort) SerialPort.SendLine(s); }
+
+    // Key/Value overloads
+    inline void dbgkv(const char *k, const char *v)         { if (SerialPort) { SerialPort.Send(k); SerialPort.SendLine(v); } }
+    inline void dbgkv(const char *k, const String &v)       { dbgkv(k, v.c_str()); }
+    template <typename T,
+            typename = typename std::enable_if<std::is_integral<T>::value>::type>
+    inline void dbgkv(const char *k, T v) {
+        if (!SerialPort) return;
+        SerialPort.Send(k);
+        SerialPort.SendLine(static_cast<int32_t>(v));
+    }
+
     /* ——— runtime states ——— */
     enum class State : uint8_t {
         Debug,
@@ -74,7 +92,6 @@ private:
         Completed,
         EStop
     };
-    char debugBuf_[150]; // for debugging to Serial
 
     // string mapping for displaying active state on LCD
     static inline constexpr const char *kStateNames[8] = {
@@ -132,13 +149,13 @@ private:
     bool loadProtocol(File &csv);
 
     /* ——— state handlers ——— */
-    void handleIdle     (bool runActive, bool justEntered_);
-    void handleRunning  (bool runActive, bool justEntered_);
-    void handlePaused   (bool runActive, bool justEntered_);
-    void handleReset    (bool resetActive, bool justEntered_);
-    void handleEStop    (bool resetActive, bool justEntered_);
-    void handleResume   (bool runActive, bool justEntered_);
-    void handleCompleted(bool resetActive, bool justEntered_);
+    void handleIdle      (bool runActive,   bool justEntered_);
+    void handleRunning   (bool runActive,   bool justEntered_);
+    void handlePaused    (bool runActive,   bool justEntered_);
+    void handleReset     (bool resetActive, bool justEntered_);
+    void handleEStop     (bool resetActive, bool justEntered_);
+    void handleResume    (bool runActive,   bool justEntered_);
+    void handleCompleted (bool resetActive, bool justEntered_);
 
     class ClearCoreTTL : public TTLComms {
     public:
@@ -146,12 +163,11 @@ private:
             ConnectorCOM1.Mode(Connector::TTL);
             ConnectorCOM1.Speed(9600);
             ConnectorCOM1.PortOpen();
+            beginBase();
         }
         
         // Implement serial interface for ClearCore COM1
         void serialSend(const char* data) override {
-            SerialPort.Send("CC -> XPB: ");
-            SerialPort.Send(data);  // Debug output
             ConnectorCOM1.Send(data);
         }
         
@@ -172,13 +188,42 @@ private:
             // Send ACK first
             sendMessage("ACK:OK");
             
-            SerialPort.Send("Received valid message from ExpansionBoard: ");
-            SerialPort.SendLine(data.c_str());
+            if (!data.startsWith("STAT;")) return;
+
+            auto get = [&](const char *key)->String {
+                int k = data.indexOf(key);
+                if (k < 0) return String();
+                k += strlen(key);
+                int e = data.indexOf(';', k);
+                if (e < 0) e = data.length();
+                return data.substring(k, e);
+            };
+
+            static int lastSeq = -1;
+            int seq = -1;
+            String sSEQ = get("SEQ=");
+            if (sSEQ.length()) seq = sSEQ.toInt();
+
+            String sOUT = get("OUT=");
+            if (!sOUT.length()) return; // nothing to do
+            int out = sOUT.toInt();
+            if (out < 0)    out = 0;
+            if (out > 150)  out = 150;
+
+            bool dup = (seq >= 0 && seq == lastSeq);
+            if (seq >= 0) lastSeq = seq;
+
+            if (SerialPort) {
+                SerialPort.Send("Heater OUT = ");
+                SerialPort.Send(out);
+                if (dup) SerialPort.Send("  (duplicate)");
+                SerialPort.SendLine("");
+            }
         }
         
         void onBadChecksum(const String& rawMsg) override {
             sendMessage("ACK:BAD_CHECKSUM");
-            SerialPort.Send("Bad checksum from ExpansionBoard: ");
+            SerialPort.Send("BAD CHKSUM: ");
             SerialPort.SendLine(rawMsg.c_str());
         }
     };

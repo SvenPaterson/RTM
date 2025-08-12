@@ -5,21 +5,25 @@
 
 // public:
 bool ExpansionBoard::begin() {
-    while (!Serial) delay(1);
-    Serial.println("\nUSB Serial Connected!");
+    Serial.begin(9600);
+
+    unsigned long t0 = millis();
+    while (!Serial && (millis() - t0 < 5000)) { /* spin */}
+
+    dbgln("\nUSB Serial Monitor Connected!");
+
 
     if (!lcd_.begin()) {
-        Serial.println("FATAL: LCD initialization failed!");
-        return false;    
+        dbgln("FATAL: LCD initialization failed!");
+        return false;
     }
 
-    Serial.print("Initializing MAX31855 sensor - TC1...");
-    // wait for MAX chip to stabilize
-    delay(500);
+    dbg("Initializing MAX31855 sensor - TC1...");
+    delay(500); // stabilize
     if (!tc1_.begin()) {
-        Serial.println("ERROR.");
+        dbgln("ERROR.");
         while (1) delay(10);
-    } else Serial.println("DONE");
+    } else dbgln("DONE");
 
     /*Serial.print("Initializing MAX31855 sensor - TC2...");
     if (!tc2_.begin()) {
@@ -31,24 +35,44 @@ bool ExpansionBoard::begin() {
     //tc2_.setFaultChecks(MAX31855_FAULT_ALL);
 
     ttlComms_.begin();
-    Serial.println("TTL Listening - Ready for ClearCore");
+    dbgln("TTL Listening - Ready for ClearCore");
+
+    heater_.begin(); // maybe only do this when a test is started or pre-heating begins?
+    heater_.setTargetTemp(32.0); // debug only, will come from ClearCore heartbeat / step updates
 
     return true;
 }
 
 void ExpansionBoard::tick() {
     updateData();
-    
+    ttlComms_.checkForMessages();
+
     if (lcdTmr_ >= lcdToggle_ms_) {
         lcdTmr_ = 0;
         lcdToggle_ = !lcdToggle_;
     } renderScreen();
 
+    if (pidTmr_ >= 500) {
+        pidTmr_ = 0;
+        int outVal;
+        // double pv = isnan(latestSumpC_) ? 0 : latestSumpC_;
+        double pv = isnan(latestSealC_) ? 0 : latestSealC_; // DEBUGGING ONLY!!!
+        (void)heater_.compute(pv, outVal);
+    }
+
     if (heartbeatTmr_ >= 2000) {
         heartbeatTmr_ = 0;
-        ttlComms_.checkForMessages();
-        ttlComms_.sendMessage("STATUS TEST TO CC FROM XPB");
+
+        // build up heatbeat data for clearcore
+        char line[80];
+        const int out = heater_.lastOut();
+        snprintf(line, sizeof(line),
+                 "STAT;SEQ=%u;OUT=%03d", hbSeq_++, out);
+        ttlComms_.sendMessage(line, MessageType::IMPORTANT);
+        ttlComms_.checkForMessages(); // recieve fast ACK
     }
+    ttlComms_.checkRetries();
+
 }
 
 void ExpansionBoard::setDataInterval(uint16_t milli_secs) {
@@ -63,11 +87,13 @@ double ExpansionBoard::readTC(Adafruit_MAX31855 &TC, const char *label) {
   double c = TC.readCelsius();
   if (isnan(c)) {
     uint8_t e = TC.readError();
-    Serial.print(label);
-    Serial.println(" fault(s):");
-    if (e & MAX31855_FAULT_OPEN)      Serial.println("  • open circuit");
-    if (e & MAX31855_FAULT_SHORT_GND) Serial.println("  • short to GND");
-    if (e & MAX31855_FAULT_SHORT_VCC) Serial.println("  • short to VCC");
+    if (Serial) {
+        Serial.print(label);
+        Serial.println(" fault(s):");
+        if (e & MAX31855_FAULT_OPEN)      Serial.println("  • open circuit");
+        if (e & MAX31855_FAULT_SHORT_GND) Serial.println("  • short to GND");
+        if (e & MAX31855_FAULT_SHORT_VCC) Serial.println("  • short to VCC");
+    }
     return NAN;
   }
   return c;
@@ -150,7 +176,6 @@ void ExpansionBoard::renderScreen() {
         lcd_.setLineLeft(2, buff);
         
         // line 4: temps, drop ° if three-digit
-        int latestSumpC_ = 140.4; // PLACEHOLDER
 
         uint16_t sealInt = isnan(latestSealC_)
                            ? 0

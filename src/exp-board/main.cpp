@@ -4,10 +4,7 @@
 ExpansionBoard board;
 
 void setup() {
-    Serial.begin(9600);
-    if (!board.begin()) {
-        Serial.println("FATAL: Display Controller initialization failed!");
-    } 
+    board.begin();
 }
 
 void loop() {

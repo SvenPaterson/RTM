@@ -4,11 +4,11 @@
 #include <Arduino.h>
 
 struct PendingMessage {
-    String data;
-    uint32_t sentTime;
-    uint8_t retryCount;
-    uint8_t maxRetries;
-    bool needsAck;
+    String      encoded; // full "DATA:CHK\n"
+    uint32_t    sentTime;
+    uint8_t     retryCount;
+    uint8_t     maxRetries;
+    bool        needsAck;
 };
 
 enum class MessageType {
@@ -27,6 +27,7 @@ public:
     virtual int serialPeek() = 0;
     
     // Common functionality
+    void beginBase() { incomingMsg_.reserve(80); } // preallocate memory
     void sendMessage(const char* data, bool needsAck = false);
     void sendMessage(const char* data, MessageType type);
     void checkRetries();
@@ -45,7 +46,7 @@ protected:
     void processMessage(const String& msg);
     
 private:
-    static constexpr uint32_t ACK_TIMEOUT_MS = 200;
+    static constexpr uint32_t ACK_TIMEOUT_MS = 300;
     static constexpr uint8_t MAX_RETRIES = 3;
     
     PendingMessage pendingMsg_;

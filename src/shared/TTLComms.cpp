@@ -4,12 +4,14 @@
 void TTLComms::sendMessage(const char* data, bool needsAck) {
     char msg[80];
     uint8_t checksum = calculateXOR(data);
-    snprintf(msg, sizeof(msg), "%s:%02X\n", data, checksum);
+    snprintf(msg, sizeof(msg), "%s:%02X\r\n", data, checksum); // CRLF
+
+    serialSend(msg);
+
     if (needsAck) {
-        pendingMsg_ = {data, millis(), 0, MAX_RETRIES, true};
+        pendingMsg_ = { String(msg), millis(), 0, MAX_RETRIES, true };
         waitingForAck_ = true;
     }
-    serialSend(msg);
 }
 
 void TTLComms::sendMessage(const char* data, MessageType type) {
@@ -24,7 +26,10 @@ void TTLComms::checkRetries() {
         if (pendingMsg_.retryCount < pendingMsg_.maxRetries) {
             pendingMsg_.retryCount++;
             pendingMsg_.sentTime = millis();
-            serialSend(pendingMsg_.data.c_str());
+            serialSend(pendingMsg_.encoded.c_str());
+        }
+        else {
+            waitingForAck_ = false;
         }
     }
 }
@@ -32,7 +37,7 @@ void TTLComms::checkRetries() {
 void TTLComms::checkForMessages() {
     while (serialAvailable()) {
         char c = serialRead();
-        
+        if (c == '\r') continue;
         if (c == '\n') {
             if (validateMessage(incomingMsg_)) {
                 processMessage(incomingMsg_);
@@ -73,6 +78,13 @@ bool TTLComms::validateMessage(const String& msg) {
 
 void TTLComms::processMessage(const String& msg) {
     int lastColon = msg.lastIndexOf(':');
-    String data = msg.substring(0, lastColon);
+    String data = (lastColon >= 0) ? msg.substring(0, lastColon) : msg;
+
+    // handle ACKs centralling so retries stop
+    if (data.startsWith("ACK:")) {
+        waitingForAck_ = false;
+        return;
+    }
+
     onMessageReceived(data);
 }
