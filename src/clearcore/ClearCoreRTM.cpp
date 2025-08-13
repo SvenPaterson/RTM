@@ -15,7 +15,7 @@ bool ClearCoreRTM::begin() {
     PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
     PRGM_RESET_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
     SAFETY_PIN.Mode(Connector::INPUT_DIGITAL);
-    LED_PIN.Mode(Connector::OUTPUT_DIGITAL); 
+    LED_PIN.Mode(Connector::OUTPUT_DIGITAL);
     LED_PIN.State(true);
     dbgln("GPIO ready");
 
@@ -31,59 +31,45 @@ bool ClearCoreRTM::begin() {
     /* SD CARD */
     if (!SD.begin()) {
         dbgln("SD begin failed");
-        // send update to disp
         return false;
-    } dbgln("SD ready");
-    // send update to disp
-    
+    }
+    dbgln("SD ready");
+
     Delay_ms(250);
 
     // ----------- LOAD PROTOCOL ---------
-    // disp: 'loading protocol...'
     Delay_ms(250);
 
     File csv = SD.open("protocol.csv", FILE_READ);
     if (!loadProtocol(csv)) {
         dbgln("Load config failed");
-        // send update to disp
         return false;
-    };
+    }
     csv.close();
     dbgln("Load config done");
-    // send update to disp
     Delay_ms(250);
 
     /* TTL Comms */
     ttlComms_.begin();
     ttlComms_.setRxUsbLogging(true, "XPB");
-    dbgln("Waiting for XPB...");
 
-    uint32_t lastHello = 0;
-    t0 = 0;
-    const uint32_t timeoutMs = 8000, helloMs = 500;
-
-    // xpbReady_ (or reuse xpbBootSeen_) is set in onMessageReceived when we get READY;ID=XPB
-    while (!xpbBootSeen_ && (Milliseconds() - t0 < timeoutMs)) {
-        ttlComms_.checkForMessages();
-        ttlComms_.checkRetries();
-        if (Milliseconds() - lastHello >= helloMs) {
-            ttlComms_.sendMessage("HELLO;ID=CC", MessageType::INFO);
-            lastHello = Milliseconds();
-        }
-    }
-    // Optional small grace spin
-    uint32_t tGrace = Milliseconds();
-    while (!xpbBootSeen_ && Milliseconds() - tGrace < 200) {
-        ttlComms_.checkForMessages();
-    }
-
-    if (!xpbBootSeen_) {
-        dbgln("WARN: XPB not ready; decide to halt or run degraded.");
-        while (1) { /* SPIN */}
-    } else {
-        // Immediately ask for current switches
+    // --- NEW: Proactively announce readiness and request switch state ---
+    {
+        char line[64];
+        snprintf(line, sizeof(line), "READY;ID=CC;VER=1.0;UPT=%lu",
+                 (unsigned long)Milliseconds());
+        ttlComms_.sendMessage(line, MessageType::CRITICAL);
         ttlComms_.sendMessage("REQ:SW", MessageType::CRITICAL);
     }
+    // Briefly service RX so the XPB sees this immediately (avoids boot races)
+    {
+        uint32_t tReady = Milliseconds();
+        while (Milliseconds() - tReady < 150) {
+            ttlComms_.checkForMessages();
+            ttlComms_.checkRetries();
+        }
+    }
+    dbgln("TTL Ready");
 
     dwellTmr_ = 0;
     return true;
