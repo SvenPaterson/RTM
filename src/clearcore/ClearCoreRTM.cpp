@@ -1,5 +1,10 @@
 #include "ClearCore-RTM.h"
 
+const char* const ClearCoreRTM::kStateNames[8] = {
+    "DEBUG", "IDLE", "RUNNING", "PAUSED", "RESETTING",
+    "RESUME", "COMPLETED", "E-STOP"
+};
+
 bool ClearCoreRTM::begin() {
     /* USB Serial Comms for Debugging */
     SerialPort.Mode(Connector::USB_CDC);
@@ -15,6 +20,8 @@ bool ClearCoreRTM::begin() {
     PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
     PRGM_RESET_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
     SAFETY_PIN.Mode(Connector::INPUT_DIGITAL);
+    HEATER_OUTPUT_PIN.Mode(Connector::OUTPUT_PWM);
+    HEATER_SAFETY_PIN.Mode(Connector::OUTPUT_DIGITAL);
     LED_PIN.Mode(Connector::OUTPUT_DIGITAL);
     LED_PIN.State(true);
     dbgln("GPIO ready");
@@ -52,30 +59,32 @@ bool ClearCoreRTM::begin() {
     /* TTL Comms */
     ttlComms_.begin();
     ttlComms_.setRxUsbLogging(true, "XPB");
-
-    // --- NEW: Proactively announce readiness and request switch state ---
-    {
-        char line[64];
-        snprintf(line, sizeof(line), "READY;ID=CC;VER=1.0;UPT=%lu",
-                 (unsigned long)Milliseconds());
-        ttlComms_.sendMessage(line, MessageType::CRITICAL);
-        ttlComms_.sendMessage("REQ:SW", MessageType::CRITICAL);
-    }
-    // Briefly service RX so the XPB sees this immediately (avoids boot races)
+    // listen for XPB ready
     {
         uint32_t tReady = Milliseconds();
-        while (Milliseconds() - tReady < 150) {
+        while (Milliseconds() - tReady < 2000) {
             ttlComms_.checkForMessages();
             ttlComms_.checkRetries();
         }
     }
     dbgln("TTL Ready");
-
+    ttlComms_.sendMessage("REQ:SW", MessageType::CRITICAL);
     dwellTmr_ = 0;
     return true;
 }
 
 void ClearCoreRTM::tick() {
+    ttlComms_.checkForMessages();
+    ttlComms_.checkRetries();
+
+    // --- Comms health & stale guard ---
+    // If we've ever seen good STATs but it's been > 3s since the last fresh one,
+    // declare comms dead and E-STOP everything.
+    if (commsHealthy_ && statAgeTmr_ > 3000U && state_ != State::EStop) {
+        eStopAll_("XPB STAT stale > 3s");
+    }
+
+
     bool eStopActive  = !SAFETY_PIN.State();
     bool runActive    = runActiveRemote_;
     bool resetActive  = resetActiveRemote_;
@@ -84,7 +93,8 @@ void ClearCoreRTM::tick() {
 
     // first check for E-Stop
     if (eStopActive && state_ != State::EStop) {
-        state_ = State::EStop;
+        eStopAll_("HW E-STOP input");   // sends ALARM;TYPE=ESTOP;MSG=..., drops motor+heater
+        return;
     }
 
     // check for reset request
@@ -155,7 +165,7 @@ void ClearCoreRTM::tick() {
                  "HB;SEQ=%u;STATE=%s;E=%d;STEP=%u;LOOP=%lu/%lu;SW_AGE=%lu",
                  hbSeq_++,
                  stateStr,
-                 eStopActive ? 1 : 0,
+                 (state_ == State::EStop) ? 1 : 0,
                  (unsigned)(currentStep_ + 1),
                  (unsigned long)(totalLoops_ - loopCount_ + 1),
                  (unsigned long)totalLoops_,
@@ -164,9 +174,6 @@ void ClearCoreRTM::tick() {
         ttlComms_.checkForMessages(); // receive fast ACK
         //dbgln(msg);
     }
-    ttlComms_.checkForMessages();
-    ttlComms_.checkRetries();
-    
 }
 
 // this will drastically change once exp-board is reading protocol
@@ -434,13 +441,20 @@ void ClearCoreRTM::handleReset(bool resetActive, bool justEntered_) {
     }
 
     if (justEntered_) {
-        // 1) Arm: ask XPB to show countdown UI
-        char line[40];
-        snprintf(line, sizeof(line), "CMD;RESET=ARM;SECS=%u", (unsigned)resetArmSecs_);
-        ttlComms_.sendMessage(line, MessageType::CRITICAL);
-        resetPhase_ = ResetPhase::Armed;
-        resetTmr_ = 0;
         xpbBootSeen_ = false;
+        resetTmr_    = 0;
+
+        if (resetImmediate_) {
+            ttlComms_.sendMessage("CMD;RESET=EXEC", MessageType::CRITICAL);
+            resetPhase_      = ResetPhase::ExecSent;
+            xpbBootWaitTmr_  = 0;
+            resetImmediate_  = false;  // one-shot
+        } else {
+            char line[40];
+            snprintf(line, sizeof(line), "CMD;RESET=ARM;SECS=%u", (unsigned)resetArmSecs_);
+            ttlComms_.sendMessage(line, MessageType::CRITICAL);
+            resetPhase_ = ResetPhase::Armed;
+        }
     }
 
     switch (resetPhase_) {
@@ -475,32 +489,34 @@ void ClearCoreRTM::handleReset(bool resetActive, bool justEntered_) {
 }
 
 void ClearCoreRTM::handleEStop(bool resetActive, bool justEntered_) {
-    
     if (justEntered_) {
-        /* lcdClearScreen();
-        lcdLineCenter(0, "!!! E-STOP !!!");
-        lcdLineCenter(1, "Press Reset to Clear");
-        lcdLineBlank (2);
-        lcdLineCenter(3, "Test is now void!");
-        lcdFlush(); */
         motor.MoveStopAbrupt();
         motor.EnableRequest(false);
-    }
-    
-    // flash LED rapidly
-    if (ledTmr_ > 50) {
-        ledTmr_ = 0;
-        LED_PIN.State(!LED_PIN.State());
+
+        // Kill heater output, latch safety low
+        HEATER_OUTPUT_PIN.PwmDuty(0);
+        HEATER_SAFETY_PIN.State(false);
     }
 
+    // flash LED rapidly
+    if (ledTmr_ > 50) { ledTmr_ = 0; LED_PIN.State(!LED_PIN.State()); }
+
     if (resetActive) {
-        /* lcdClearScreen();
-        lcdLineCenter(1, "Resetting board...");
-        lcdFlush(); */
-        SysMgr.ResetBoard();
+        // Instead of resetting CC locally, perform a coordinated dual reset:
+        //  - tell XPB to reboot now
+        //  - wait for XPB boot (HELLO/READY or small timeout)
+        //  - then reset CC
+        resetImmediate_ = true;          // skip ARM UI; jump straight to EXEC
+        preReset_       = State::Idle;   // state to return to after reset (unused)
+        prevState_      = State::Debug;  // force justEntered_ on next state
+        state_          = State::ResetRequested;
+        return;
     }
-    return;
+
+    // If you want to allow leaving E-STOP without reset once hardware is safe,
+    // you could add a branch here, but current design requires a reset.
 }
+
 
 void ClearCoreRTM::handleResume(bool runActive, bool justEntered_) {
     if (justEntered_) {
@@ -530,4 +546,53 @@ void ClearCoreRTM::handleCompleted(bool resetActive, bool justEntered_) {
     }
 
     return;
+}
+
+void ClearCoreRTM::setHeaterOutput(int out) {
+    if (state_ == State::EStop || heaterInhibit_) {
+        HEATER_OUTPUT_PIN.PwmDuty(0);
+        HEATER_SAFETY_PIN.State(false);
+        return;
+    }
+
+    // ClearCore PWM max out is 255
+    if (out < 0)    out = 0;
+    if (out > 255)  out = 255;
+
+    HEATER_SAFETY_PIN.State(true);
+    HEATER_OUTPUT_PIN.PwmDuty(out);
+}
+
+void ClearCoreRTM::eStopAll_(const char *reason) {
+    // Motor: stop immediately and disable
+    motor.MoveStopAbrupt();
+    motor.EnableRequest(false);
+
+    // Heater: drop to zero and disable safety if used
+    HEATER_OUTPUT_PIN.PwmDuty(0);
+    HEATER_SAFETY_PIN.State(false);
+    heaterInhibit_ = true;
+
+    // Flag state + log
+    state_ = State::EStop;
+    sendAlarm_("ESTOP", reason);
+    dbg("E-STOP: "); dbgln(reason ? reason : "unspecified");
+}
+
+void ClearCoreRTM::sendAlarm_(const char *type, const char *reason) {
+    // Keep the frame short (< ~75 chars total): "ALARM;TYPE=...;MSG=..."
+    char msg[80];
+    const char *t = type   ? type   : "GEN";
+    const char *r = reason ? reason : "";
+    // Truncate reason to ~40 safe chars (ASCII, no semicolons)
+    char buf[41];
+    size_t i = 0;
+    for (; r[i] && i < sizeof(buf)-1; ++i) {
+        char c = r[i];
+        if (c == ';' || c == '\r' || c == '\n') c = ' ';
+        buf[i] = c;
+    }
+    buf[i] = '\0';
+    snprintf(msg, sizeof(msg), "ALARM;TYPE=%s;MSG=%s", t, buf);
+    ttlComms_.sendMessage(msg, MessageType::CRITICAL);
 }

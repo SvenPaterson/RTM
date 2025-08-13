@@ -7,8 +7,6 @@ LCDDriver::LCDDriver(uint8_t csPin) : LCD_CS_(csPin) {
 // public implimentation
 
 bool LCDDriver::begin() {
-    Serial.print("Initializing NHD-0420D3Z-NSW-BBW-V3 display... ");
-
     pinMode(LCD_CS_, OUTPUT);
     digitalWrite(LCD_CS_, HIGH);
     SPI.begin();
@@ -17,16 +15,15 @@ bool LCDDriver::begin() {
     clearScreen();
     displayOn();
     setBrightness();
-    delay(200);
-    char blank[21] = {"                    "};
-    setLineLR(0, "LCD Screen", "Ready");
-    setLineCenter(1, blank);
-    setLineCenter(2, blank);
-    setLineCenter(3, blank);
-    flush();
-    delay(1000);
 
-    Serial.println("DONE");
+    { 
+        char blank[21] = {"                    "};
+        setLineCenter(0, blank);
+        setLineCenter(1, blank);
+        setLineCenter(2, blank);
+        setLineCenter(3, blank);
+        flush();
+    }
     return true;
 }
 

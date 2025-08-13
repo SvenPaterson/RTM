@@ -63,7 +63,8 @@ uint8_t TTLComms::calculateXOR(const char* data) {
 bool TTLComms::validateMessage(const String& msg) {
     // read last byte and perform error check
     int lastColon = msg.lastIndexOf(':');
-    if (lastColon == -1 || lastColon >= msg.length() - 1) {
+    size_t len = msg.length();
+    if (lastColon == -1 || lastColon >= len - 1) {
         return false;
     }
     

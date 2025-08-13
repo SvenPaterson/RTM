@@ -24,7 +24,7 @@ public:
     virtual void serialSend(const char* data) = 0;
     virtual bool serialAvailable() = 0;
     virtual char serialRead() = 0;
-    virtual int serialPeek() = 0;
+    virtual int  serialPeek() = 0;
     
     // Common functionality
     void beginBase() { incomingMsg_.reserve(80); } // preallocate memory
@@ -52,8 +52,8 @@ protected:
     virtual void usbLog(const char *s) { /* default: no-op */}
     
 private:
-    static constexpr uint32_t ACK_TIMEOUT_MS = 300;
-    static constexpr uint8_t MAX_RETRIES = 3;
+    static constexpr uint32_t ACK_TIMEOUT_MS = 500;
+    static constexpr uint8_t MAX_RETRIES = 5;
     
     PendingMessage pendingMsg_;
     bool waitingForAck_ = false;

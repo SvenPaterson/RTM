@@ -51,7 +51,7 @@
 #define PRGM_RESET_BUS_PIN  ConnectorDI7
 #define SerialPort          ConnectorUsb
 #define SAFETY_PIN          ConnectorDI8
-#define HEATER_OUTPUT_PIN   ConnectorIO4
+#define HEATER_OUTPUT_PIN   ConnectorIO1
 #define HEATER_SAFETY_PIN   ConnectorIO2
 
 class ClearCoreRTM {
@@ -68,15 +68,20 @@ public:
     ClearCoreRTM() : ttlComms_(this) {} // ctor
 
 private:
-    // heartbeat sequence (CC -> XPB)
+    /* ——— comms health ——— */
     uint16_t hbSeq_ = 0;
+    elapsedMillis statAgeTmr_;   // time since last fresh STAT from XPB
+    bool commsHealthy_{false};
+
+    /* ——— safety helpers ——— */
+    void eStopAll_(const char *reason);
+    void sendAlarm_(const char *type, const char *reason);
+    bool heaterInhibit_{false};
 
     /* ——— debug helpers ——— */
     char debugBuf_[150];
-    // ---- Debug helpers (USB-CDC guarded) ----
-    inline void dbg(const char *s)               { if (SerialPort) SerialPort.Send(s); }
-    inline void dbgln(const char *s)             { if (SerialPort) SerialPort.SendLine(s); }
-
+    inline void dbg(const char *s)                    { if (SerialPort) SerialPort.Send(s); }
+    inline void dbgln(const char *s)                  { if (SerialPort) SerialPort.SendLine(s); }
     inline void dbgkv(const char *k, const char *v)   { if (SerialPort) { SerialPort.Send(k); SerialPort.SendLine(v); } }
     inline void dbgkv(const char *k, const String &v) { dbgkv(k, v.c_str()); }
     inline void dbgkv(const char *k, int32_t v)       { if (SerialPort) { SerialPort.Send(k); SerialPort.SendLine(v); } }
@@ -91,6 +96,7 @@ private:
     elapsedMillis resetTmr_;          // tick between phase transitions
     bool       xpbBootSeen_{false};   // saw BOOT;ID=XPB
     elapsedMillis xpbBootWaitTmr_;    // how long we’ve waited after EXEC
+    bool resetImmediate_{false};  // skip ARM countdown; still coordinate XPB reset
 
     /* ——— runtime states ——— */
     enum class State : uint8_t {
@@ -110,10 +116,7 @@ private:
     uint32_t    swLastUpdateMs_    = 0;
 
     // string mapping for displaying active state on LCD
-    static inline constexpr const char *kStateNames[8] = {
-        "DEBUG", "IDLE", "RUNNING", "PAUSED", "RESETTING",
-        "RESUME", "COMPLETED", "E-STOP"
-    };
+    static const char* const kStateNames[8];
     static inline const char * stateToString(State s) {
         return kStateNames[static_cast<uint8_t>(s)];
     }
@@ -163,6 +166,9 @@ private:
     /* ——— protocol helpers ——— */
     bool loadProtocol(File &csv);
 
+    /* ——— heater helpers ——— */
+    void setHeaterOutput(int out);
+
     /* ——— state handlers ——— */
     void handleIdle      (bool runActive,   bool justEntered_);
     void handleRunning   (bool runActive,   bool justEntered_);
@@ -205,6 +211,7 @@ private:
 
             // 1) Discovery / readiness
             if (data.startsWith("HELLO;ID=XPB")) {
+                if (owner_) owner_->xpbBootSeen_ = true;   // NEW: treat HELLO as boot-seen
                 char line[64];
                 snprintf(line, sizeof(line), "READY;ID=CC;VER=1.0;UPT=%lu",
                         (unsigned long)Milliseconds());
@@ -233,16 +240,22 @@ private:
             // Telemetry from XPB (heartbeat)
             if (data.startsWith("STAT;")) {
                 static int lastSeq = -1;
-                int seq = kvGet(data, "SEQ=").toInt();
-                int out = kvGetIntClamped(data, "OUT=", 0, 0, 150);
+                const int seq = kvGet(data, "SEQ=").toInt();
+                const int out = kvGetIntClamped(data, "OUT=", 0, 0, 150);
 
-                bool dup = (seq >= 0 && seq == lastSeq);
+                const bool dup = (seq >= 0 && seq == lastSeq);
                 if (seq >= 0) lastSeq = seq;
 
-                // setHeaterOutput(out); // TODO: drive AO/PWM
+                if (dup) return;  // drop retried STAT frames (idempotent side effects)
 
+                if (owner_) {
+                    owner_->commsHealthy_ = true;
+                    owner_->statAgeTmr_   = 0;           // fresh data just arrived
+                    owner_->setHeaterOutput(out);        // drive AO/PWM once per fresh STAT
+                }
                 return;
             }
+
 
             // else ignore silently
         }

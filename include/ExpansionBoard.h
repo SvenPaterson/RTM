@@ -77,7 +77,15 @@ private:
         Completed,
         EStop
     };
+
+    /* ——— CC heartbeat health ——— */
+    elapsedMillis ccHbAgeTmr_;
+    bool          ccHbSeen_{false};
     uint16_t hbSeq_ = 0;
+
+    /* ——— CC alarm state ——— */
+    bool  ccAlarmActive_ = false;
+    char  ccAlarmMsg_[LCDDriver::kNumCols + 1] = {0};
     
     /* ——— CC heartbeat mirror for LCD ——— */
     char     ccState_[12] = "IDLE";
@@ -114,8 +122,12 @@ private:
     elapsedMillis lcdTmr_;
     uint16_t lcdToggle_ms_{2000};
     uint32_t runMins_{42};
-    void renderScreen  ();         // call this to update screen with test details
-
+    // UI Pages
+    enum class UiPage : uint8_t { Connecting, Resetting, LostComms, EStop, ResetCountdown, Normal };
+    UiPage lastUi_{UiPage::Connecting};
+    void renderUi_(UiPage page);     // Centralized UI renderer (one flush per tick)
+    void renderNormal_();
+    
     /* ——— protocol steps ——— */
     struct Step {
         int32_t  speedSteps_s_   {0};   //!< target speed in steps/s
@@ -230,6 +242,18 @@ private:
                 if (sSTATE.length()) sSTATE.toCharArray(owner_->ccState_, sizeof(owner_->ccState_));
                 if (sE.length())     owner_->ccEstop_ = (sE.toInt() != 0);
 
+                // Robust E-STOP latch: honor E=1 OR STATE=="E-STOP"
+                bool estopFromE     = (sE.length() && sE.toInt() != 0);
+                bool estopFromState = (sSTATE == "E-STOP");
+                bool estop = estopFromE || estopFromState;
+
+                // Latch/clear ccEstop_ and manage alarm lifetime
+                owner_->ccEstop_ = estop;
+                if (!estop) {
+                    owner_->ccAlarmActive_ = false;
+                    owner_->ccAlarmMsg_[0] = '\0';
+                }
+                
                 if (sSTEP.length()) {
                     long v = sSTEP.toInt();
                     if (v < 0) v = 0; if (v > 255) v = 255;
@@ -250,8 +274,26 @@ private:
                 }
 
                 if (sAGE.length()) owner_->ccSwAgeMs_ = (uint32_t)sAGE.toInt();
+                owner_->ccHbSeen_   = true;
+                owner_->ccHbAgeTmr_ = 0;
                 return;
             }
+
+            // ----- Alarm from ClearCore (reasoned events like E-STOP) -----
+            if (data.startsWith("ALARM;") && owner_) {
+                String t = kvGet(data, "TYPE=");
+                String m = kvGet(data, "MSG=");
+                if (t == "ESTOP") {
+                    owner_->ccAlarmActive_ = true;
+                    if (m.length()) {
+                        m.toCharArray(owner_->ccAlarmMsg_, sizeof(owner_->ccAlarmMsg_));
+                    } else {
+                        strncpy(owner_->ccAlarmMsg_, "E-STOP asserted", sizeof(owner_->ccAlarmMsg_) - 1);
+                    }
+                }
+                return;
+            }
+
 
             // else ignore quietly
         }

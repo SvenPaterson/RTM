@@ -44,29 +44,33 @@ bool ExpansionBoard::begin() {
     ttlComms_.setRxUsbLogging(true, "CC");
     delay(200);
     dbgln("Connecting with CC..");
-    lcd_.setLineCenter(2, "Connecting with CC..");
+    lcd_.setLineCenter(0, "Connecting with CC..");
     lcd_.flush();
 
     uint32_t lastTx = 0;
-    t0 = 0;
-    while (!ccReady_ && millis() - t0 < 8000) {
+    t0 = millis();
+    while (!ccReady_ && millis() - t0 < 12000UL) {        // 12s window
         ttlComms_.checkForMessages();
         ttlComms_.checkRetries();
-        if (millis() - lastTx >= 500) {
+        if (millis() - lastTx >= 200) {                   // 200 ms cadence
             ttlComms_.sendMessage("HELLO;ID=XPB", MessageType::INFO);
             lastTx = millis();
         }
     }
-    // tiny grace spin to catch just-sent READY frames
+    // short grace period to catch an in-flight READY
     uint32_t tGrace = millis();
-    while (!ccReady_ && millis() - tGrace < 200) {
+    while (!ccReady_ && millis() - tGrace < 300) {
         ttlComms_.checkForMessages();
+        ttlComms_.checkRetries();
     }
 
     if (!ccReady_) {
-        dbgln("WARN: ClearCore not ready; halting.");
-        while (1) { /* show error or blink */ }
+        dbgln("WARN: ClearCore not ready; continuing without link.");  // no hard halt
+        lcd_.setLineCenter(2, "No CC link!!");
     }
+    lcd_.setLineCenter(2, "ClearCore READY");
+    lcd_.flush();
+    delay(1000);
     dbgln("ClearCore READY");
 
     // DEBUGGING ONLY //
@@ -78,54 +82,78 @@ bool ExpansionBoard::begin() {
 }
 
 void ExpansionBoard::tick() {
+    // Comms housekeeping
     ttlComms_.checkForMessages();
+    ttlComms_.checkRetries();
 
-    bool updated = false;
-    if (runSw_.update())    updated = true;
-    if (resetSw_.update())  updated = true;
-    if (updated && (runSw_.changed() || resetSw_.changed())) {
-        publishSwitchState_(); // only sends if state actually changed
+    // Keep background discovery alive while not ready
+    static uint32_t lastHello = 0;
+    if (!ccReady_ && (millis() - lastHello >= 1000)) {
+        ttlComms_.sendMessage("HELLO;ID=XPB", MessageType::INFO);
+        lastHello = millis();
+    }
+
+    // ---- INPUTS / SENSORS / CONTROL ----
+    // Debounce switches and publish if changed (also periodic keep-alive)
+    bool changed = false;
+    if (runSw_.update())   changed |= runSw_.changed();
+    if (resetSw_.update()) changed |= resetSw_.changed();
+    if (changed) {
+        publishSwitchState_();
     }
     if (millis() - lastSwPublishMs_ > 60000UL) {
-        publishSwitchState_(true); // periodic keep-alive for switch state (1 min)
+        publishSwitchState_(true);
     }
 
-    updateData(); // reads all on-board sensors
+    // Sensor sampling (MAX31855 etc.)
+    updateData();
 
-    // Update reset UI ETA at 1 Hz (non-blocking)
+    // Reset countdown UI ETA at 1 Hz (non-blocking)
     if (resetUiActive_ && resetUiTmr_ >= 1000) {
         resetUiTmr_ = 0;
-        if (resetUiRemaining_ > 0) {
-            --resetUiRemaining_;
-        }
+        if (resetUiRemaining_ > 0) --resetUiRemaining_;
     }
 
-    if (lcdTmr_ >= lcdToggle_ms_) {
-        lcdTmr_ = 0;
-        lcdToggle_ = !lcdToggle_;
-    } renderScreen();
-
+    // Heater PID cadence
     if (pidTmr_ >= 500) {
         pidTmr_ = 0;
         int outVal;
-        // double pv = isnan(latestSumpC_) ? 0 : latestSumpC_;
-        double pv = isnan(latestSealC_) ? 0 : latestSealC_; // DEBUGGING ONLY!!!
+        double pv = isnan(latestSealC_) ? 0.0 : latestSealC_; // TEMP until CC drives SP
         (void)heater_.compute(pv, outVal);
     }
 
+    // STAT heartbeat to ClearCore
     if (heartbeatTmr_ >= 2000) {
         heartbeatTmr_ = 0;
-
-        // build up heatbeat data for clearcore
         char line[80];
         const int out = heater_.lastOut();
-        snprintf(line, sizeof(line),
-                 "STAT;SEQ=%u;OUT=%03d", hbSeq_++, out);
+        snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d", hbSeq_++, out);
         ttlComms_.sendMessage(line, MessageType::IMPORTANT);
-        ttlComms_.checkForMessages(); // recieve fast ACK
+        ttlComms_.checkForMessages(); // receive fast ACK
     }
-    ttlComms_.checkRetries();
 
+    // ---- UI DECISION (one page per tick) ----
+    UiPage page;
+    if (!ccReady_) {
+        page = UiPage::Connecting;
+    } else if (ccEstop_) {
+        page = (ccHbSeen_ && ccHbAgeTmr_ > 1000U) ? UiPage::Resetting : UiPage::EStop;
+    } else if (!resetUiActive_ && ccHbSeen_ && ccHbAgeTmr_ > 3000U) {
+        page = UiPage::LostComms;
+    } else if (resetUiActive_) {
+        page = UiPage::ResetCountdown;
+    } else {
+        page = UiPage::Normal;
+    }
+
+    // LCD toggle (used by Normal page)
+    if (lcdTmr_ >= lcdToggle_ms_) { lcdTmr_ = 0; lcdToggle_ = !lcdToggle_; }
+
+    // Render exactly one page and flush once
+    renderUi_(page);
+
+    // Optional final retry pump
+    ttlComms_.checkRetries();
 }
 
 void ExpansionBoard::setDataInterval(uint16_t milli_secs) {
@@ -161,87 +189,96 @@ void ExpansionBoard::updateData() {
     latestSumpC_ = 120; //readTC(tc2_, "TC2"); // PLACEHOLDER
 }
 
-void ExpansionBoard::renderScreen() {
-    char buff[LCDDriver::kNumCols+1];
-
-    if (resetUiActive_) {
-        lcd_.setLineCenter(0, "RESETTING...");
-        snprintf(buff, sizeof(buff), "in %us", (unsigned)resetUiRemaining_);
-        lcd_.setLineCenter(1, buff);
-        lcd_.setLineCenter(2, "Return switch to");
-        lcd_.setLineCenter(3, "center to cancel.");
-        lcd_.flush();
-        return;
+void ExpansionBoard::renderUi_(UiPage page) {
+    const bool entering = (page != lastUi_);
+    if (entering) {
+        lcd_.clearScreen();   // clear only when changing pages (prevents artifacts/flicker)
     }
 
-    // Line 0: left = protocol name OR runtime; right = CC state (or E-STOP)
+    switch (page) {
+        case UiPage::Connecting:
+            lcd_.setLineCenter(2, "Connecting with CC...");
+            break;
+
+        case UiPage::Resetting:
+            lcd_.setLineCenter(0, "Controller resetting");
+            lcd_.setLineCenter(1, "Please wait...");
+            break;
+
+        case UiPage::LostComms:
+            lcd_.setLineCenter(0, "Lost ClearCore Comms");
+            lcd_.setLineCenter(1, "Link lost for >3s");
+            lcd_.setLineCenter(2, "Check cable/power");
+            break;
+
+        case UiPage::EStop:
+            lcd_.setLineCenter(0, "!!! E-STOP !!!");
+            lcd_.setLineCenter(1, ccAlarmActive_ ? ccAlarmMsg_ : (char*)"Fault asserted");
+            lcd_.setLineCenter(2, "Reset on controller");
+            lcd_.setLineCenter(3, "to clear alarm");
+            break;
+
+        case UiPage::ResetCountdown: {
+            char buff[LCDDriver::kNumCols+1];
+            lcd_.setLineCenter(0, "RESETTING...");
+            snprintf(buff, sizeof(buff), "in %us", (unsigned)resetUiRemaining_);
+            lcd_.setLineCenter(1, buff);
+            lcd_.setLineCenter(2, "Return switch to");
+            lcd_.setLineCenter(3, "center to cancel.");
+            break;
+        }
+
+        case UiPage::Normal:
+        default:
+            renderNormal_();   // draws all normal info (no flush here)
+            break;
+    }
+
+    lcd_.flush();
+    lastUi_ = page;
+}
+
+void ExpansionBoard::renderNormal_() {
+    char buff[LCDDriver::kNumCols+1];
+
+    // Line 0: left = protocol name OR runtime; right = CC state
     if (lcdToggle_) {
-        // protocol name
         strncpy(buff, protocolName_.c_str(), LCDDriver::kNumCols);
         buff[LCDDriver::kNumCols] = '\0';
     } else {
-        // runtime minutes/hours
         if (runMins_ < 60) {
             snprintf(buff, sizeof(buff), "%2lu mins", (unsigned long)runMins_);
         } else {
             snprintf(buff, sizeof(buff), "%4.1f hrs", (float)runMins_ / 60.0f);
         }
     }
-    lcd_.setLineLR(0, buff, ccEstop_ ? "E-STOP" : ccState_);
+    lcd_.setLineLR(0, buff, ccState_);
 
     // Line 1: step & loop
     if (ccLoopTot_ > 0) {
-        // "STEP:xx  Loop:cur/tot"
         snprintf(buff, sizeof(buff), "STEP:%2u  Loop:%lu/%lu",
                  (unsigned)ccStep_,
                  (unsigned long)ccLoopCur_,
                  (unsigned long)ccLoopTot_);
     } else {
-        // "STEP:xx  Loop:cur"
         snprintf(buff, sizeof(buff), "STEP:%2u  Loop:%lu",
                  (unsigned)ccStep_,
                  (unsigned long)ccLoopCur_);
     }
     lcd_.setLineLeft(1, buff);
-    
-    /// dummy data ///
-    float rpm = 2560;
-    int16_t v = 2123;
-    uint16_t a = 500;
-    targetMet_ = true;
 
-    /* float rpm = static_cast<float>(targetSpeed_) * 60.0f / kStepsPerRev;
-    int16_t v = (rpm >= 0.0f) ? static_cast<int16_t>(rpm + 0.5f) : static_cast<int16_t>(rpm - 0.5f);
-    uint16_t a = static_cast<uint16_t>((static_cast<float>(targetAccel_) * 60.0f / kStepsPerRev) + 0.5f); */
-
-    // Line 2 & 3 content
+    // Line 2 & 3 content (two views)
     if (modeTorqueToggle_) {
-        // Torque-stand view
+        // Torque-stand view (placeholder values for now)
         lcd_.setLineLR(2, "RPM/s    RPM", "Dwell");
-
-        // TODO: replace these with HB-fed values once CC publishes them.
-        // For now, placeholders so the layout is correct.
-        uint16_t acc = 500;  // e.g., ccAccel_
-        int16_t  rpm = 2123; // e.g., ccRpm_
-        char     dwellRight[8] = ""; // e.g., snprintf(dwellRight, sizeof, "%4us", ccDwellRemS_);
-
+        uint16_t acc = 500;   // TODO: ccAccel_
+        int16_t  rpm = 2123;  // TODO: ccRpm_
+        char     dwellRight[8] = "";
         char left[21];
         snprintf(left, sizeof(left), "%5u  %5d", (unsigned)acc, (int)rpm);
         lcd_.setLineLR(3, left, dwellRight);
-    }
-        // deal with this LATER!
-        /* if (!targetMet_) {
-            snprintf(dwell_buf, sizeof(dwell_buf), "ramp");
-        } else if (state_ == State::Paused) {
-            uint16_t t = (steps_[currentStep_].dwellMs - pause_time_) / 1000;
-            snprintf(dwell_buf, sizeof(dwell_buf), "%4us", t);
-        } else {
-            uint16_t t = (steps_[currentStep_].dwellMs - dwellTmr_) / 1000;
-            snprintf(dwell_buf, sizeof(dwell_buf), "%4us", t);
-        } */
-
-    else {
-        // RTM view (HB-driven)
+    } else {
+        // RTM view
         if (lcdToggle_) {
             int sp  = (int)lround(heater_.setpoint());
             int out = heater_.lastOut();
@@ -255,15 +292,14 @@ void ExpansionBoard::renderScreen() {
         uint16_t sealInt = isnan(latestSealC_) ? 0U : (uint16_t)(latestSealC_ + 0.5f);
         uint16_t sumpInt = isnan(latestSumpC_) ? 0U : (uint16_t)(latestSumpC_ + 0.5f);
         if (sumpInt < 100) {
-            snprintf(buff, sizeof(buff), "Seal:%3u\xDF""C Sump:%2u\xDF""C", (unsigned)sealInt, (unsigned)sumpInt);
+            snprintf(buff, sizeof(buff), "Seal:%3u\xDF""C Sump:%2u\xDF""C",
+                    (unsigned)sealInt, (unsigned)sumpInt);
         } else {
-            snprintf(buff, sizeof(buff), "Seal:%3u\xDF""C Sump:%3uC", (unsigned)sealInt, (unsigned)sumpInt);
+            snprintf(buff, sizeof(buff), "Seal:%3u\xDF""C Sump:%3uC",
+                    (unsigned)sealInt, (unsigned)sumpInt);
         }
         lcd_.setLineLeft(3, buff);
     }
-    
-    // commit
-    lcd_.flush();
 }
 
 void ExpansionBoard::publishSwitchState_(bool force) {
