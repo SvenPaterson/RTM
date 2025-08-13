@@ -48,12 +48,12 @@ public:
 
 private:
 
-    /* ——— Resetting ——— */
+    /* ——— On Boot & Resetting ——— */
     bool          resetUiActive_ = false;
     uint8_t       resetUiSecs_   = 0;         // total seconds armed
     elapsedMillis resetUiTmr_;                // for 1 Hz decrement
     uint8_t       resetUiRemaining_ = 0;      // current ETA to show
-
+    bool ccReady_ = false;
 
     /* ——— debug helpers ——— */
     inline void dbg(const char *s)   { if (Serial) Serial.print(s); }
@@ -160,6 +160,20 @@ private:
         // RX: parse commands from CC, no prints here
         void onMessageReceived(const String& data) override {
             sendMessage("ACK:OK");
+
+            // 1) Discovery / readiness
+            if (data.startsWith("HELLO;ID=CC")) {
+                // Peer is probing; reply READY (don't set ccReady_ here)
+                char line[64];
+                snprintf(line, sizeof(line), "READY;ID=XPB;VER=1.0;UPT=%lu",
+                        (unsigned long)millis());
+                sendMessage(line, MessageType::CRITICAL);
+                return;
+            }
+            if (data.startsWith("READY;ID=CC")) {
+                if (owner_) owner_->ccReady_ = true;
+                return;
+            }
 
             // Assert switches if requested
             if (data == "REQ:SW") {

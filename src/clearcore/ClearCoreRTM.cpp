@@ -19,11 +19,6 @@ bool ClearCoreRTM::begin() {
     LED_PIN.State(true);
     dbgln("GPIO ready");
 
-    /* TTL Comms */
-    ttlComms_.begin();
-    ttlComms_.setRxUsbLogging(true, "XPB");
-    dbgln("TTL Ready");
-
     /* MOTOR */
     MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
     MotorMgr.MotorModeSet(MotorManager::MOTOR_M0M1, Connector::CPM_MODE_STEP_AND_DIR);
@@ -57,6 +52,38 @@ bool ClearCoreRTM::begin() {
     dbgln("Load config done");
     // send update to disp
     Delay_ms(250);
+
+    /* TTL Comms */
+    ttlComms_.begin();
+    ttlComms_.setRxUsbLogging(true, "XPB");
+    dbgln("Waiting for XPB...");
+
+    uint32_t lastHello = 0;
+    t0 = 0;
+    const uint32_t timeoutMs = 8000, helloMs = 500;
+
+    // xpbReady_ (or reuse xpbBootSeen_) is set in onMessageReceived when we get READY;ID=XPB
+    while (!xpbBootSeen_ && (Milliseconds() - t0 < timeoutMs)) {
+        ttlComms_.checkForMessages();
+        ttlComms_.checkRetries();
+        if (Milliseconds() - lastHello >= helloMs) {
+            ttlComms_.sendMessage("HELLO;ID=CC", MessageType::INFO);
+            lastHello = Milliseconds();
+        }
+    }
+    // Optional small grace spin
+    uint32_t tGrace = Milliseconds();
+    while (!xpbBootSeen_ && Milliseconds() - tGrace < 200) {
+        ttlComms_.checkForMessages();
+    }
+
+    if (!xpbBootSeen_) {
+        dbgln("WARN: XPB not ready; decide to halt or run degraded.");
+        while (1) { /* SPIN */}
+    } else {
+        // Immediately ask for current switches
+        ttlComms_.sendMessage("REQ:SW", MessageType::CRITICAL);
+    }
 
     dwellTmr_ = 0;
     return true;

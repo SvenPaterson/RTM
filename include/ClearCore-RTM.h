@@ -203,6 +203,21 @@ private:
         void onMessageReceived(const String& data) override {
             sendMessage("ACK:OK");
 
+            // 1) Discovery / readiness
+            if (data.startsWith("HELLO;ID=XPB")) {
+                char line[64];
+                snprintf(line, sizeof(line), "READY;ID=CC;VER=1.0;UPT=%lu",
+                        (unsigned long)Milliseconds());
+                sendMessage(line, MessageType::CRITICAL);
+                sendMessage("REQ:SW", MessageType::CRITICAL);
+                return;
+            }
+            if (data.startsWith("READY;ID=XPB")) {
+                if (owner_) owner_->xpbBootSeen_ = true;  // reuse this flag for "XPB is ready"
+                // You can also send REQ:SW here if you didn’t send it above.
+                return;
+            }
+
             // Switch state pushed from XPB (critical edges)
             if (data.startsWith("SW;")) {
                 int run = kvGetIntClamped(data, "RUN=", 0, 0, 1);
@@ -211,14 +226,6 @@ private:
                     owner_->runActiveRemote_   = (run != 0);
                     owner_->resetActiveRemote_ = (rst != 0);
                     owner_->swLastUpdateMs_    = Milliseconds();
-                }
-                return;
-            }
-
-            // CC has confirmation of XPB boot or reboot
-            if (data.startsWith("BOOT;ID=XPB")) {
-                if (owner_) {
-                    owner_->xpbBootSeen_ = true;
                 }
                 return;
             }

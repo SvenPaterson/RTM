@@ -42,13 +42,34 @@ bool ExpansionBoard::begin() {
 
     ttlComms_.begin();
     ttlComms_.setRxUsbLogging(true, "CC");
-    char bootMsg[48];
-    snprintf(bootMsg, sizeof(bootMsg), "BOOT;ID=XPB;VER=1.0;UPT=0");
-    ttlComms_.sendMessage(bootMsg, MessageType::INFO);
+    delay(200);
+    dbgln("Connecting with CC..");
+    lcd_.setLineCenter(2, "Connecting with CC..");
+    lcd_.flush();
 
-    ttlComms_.sendMessage("REQ:SW", MessageType::CRITICAL);
-    dbgln("TTL Listening - Ready for ClearCore");
+    uint32_t lastTx = 0;
+    t0 = 0;
+    while (!ccReady_ && millis() - t0 < 8000) {
+        ttlComms_.checkForMessages();
+        ttlComms_.checkRetries();
+        if (millis() - lastTx >= 500) {
+            ttlComms_.sendMessage("HELLO;ID=XPB", MessageType::INFO);
+            lastTx = millis();
+        }
+    }
+    // tiny grace spin to catch just-sent READY frames
+    uint32_t tGrace = millis();
+    while (!ccReady_ && millis() - tGrace < 200) {
+        ttlComms_.checkForMessages();
+    }
 
+    if (!ccReady_) {
+        dbgln("WARN: ClearCore not ready; halting.");
+        while (1) { /* show error or blink */ }
+    }
+    dbgln("ClearCore READY");
+
+    // DEBUGGING ONLY //
     heater_.begin(); // maybe only do this when a test is started or pre-heating begins?
     heater_.setTargetTemp(32.0); // debug only, will come from ClearCore heartbeat / step updates
 
@@ -148,7 +169,7 @@ void ExpansionBoard::renderScreen() {
         snprintf(buff, sizeof(buff), "in %us", (unsigned)resetUiRemaining_);
         lcd_.setLineCenter(1, buff);
         lcd_.setLineCenter(2, "Return switch to");
-        lcd_.setLineCenter(3, "cancel.");
+        lcd_.setLineCenter(3, "center to cancel.");
         lcd_.flush();
         return;
     }

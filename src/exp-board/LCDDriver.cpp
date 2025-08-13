@@ -17,8 +17,12 @@ bool LCDDriver::begin() {
     clearScreen();
     displayOn();
     setBrightness();
-
+    delay(200);
+    char blank[21] = {"                    "};
     setLineLR(0, "LCD Screen", "Ready");
+    setLineCenter(1, blank);
+    setLineCenter(2, blank);
+    setLineCenter(3, blank);
     flush();
     delay(1000);
 
