@@ -1,4 +1,4 @@
-#include "ClearCore-RTM.h"
+#include "ClearCoreRTM.h"
 
 const char* const ClearCoreRTM::kStateNames[8] = {
     "DEBUG", "IDLE", "RUNNING", "PAUSED", "RESETTING",
@@ -78,12 +78,16 @@ void ClearCoreRTM::tick() {
     ttlComms_.checkRetries();
 
     // --- Comms health & stale guard ---
-    // If we've ever seen good STATs but it's been > 3s since the last fresh one,
-    // declare comms dead and E-STOP everything.
-    if (commsHealthy_ && statAgeTmr_ > 3000U && state_ != State::EStop) {
-        eStopAll_("XPB STAT stale > 3s");
+    // STAT stale -> normally E-STOP at >5s, but suppress if inside an active XPB mask window.
+    const bool maskActiveNow = (xpbMaskActive_ && Milliseconds() < xpbMaskUntilMs_);
+    if (commsHealthy_ && statAgeTmr_ > 5000U && state_ != State::EStop) {
+        if (!maskActiveNow) {
+            const char *why = xpbMaskActive_ ? "XPB stale (mask expired)" : "XPB STAT stale > 5s";
+            eStopAll_(why);
+            // fall-through: E-STOP handler will take over
+        }
+        // else: masked ⇒ do nothing (keep outputs/motion as-is)
     }
-
 
     bool eStopActive  = !SAFETY_PIN.State();
     bool runActive    = runActiveRemote_;
@@ -124,7 +128,11 @@ void ClearCoreRTM::tick() {
     }
 
     bool justEntered_ = (state_ != prevState_); // did we just state change?
-    prevState_        = state_; // capture previous state
+    if (justEntered_) {
+        dbg("STATE -> ");
+        dbgln(stateToString(state_));
+    }
+    prevState_ = state_; // capture previous state
     // justEntered_ allows us to do things once upon first entering a state handler
     // this prevents needlessly firing screen updates or other logic every tick.
     // It also allows us to immediately update a screen the instant we change a state.
@@ -158,8 +166,9 @@ void ClearCoreRTM::tick() {
 
     if (heartbeatTmr_ >= 1000) {
         heartbeatTmr_ = 0;
-        // ttcComms_.sendMessag(SEND HEARTBEAT INFO HERE)
-        const char *stateStr = stateToString(state_);
+        const bool maskActiveNowHb = (xpbMaskActive_ && Milliseconds() < xpbMaskUntilMs_);
+        const char *stateStr = maskActiveNowHb ? "WAITING_XPB" : stateToString(state_);
+
         char msg[96];
         snprintf(msg, sizeof(msg),
                  "HB;SEQ=%u;STATE=%s;E=%d;STEP=%u;LOOP=%lu/%lu;SW_AGE=%lu",
@@ -171,9 +180,9 @@ void ClearCoreRTM::tick() {
                  (unsigned long)totalLoops_,
                  (unsigned long)(Milliseconds() - swLastUpdateMs_));
         ttlComms_.sendMessage(msg, MessageType::INFO);
-        ttlComms_.checkForMessages(); // receive fast ACK
-        //dbgln(msg);
+        ttlComms_.checkForMessages();
     }
+
 }
 
 // this will drastically change once exp-board is reading protocol
@@ -516,7 +525,6 @@ void ClearCoreRTM::handleEStop(bool resetActive, bool justEntered_) {
     // If you want to allow leaving E-STOP without reset once hardware is safe,
     // you could add a branch here, but current design requires a reset.
 }
-
 
 void ClearCoreRTM::handleResume(bool runActive, bool justEntered_) {
     if (justEntered_) {

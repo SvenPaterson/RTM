@@ -1,10 +1,16 @@
 // TTLComms.cpp
 #include "TTLComms.h"
 
+#define XPB_TX_ECHO_USB 1
+
 void TTLComms::sendMessage(const char* data, bool needsAck) {
     char msg[80];
     uint8_t checksum = calculateXOR(data);
     snprintf(msg, sizeof(msg), "%s:%02X\r\n", data, checksum); // CRLF
+
+    #ifdef XPB_TX_ECHO_USB
+    if (Serial) { Serial.print("[TX CC] "); Serial.println(msg); }
+    #endif
 
     serialSend(msg);
 

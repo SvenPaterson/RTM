@@ -1,93 +1,107 @@
 // ExpansionBoard.h
 #pragma once
 
+// === Includes: Arduino & std ===
+#include <Arduino.h>
 #include <SPI.h>
-#include "Adafruit_MAX31855.h"
-#include "LCDDriver.h"
-#include "TTLComms.h"
+#include <SD.h>
+
+// === Includes: third-party libs ===
 #include <elapsedMillis.h>
 #include <PID_v1.h>
 #include <Bounce2.h>
-#include <avr/io.h>
-#include <avr/wdt.h>
-#include <avr/cpufunc.h>  // for _PROTECTED_WRITE (megaAVR-0)
+#include "Adafruit_MAX31855.h"
 
-// Unified soft reset for AVR targets
-static void xpbSoftResetNow() {
-#if defined(__AVR_ATmega4809__) || defined(ARDUINO_AVR_NANO_EVERY)
-  // megaAVR-0 (Nano Every): use software reset register
-  // Some cores name it SWRST, some SWRR – guard both.
-  #if defined(RSTCTRL_SWRST)
-    _PROTECTED_WRITE(RSTCTRL.SWRST, 1);
-  #elif defined(RSTCTRL_SWRR)
-    _PROTECTED_WRITE(RSTCTRL.SWRR, 1);
-  #else
-    // Fallback to WDT if symbol names differ
-    wdt_enable(WDTO_15MS);
-    for (;;) {}
-  #endif
-#else
-  // Classic AVRs (e.g., ATmega328P): WDT nuke
-  wdt_enable(WDTO_15MS);
-  for (;;) {}
+// === Includes: project headers ===
+#include "LCDDriver.h"
+#include "TTLComms.h"
+
+// === MCU-specific (guarded) ===
+#if defined(ARDUINO_ARCH_AVR)
+  #include <avr/io.h>
+  #include <avr/wdt.h>
+  #include <avr/cpufunc.h>  // _PROTECTED_WRITE
 #endif
-}
 
+/**
+ * @brief Perform a software reset of the MCU.
+ * @details Uses the megaAVR-0 SWRST register on Nano Every when available; otherwise
+ *          falls back to a watchdog-triggered reset.
+ * @warning Does not return.
+ */
+void xpbSoftResetNow();
+
+/**
+ * @brief Expansion board main controller (UI, sensors, comms, heater).
+ * @details Call begin() once from setup(), then tick() every loop().
+ */
 class ExpansionBoard {
 public:
-  /// Call once from main (or setup())
-  bool begin();
+    /**
+     * @brief Initialize hardware, peripherals, SD, comms, and UI.
+     * @return true on success; false if a fatal init fails (e.g., LCD init).
+     * @post If ClearCore link is detected, the LCD shows “ClearCore READY”.
+     */
+    bool begin();
 
-  /// Call from loop()
-  void tick();
+    /**
+     * @brief Main periodic task. Drive comms, inputs, sensors, PID, heartbeat, and UI.
+     * @details Non-blocking; render exactly one UI page per call.
+     *          Also handles “Resume?” prompt and reset countdown UI flows.
+     */
+    void tick();
 
-  void setDataInterval(uint16_t milli_secs);
-  void setHeaterTarget(double temp) { heater_.setTargetTemp(temp); }
+    /**
+     * @brief Set the maximum interval between successive sensor updates.
+     * @param milli_secs Interval in milliseconds.
+     */
+    void setDataInterval(uint16_t milli_secs);
 
-  ExpansionBoard() : ttlComms_(this) {}
+    /**
+     * @brief Set heater setpoint in °C.
+     * @param temp Target temperature (°C). 0 disables PID output.
+     */
+    void setHeaterTarget(double temp) { heater_.setTargetTemp(temp); }
+
+    ExpansionBoard() : ttlComms_(this) {}
 
 private:
 
-    /* ——— On Boot & Resetting ——— */
+    // ---------- Boot & Reset ----------
     bool          resetUiActive_ = false;
-    uint8_t       resetUiSecs_   = 0;         // total seconds armed
-    elapsedMillis resetUiTmr_;                // for 1 Hz decrement
-    uint8_t       resetUiRemaining_ = 0;      // current ETA to show
-    bool ccReady_ = false;
+    uint8_t       resetUiSecs_   = 0;       // total seconds armed
+    elapsedMillis resetUiTmr_;              // for 1 Hz decrement
+    uint8_t       resetUiRemaining_ = 0;    // current ETA to show
+    bool          ccReady_ = false;
+    bool          ccAnySeen_ = false;
+    elapsedMillis sinceBoot;
+    bool warnedNoLink_ = false;
+    uint32_t estopUiMaskUntilMs_ = 0;       // While now < this, show "Resetting" instead of E-STOP.
+    /// @brief If true, suppress the Resume? prompt after boot (XPB-only reboot).
+    bool suppressResumePrompt_{false};
 
-    /* ——— debug helpers ——— */
-    inline void dbg(const char *s)   { if (Serial) Serial.print(s); }
-    inline void dbgln(const char *s) { if (Serial) Serial.println(s); }
-    inline void dbgln()              { if (Serial) Serial.println(); }
+    // ---------- Debug Helpers ---------
+    /// @brief Print without newline if Serial is enabled.
+    inline void dbg(const char *s)   const { if (Serial) Serial.print(s); }
+    /// @brief Print with newline if Serial is enabled.
+    inline void dbgln(const char *s) const { if (Serial) Serial.println(s); }
+    /// @brief Print blank line if Serial is enabled.
+    inline void dbgln()              const { if (Serial) Serial.println(); }
+    /// @brief Print key/value (c-string) with newline if Serial is enabled.
+    inline void dbgkv(const char *k, const char *v)   const { if (Serial) { Serial.print(k); Serial.println(v); } }
+    /// @brief Print key/value (String) with newline if Serial is enabled.
+    inline void dbgkv(const char *k, const String &v) const { if (Serial) { Serial.print(k); Serial.println(v); } }
+    /// @brief Print key/value (number) with newline if Serial is enabled.
+    inline void dbgkv(const char *k, unsigned long v) const { if (Serial) { Serial.print(k); Serial.println(v); } }
 
-    inline void dbgkv(const char *k, const char *v)   { if (Serial) { Serial.print(k); Serial.println(v); } }
-    inline void dbgkv(const char *k, const String &v) { if (Serial) { Serial.print(k); Serial.println(v); } }
-
-    // single numeric overload
-    inline void dbgkv(const char *k, unsigned long v) { if (Serial) { Serial.print(k); Serial.println(v); } }
-
-    /* ——— runtime states ——— */
-    enum class State : uint8_t {
-        Debug,
-        Idle,
-        Running,
-        Paused,
-        ResetRequested,
-        Resume,
-        Completed,
-        EStop
-    };
-
-    /* ——— CC heartbeat health ——— */
+    // ---------- CC heartbeat / state mirror ----------
     elapsedMillis ccHbAgeTmr_;
     bool          ccHbSeen_{false};
-    uint16_t hbSeq_ = 0;
+    uint16_t      hbSeq_ = 0;
 
-    /* ——— CC alarm state ——— */
     bool  ccAlarmActive_ = false;
     char  ccAlarmMsg_[LCDDriver::kNumCols + 1] = {0};
-    
-    /* ——— CC heartbeat mirror for LCD ——— */
+
     char     ccState_[12] = "IDLE";
     uint8_t  ccStep_ = 0;
     uint32_t ccLoopCur_ = 0, ccLoopTot_ = 0;
@@ -95,219 +109,208 @@ private:
     bool     ccEstop_ = false;
     uint16_t ccHbSeqPrev_ = 0, ccHbSeq_ = 0;
 
-    /* ——— pinouts ——— */
-    static constexpr uint8_t LCD_CS_ = 8;
-    static constexpr uint8_t TC1_CS_ = 9;
-    static constexpr uint8_t TC2_CS_ = 10;
-    static constexpr uint8_t RUN_SW_PIN = 2;
-    static constexpr uint8_t RESET_SW_PIN = 3;
+    // ---------- Pins ----------
+    static constexpr uint8_t LCD_CS_      = 8;
+    static constexpr uint8_t TC1_CS_      = 9;
+    static constexpr uint8_t TC2_CS_      = 10;
+    static constexpr uint8_t RUN_SW_PIN_  = 2;
+    static constexpr uint8_t RESET_SW_PIN_= 3;
+    static constexpr uint8_t SD_CS_       = 4;
 
-    /* ——— User Input ——— */
+    // ---------- User Input ----------
     Bounce runSw_;
     Bounce resetSw_;
+    /**
+     * @brief Publish debounced RUN/RESET switch state to ClearCore.
+     * @param force When true, publish regardless of last sent state.
+     */
     void publishSwitchState_(bool force = false);
     uint32_t lastSwPublishMs_ = 0;
 
-    /* ——— Sensor Settings ——— */
-    Adafruit_MAX31855 tc1_{TC1_CS_}, tc2_{TC2_CS_};
-    uint16_t kDataIntervalMs_ = 100;
-    elapsedMillis   dataTmr_;  
-    double          latestSealC_     = NAN;
-    double          latestSumpC_     = NAN;
+    // ---------- SD / Protocol ----------
+    /**
+     * @brief Drive all SPI chip-selects HIGH and start SPI.
+     * @details Prevents other devices (LCD/TC) from holding MISO and breaking SD init.
+     *          Safe to call repeatedly.
+     */
+    void spiQuiesceAll_();
 
-    /* ——— Display Settings  ——— */
-    LCDDriver lcd_{LCD_CS_};
-    bool lcdToggle_{false}, lcdRuntimeToggle_{false};
-    bool modeTorqueToggle_{false}; // torque mode is for torque stand only
-    elapsedMillis lcdTmr_;
-    uint16_t lcdToggle_ms_{2000};
-    uint32_t runMins_{42};
-    // UI Pages
-    enum class UiPage : uint8_t { Connecting, Resetting, LostComms, EStop, ResetCountdown, Normal };
-    UiPage lastUi_{UiPage::Connecting};
-    void renderUi_(UiPage page);     // Centralized UI renderer (one flush per tick)
-    void renderNormal_();
+    /**
+     * @brief Initialize SD with retries/backoff.
+     * @param tries     Number of attempts (default 5).
+     * @param backoffMs Delay between attempts in ms (default 40).
+     * @return true if SD.begin() eventually succeeds.
+     * @details Re-asserts CS-high and SPI.begin() on each try to recover from soft-resets.
+     *          Uses dbg* for status; never blocks for long.
+     */
+    bool sdInitWithRetry_(uint8_t tries = 5, uint16_t backoffMs = 40);
+
+    /**
+     * @brief Load protocol CSV from SD and populate steps_.
+     * @param path Absolute path to CSV (e.g., "/protocol.csv").
+     * @return true if parsed successfully and at least one step was loaded.
+     * @details Expected format:
+     *          - Line 1: PROTOCOL_NAME=Name
+     *          - Line 2: LOOP_COUNT=N
+     *          - Line 3: header (ignored)
+     *          - Subsequent: RPM,ACCEL_RPM_S,DWELL_S[,TEMP_C]
+     *          TEMP_C is optional and clamped to [0,200].
+     * @post Updates protocolName_, loopCount_, stepCount_, steps_[], progHash_.
+     */
+    bool loadProtocolFromSD_(const char *path);
+
+    /**
+     * @brief Incremental CRC-32 (poly 0xEDB88320) updater.
+     * @param crc Running CRC (use 0 to start a new CRC).
+     * @param data Pointer to bytes.
+     * @param len  Number of bytes.
+     * @return Updated CRC value.
+     */
+    static uint32_t crc32_update_(uint32_t crc, const uint8_t *data, size_t len);
     
-    /* ——— protocol steps ——— */
-    struct Step {
-        int32_t  speedSteps_s_   {0};   //!< target speed in steps/s
-        uint32_t accelSteps_s2_  {0};   //!< accel in steps/s²
-        uint32_t dwellMs_        {0};   //!< dwell after speed reached (ms)
-    };
+    /**
+     * @brief Dump the loaded protocol to Serial in human-friendly form.
+     */
+    void logProtocol_() const;
 
-    /* ——— protocol state ——— */
-    static constexpr uint8_t  kMaxProtocolSteps_ = 50;
-    Step steps_[kMaxProtocolSteps_] = {};
+    bool     haveStoredResume_{false};
+    uint32_t storedPhash_{0};
+    uint16_t storedStep_{0}, storedLoopCur_{0}, storedLoopTot_{0};
 
-    uint8_t  stepCount_    {0};
-    uint32_t loopCount_    {1};
-    uint32_t totalLoops_   {1};
-    String   protocolName_ {"Test Code"};
-    bool     targetMet_    {false};
+    // ---------- Sensors ----------
+    Adafruit_MAX31855 tc1_{TC1_CS_}, tc2_{TC2_CS_};
+    uint16_t     kDataIntervalMs_ = 100;
+    elapsedMillis dataTmr_;
+    double       latestSealC_ = NAN;
+    double       latestSumpC_ = NAN;
 
-    /* ——— Sensor helpers ——— */
+    /**
+     * @brief Read one MAX31855 in °C and report faults to Serial.
+     * @param TC MAX31855 instance.
+     * @param label Label used in fault prints (e.g., "TC1").
+     * @return Temperature in °C, or NAN on fault.
+     */
     double readTC(Adafruit_MAX31855 &TC, const char *label);
+
+    /**
+     * @brief Update onboard sensor readings on a timed cadence.
+     * @details Uses kDataIntervalMs_ and dataTmr_ to throttle reads.
+     *          Updates latestSealC_ and latestSumpC_.
+     */
     void updateData();
 
+    // ---------- Display / UI ----------
+    LCDDriver     lcd_{LCD_CS_};
+    bool          lcdToggle_{false}, lcdRuntimeToggle_{false};
+    bool          modeTorqueToggle_{false}; // torque stand only
+    elapsedMillis lcdTmr_;
+    uint16_t      lcdToggle_ms_{2000};
+    uint32_t      runMins_{42};
+
+    /// @brief UI pages.
+    enum class UiPage : uint8_t {
+        Connecting, Resetting, LostComms, EStop,
+        ResumePrompt, ResetCountdown, Preheat, Normal
+    };
+
+    UiPage lastUi_{UiPage::Connecting};
+    bool   uiPendingResume_{false};
+    
+    /**
+     * @brief Render the top-level UI page (one page per tick).
+     * @param page Target page to render.
+     * @details Clears the LCD only when the page changes to prevent flicker,
+     *          then draws that page and flushes once.
+     */
+    void renderUi_(UiPage page);
+    
+    /**
+     * @brief Draw the “Normal” runtime page (no clear/flush here).
+     * @details Caller is responsible for lcd_.flush() after drawing.
+     *          Shows protocol/state on lines 0–1 and RTM/torque views on 2–3.
+     */
+    void renderNormal_();
+    
+    // ---------- Protocol model ----------
+    struct Step {
+        int32_t  rpmTarget_ {0};
+        uint32_t rpmAccel_  {0};
+        uint32_t dwellS_    {0};
+        uint16_t tempC_     {0};
+    };
+    static constexpr uint8_t kMaxProtocolSteps_ = 50;
+    Step     steps_[kMaxProtocolSteps_];
+    uint8_t  stepCount_{0};
+    uint32_t loopCount_{1};
+    String   protocolName_{"Test Code"};
+    uint32_t progHash_{0};
+    uint32_t totalLoops_{1};
+    bool     targetMet_{false};
+    bool everRan_ = false;
+
+    // ---------- Preheat control ----------
+    bool           preheatActive_{false};
+    uint16_t       preheatSpC_{0};
+    elapsedMillis  preheatTmr_;
+    static constexpr uint8_t  kPreheatBandC_  = 2;  // °C hysteresis
+    static constexpr uint16_t kPreheatSoakMs_ = 0;  // optional soak
+    inline double  preheatPv_() const { return isnan(latestSumpC_) ? 0 : latestSumpC_; }
+
+    // --- USB simulation hold for injection ---
+    bool     usbSimHold_ = false;
+    uint32_t usbSimHoldUntilMs_ = 0;
+    bool usbInjecting_ = false;
+
+    // ---------- Comms adapter (Serial1 TTL) ----------
+    /**
+     * @brief TTL serial adapter bound to ExpansionBoard (routes callbacks to owner).
+     */
     class ExpansionBoardTTL : public TTLComms {
     public:
+        /**
+         * @brief Construct with back-reference to owning ExpansionBoard.
+         */
         explicit ExpansionBoardTTL(ExpansionBoard *owner) : owner_(owner) {}
 
+        /**
+         * @brief Initialize the UART and common base plumbing.
+         * @note Uses Serial1 @ 9600 baud for ClearCore.
+         */
         void begin() {
             Serial1.begin(9600);
             delay(100);
             beginBase();
         }
         
-        // Implement serial interface for Arduino Serial1
+        /** @brief Send raw bytes to the TTL link (Serial1). */
         void serialSend(const char* data) override {
             Serial1.print(data);
         }
-        
-        // RX plumb
+        /** @brief @return true if bytes are available on Serial1 RX. */
         bool serialAvailable()  override { return Serial1.available(); }
+        /** @brief Read one byte from Serial1 RX. */
         char serialRead()       override { return Serial1.read(); }
+        /** @brief Peek next byte from Serial1 RX without consuming. */
         int  serialPeek()       override { return Serial1.peek(); }
         
-        // RX: parse commands from CC, no prints here
-        void onMessageReceived(const String& data) override {
-            sendMessage("ACK:OK");
+        /**
+         * @brief Frame handler: process decoded messages from ClearCore.
+         * @details Handles HELLO/READY handshakes, CMD;* control frames,
+         *          HB;* heartbeats, and ALARM;* events.
+         * @note Persists step/loop changes to SD for resume.
+         */
+        void onMessageReceived(const String& data) override;
 
-            // 1) Discovery / readiness
-            if (data.startsWith("HELLO;ID=CC")) {
-                // Peer is probing; reply READY (don't set ccReady_ here)
-                char line[64];
-                snprintf(line, sizeof(line), "READY;ID=XPB;VER=1.0;UPT=%lu",
-                        (unsigned long)millis());
-                sendMessage(line, MessageType::CRITICAL);
-                return;
-            }
-            if (data.startsWith("READY;ID=CC")) {
-                if (owner_) owner_->ccReady_ = true;
-                return;
-            }
-
-            // Assert switches if requested
-            if (data == "REQ:SW") {
-                if (owner_) owner_->publishSwitchState_(true);
-                return;
-            }
-
-            // ----- Unified command block -----
-            if (data.startsWith("CMD;") && owner_) {
-                // 1) RESET flow (may come with SECS)
-                String reset = kvGet(data, "RESET=");
-                if (reset.length()) {
-                    if (reset == "ARM") {
-                        int secs = kvGetIntClamped(data, "SECS=", 5, 1, 30);
-                        owner_->resetUiActive_    = true;
-                        owner_->resetUiSecs_      = (uint8_t)secs;
-                        owner_->resetUiRemaining_ = (uint8_t)secs;
-                        owner_->resetUiTmr_       = 0;     // start 1 Hz UI countdown
-                    }
-                    else if (reset == "CANCEL") {
-                        owner_->resetUiActive_ = false;
-                    }
-                    else if (reset == "EXEC") {
-                        // Reboot XPB now (watchdog)
-                        delay(5);
-                        xpbSoftResetNow();
-                    }
-                    // No return — allow other keys in the same frame to apply too.
-                }
-
-                // 2) Heater setpoint (°C)
-                String sSP = kvGet(data, "SP=");
-                if (sSP.length()) {
-                    owner_->setHeaterTarget(sSP.toFloat());
-                }
-
-                // 3) Display mode
-                String mode = kvGet(data, "MODE=");
-                if (mode.length()) {
-                    owner_->modeTorqueToggle_ = (mode == "TORQUE");
-                }
-
-                return;
-            }
-
-            // ----- Heartbeat from ClearCore (for LCD/status) -----
-            if (data.startsWith("HB;") && owner_) {
-                String sSTATE = kvGet(data, "STATE=");
-                String sE     = kvGet(data, "E=");
-                String sSTEP  = kvGet(data, "STEP=");
-                String sLOOP  = kvGet(data, "LOOP=");
-                String sAGE   = kvGet(data, "SW_AGE=");
-
-                if (sSTATE.length()) sSTATE.toCharArray(owner_->ccState_, sizeof(owner_->ccState_));
-                if (sE.length())     owner_->ccEstop_ = (sE.toInt() != 0);
-
-                // Robust E-STOP latch: honor E=1 OR STATE=="E-STOP"
-                bool estopFromE     = (sE.length() && sE.toInt() != 0);
-                bool estopFromState = (sSTATE == "E-STOP");
-                bool estop = estopFromE || estopFromState;
-
-                // Latch/clear ccEstop_ and manage alarm lifetime
-                owner_->ccEstop_ = estop;
-                if (!estop) {
-                    owner_->ccAlarmActive_ = false;
-                    owner_->ccAlarmMsg_[0] = '\0';
-                }
-                
-                if (sSTEP.length()) {
-                    long v = sSTEP.toInt();
-                    if (v < 0) v = 0; if (v > 255) v = 255;
-                    owner_->ccStep_ = (uint8_t)v;
-                }
-
-                if (sLOOP.length()) {
-                    int slash = sLOOP.indexOf('/');
-                    if (slash > 0) {
-                        const char *cstr = sLOOP.c_str();
-                        char *endp = nullptr;
-                        unsigned long cur = strtoul(cstr, &endp, 10);
-                        unsigned long tot = 0;
-                        if (endp && *endp == '/') tot = strtoul(endp + 1, nullptr, 10);
-                        owner_->ccLoopCur_ = (uint32_t)cur;
-                        owner_->ccLoopTot_ = (uint32_t)tot;
-                    }
-                }
-
-                if (sAGE.length()) owner_->ccSwAgeMs_ = (uint32_t)sAGE.toInt();
-                owner_->ccHbSeen_   = true;
-                owner_->ccHbAgeTmr_ = 0;
-                return;
-            }
-
-            // ----- Alarm from ClearCore (reasoned events like E-STOP) -----
-            if (data.startsWith("ALARM;") && owner_) {
-                String t = kvGet(data, "TYPE=");
-                String m = kvGet(data, "MSG=");
-                if (t == "ESTOP") {
-                    owner_->ccAlarmActive_ = true;
-                    if (m.length()) {
-                        m.toCharArray(owner_->ccAlarmMsg_, sizeof(owner_->ccAlarmMsg_));
-                    } else {
-                        strncpy(owner_->ccAlarmMsg_, "E-STOP asserted", sizeof(owner_->ccAlarmMsg_) - 1);
-                    }
-                }
-                return;
-            }
-
-
-            // else ignore quietly
-        }
-
-
-        
-        void onBadChecksum(const String& rawMsg) override {
-                ++badCrcCount_;
-                if ((badCrcCount_ % 10 == 1 && Serial)) {
-                    Serial.println("WARN: TTL bad checksum (rate-limited)");
-                }
-            }
+        /**
+         * @brief Callback for frames that fail checksum validation.
+         * @details Rate-limited warning printed to USB Serial for diagnostics.
+         */
+        void onBadChecksum(const String& rawMsg) override;
     
     protected:
+        /**
+         * @brief Optional USB log hook used by TTLComms for RX tracing.
+         */
         void usbLog(const char *s) override {
             if (Serial) Serial.println(s);
         }
@@ -320,29 +323,41 @@ private:
     ExpansionBoardTTL ttlComms_;
     elapsedMillis heartbeatTmr_;
 
+    // ---------- Heater control ----------
+    /**
+     * @brief Simple PID-based heater controller.
+     * @details Wraps PID_v1 with °C setpoint and 0–150 output range.
+     */
     class HeatingController {
     public:
+        /**
+         * @brief Construct with reference to comms (reserved forq future use).
+         */
         HeatingController(TTLComms &comms) 
         : comms_(comms), pid_(&pv_, &out_, &sp_, Kp_, Ki_, Kd_, DIRECT) {}
         
+        /**
+         * @brief Initialize PID (sample time 500ms, automatic mode, output 0–150).
+         */
         void begin() {
             pid_.SetSampleTime(500); // 0.5s
             pid_.SetMode(AUTOMATIC);
             pid_.SetOutputLimits(0, 150);
         }
 
-        void setTargetTemp(double celsius) {
-            sp_ = celsius;
-            active_ = (celsius > 0);
-        }
+        /**
+         * @brief Set the heater setpoint (°C). Zero disables output.
+         * @param celsius Target temperature in °C.
+         */
+        void setTargetTemp(double celsius);
 
-        bool compute (double processValue, int &outInt) {
-            pv_ = processValue;
-            if (!active_) { out_ = 0; outInt = 0; return true; }
-            bool did = pid_.Compute();
-            if (did) outInt = (int)lround(out_);
-            return did;
-        }
+        /**
+         * @brief Run one PID compute step.
+         * @param processValue Current PV in °C.
+         * @param outInt Output (0–150) written on successful compute.
+         * @return true if PID computed a new output this call.
+         */
+        bool compute (double processValue, int &outInt);
 
         int    lastOut()    const { return (int)lround(out_); }
         double setpoint()   const { return sp_; }

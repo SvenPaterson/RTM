@@ -68,6 +68,12 @@ public:
     ClearCoreRTM() : ttlComms_(this) {} // ctor
 
 private:
+    /* ——— XPB QUIESCE mask ——— */
+    /// @brief True when CC is intentionally ignoring XPB-stale during an XPB reboot window.
+    bool     xpbMaskActive_{false};
+    /// @brief Milliseconds timestamp when the XPB mask expires.
+    uint32_t xpbMaskUntilMs_{0};
+
     /* ——— comms health ——— */
     uint16_t hbSeq_ = 0;
     elapsedMillis statAgeTmr_;   // time since last fresh STAT from XPB
@@ -211,7 +217,10 @@ private:
 
             // 1) Discovery / readiness
             if (data.startsWith("HELLO;ID=XPB")) {
-                if (owner_) owner_->xpbBootSeen_ = true;   // NEW: treat HELLO as boot-seen
+                if (owner_) {
+                    owner_->xpbBootSeen_ = true;
+                    owner_->xpbMaskActive_ = false;                    
+                }
                 char line[64];
                 snprintf(line, sizeof(line), "READY;ID=CC;VER=1.0;UPT=%lu",
                         (unsigned long)Milliseconds());
@@ -219,9 +228,30 @@ private:
                 sendMessage("REQ:SW", MessageType::CRITICAL);
                 return;
             }
+
             if (data.startsWith("READY;ID=XPB")) {
-                if (owner_) owner_->xpbBootSeen_ = true;  // reuse this flag for "XPB is ready"
-                // You can also send REQ:SW here if you didn’t send it above.
+                if (owner_) {
+                    owner_->xpbBootSeen_ = true;
+                    owner_->xpbMaskActive_ = false;                    
+                }
+                return;
+            }
+
+            if (data.startsWith("QUIESCE;")) {                         
+                int reqSecs = kvGetIntClamped(data, "SECS=", 10, 1, 60);
+                // clamp 3..15s, 10s typical
+                int maskSecs = reqSecs;
+                if (maskSecs < 3)  maskSecs = 3;
+                if (maskSecs > 15) maskSecs = 15;
+
+                if (owner_) {
+                    owner_->xpbMaskActive_  = true;
+                    owner_->xpbMaskUntilMs_ = Milliseconds() + (uint32_t)maskSecs * 1000UL;
+                    owner_->dbgln("[QUIESCE] XPB mask started");
+                }
+                char ack[40];
+                snprintf(ack, sizeof(ack), "ACK;QUIESCE=OK;MASK=%d", maskSecs);
+                sendMessage(ack, MessageType::CRITICAL);
                 return;
             }
 
@@ -233,6 +263,8 @@ private:
                     owner_->runActiveRemote_   = (run != 0);
                     owner_->resetActiveRemote_ = (rst != 0);
                     owner_->swLastUpdateMs_    = Milliseconds();
+                    owner_->dbg("[SW←XPB] run="); owner_->dbgkv("", (unsigned long)run);
+                    owner_->dbg(" rst=");         owner_->dbgkv("", (unsigned long)rst);
                 }
                 return;
             }

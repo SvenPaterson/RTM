@@ -6,7 +6,7 @@
 // 05/05/25: Added SD card support
 // 05/08/25: Converted logic to
 
-#include "ClearCore-RTM.h"
+#include "ClearCoreRTM.h"
 
 ClearCoreRTM gCtrl;
 

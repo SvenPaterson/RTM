@@ -39,6 +39,9 @@ public:
     // probably not needed, or move to universal TTLComms definition
     virtual void onMessageReceived(const String& data) = 0;
     virtual void onBadChecksum(const String& rawMsg) = 0;
+
+    // TEST ONLY: inject decoded frame straight to handler
+    void testInject(const String &frame) { onMessageReceived(frame); }
     
 protected:
     // Common message processing
