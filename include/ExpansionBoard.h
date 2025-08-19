@@ -106,8 +106,22 @@ private:
     uint8_t  ccStep_ = 0;
     uint32_t ccLoopCur_ = 0, ccLoopTot_ = 0;
     uint32_t ccSwAgeMs_ = 0;
-    bool     ccEstop_ = false;
+    bool     ccEstop_ = false; // probably not needed
+    uint8_t  ccEstopCode_ = 0;   // raw E_CODE bitmask from CC
     uint16_t ccHbSeqPrev_ = 0, ccHbSeq_ = 0;
+
+    /**
+     * @brief Prints eStop cause to text
+     * @param e eCode
+     * @param out char array to print text
+     */
+    static void ecodeToText(uint8_t e, char *out, size_t n = LCDDriver::kNumCols) {
+        // keep it brief; list first matching cause
+        if (e & 0x02) { snprintf(out, n, "Safety input"); return; }
+        if (e & 0x01) { snprintf(out, n, "XPB comms stale"); return; }
+        snprintf(out, n, "Unknown (0x%02X)", e);
+    }
+
 
     // ---------- Pins ----------
     static constexpr uint8_t LCD_CS_      = 8;
@@ -124,7 +138,7 @@ private:
      * @brief Publish debounced RUN/RESET switch state to ClearCore.
      * @param force When true, publish regardless of last sent state.
      */
-    void publishSwitchState_(bool force = false);
+    void publishSwitchState_(bool force = false, int ref = -1);
     uint32_t lastSwPublishMs_ = 0;
 
     // ---------- SD / Protocol ----------
@@ -279,6 +293,8 @@ private:
         void begin() {
             Serial1.begin(9600);
             delay(100);
+            // flush garbage
+            while (Serial1.available()) { Serial1.read(); }
             beginBase();
         }
         

@@ -2,7 +2,8 @@
 #include <Arduino.h>
 #include <SPI.h>
 
-#define XPB_INJECT_FROM_USB 1
+#define XPB_INJECT_FROM_USB 0
+
 
 void xpbSoftResetNow() {
     #if defined(__AVR_ATmega4809__) || defined(ARDUINO_AVR_NANO_EVERY)
@@ -213,8 +214,17 @@ namespace {  // anonymous namespace: TU-private helpers for Resume logic
  */
 bool ExpansionBoard::begin() {
     Serial.begin(9600);
-    unsigned long t0 = millis();
-    while (!Serial && (millis() - t0 < 5000)) { /* spin */ }
+
+    // ---- USB console attach policy ----
+    // Default: no wait. Nano Every auto-resets on USB/DTR anyway.
+    // If you use a terminal that does NOT toggle DTR and want early logs, build with -DXPB_WAIT_USB_MS=2000.
+    #ifndef XPB_WAIT_USB_MS
+    #define XPB_WAIT_USB_MS 0
+    #endif
+    if (XPB_WAIT_USB_MS > 0) {
+        unsigned long t0 = millis();
+        while (!Serial && (millis() - t0 < XPB_WAIT_USB_MS)) { /* spin */ }
+    }
     dbgln("\nUSB Serial Monitor Connected!");
 
     // UART to ClearCore (not on SPI) – safe to bring up early
@@ -222,6 +232,8 @@ bool ExpansionBoard::begin() {
     ttlComms_.setRxUsbLogging(true, "CC"); // toggle by sending LOG=0 / LOG=1
     delay(200);
     dbgln("Connecting with CC..");
+    // Ask CC to suppress stale-STAT E-STOP while XPB finishes boot work
+    ttlComms_.sendCommand("QUIESCE;SECS=10");
 
     // --- SPI bus & SD first (prevents other devices from holding MISO) ---
     spiQuiesceAll_();
@@ -289,10 +301,20 @@ bool ExpansionBoard::begin() {
             } else {
                 char rb[64];
                 snprintf(rb, sizeof(rb), "Resume available: step=%u loop=%u",
-                         (unsigned)storedStep_, (unsigned)storedLoopCur_);
+                        (unsigned)storedStep_, (unsigned)storedLoopCur_);
                 dbgln(rb);
             }
         }
+        // Scrub "virgin" resume (created before any real run)
+        // i.e., step=1 loop=1 for the same PHASH
+        if (haveStoredResume_ && storedPhash_ == progHash_) {
+            if (storedStep_ <= 1 && storedLoopCur_ <= 1) {
+                dbgln("Resume looks virgin (step=1 loop=1) -> clearing");
+                clearResumeTU();
+                haveStoredResume_ = false;
+            }
+        }
+
     } else {
         dbgln("SD not available; skipping protocol/resume load");
     }
@@ -315,14 +337,11 @@ bool ExpansionBoard::begin() {
         ttlComms_.checkRetries();
     } */
 
-    if (!ccReady_) {
-        dbgln("WARN: ClearCore not ready; continuing without link.");
-        lcd_.setLineCenter(2, "No CC link!!");
-    } else {
-        dbgln("ClearCore READY");
-        lcd_.setLineCenter(2, "ClearCore READY");
-    }
-    lcd_.flush();
+    // Don’t warn here. We’ll show an info message only if there’s truly no CC traffic after 10s.
+    ccAnySeen_ = false;
+    warnedNoLink_ = false;
+    sinceBoot = 0;
+    dbgln("Awaiting CC traffic...");
 
     // DEBUGGING ONLY
     heater_.begin();                 // maybe only when a test / preheat starts?
@@ -346,13 +365,12 @@ void ExpansionBoard::tick() {
     ttlComms_.checkForMessages();
     ttlComms_.checkRetries();
 
-    if (!ccAnySeen_ && !warnedNoLink_ && sinceBoot > 10000) {   // 10s feels less racy
+    // Soft "no link yet" note after 10s with no CC traffic at all
+    if (!ccAnySeen_ && !warnedNoLink_ && sinceBoot > 10000) {
         warnedNoLink_ = true;
-        dbgln("INFO: No CC traffic yet (>10s). Continuing; will auto-hide on first message.");
-        lcd_.setLineCenter(2, "Waiting for CC...");
-        lcd_.flush();
+        dbgln("INFO: No CC traffic yet (>10s). Continuing without link.");
+        // UI stays on the normal "Connecting" page you already render.
     }
-
 
     // ----- USB injection / commands -----
     #ifdef XPB_INJECT_FROM_USB
@@ -497,21 +515,13 @@ void ExpansionBoard::tick() {
     }
 
     // STAT heartbeat to ClearCore
-    if (heartbeatTmr_ >= 2000) {
+    if (heartbeatTmr_ >= 1000) {
         heartbeatTmr_ = 0;
         char line[80];
         const int out = heater_.lastOut();
         snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d", hbSeq_++, out);
-        ttlComms_.sendMessage(line, MessageType::IMPORTANT);
-        ttlComms_.checkForMessages(); // receive fast ACK
+        ttlComms_.sendMessage(line, MessageType::INFO);
     }
-    /* // check to see if CC is linked
-    if (!ccReady_ && !ccHbSeen_ && !warnedNoLink_ && sinceBoot > 8000) {
-        warnedNoLink_ = true;
-        dbgln("WARN: ClearCore not ready; continuing without link.");
-        lcd_.setLineCenter(2, "No CC link!!");
-        lcd_.flush();
-    } */
 
     // ----- UI DECISION (exactly one page per tick) -----
     UiPage page;
@@ -620,8 +630,14 @@ void ExpansionBoard::renderUi_(UiPage page) {
             break;
 
         case UiPage::EStop:
-            lcd_.setLineCenter(0, "!!! E-STOP !!!");
-            lcd_.setLineCenter(1, ccAlarmActive_ ? ccAlarmMsg_ : (char*)"Fault asserted");
+            lcd_.setLineCenter(0, ccAlarmActive_ ? "ALARM:" : "!!! E-STOP !!!");
+            if (ccAlarmActive_ && ccAlarmMsg_[0]) {
+                lcd_.setLineCenter(1, ccAlarmMsg_);
+            } else {
+                char line[21];
+                ecodeToText(ccEstop_, line);
+                lcd_.setLineCenter(1, line);
+            }
             lcd_.setLineCenter(2, "Reset on controller");
             lcd_.setLineCenter(3, "to clear alarm");
             break;
@@ -650,13 +666,13 @@ void ExpansionBoard::renderUi_(UiPage page) {
 
     if (entering) {
         const char* name =
-            page == UiPage::Connecting   ? "Connecting"  :
-            page == UiPage::Resetting    ? "Resetting"   :
-            page == UiPage::LostComms    ? "LostComms"   :
-            page == UiPage::EStop        ? "EStop"       :
-            page == UiPage::ResumePrompt ? "Resume?"     :
-            page == UiPage::ResetCountdown? "ResetCount" :
-                                            "Normal";
+            page == UiPage::Connecting     ? "Connecting"  :
+            page == UiPage::Resetting      ? "Resetting"   :
+            page == UiPage::LostComms      ? "LostComms"   :
+            page == UiPage::EStop          ? "EStop"       :
+            page == UiPage::ResumePrompt   ? "Resume?"     :
+            page == UiPage::ResetCountdown ? "ResetCount"  :
+                                             "Normal";
         char pg[16]; snprintf(pg, sizeof(pg), "[UI]%s", name);
         dbgln(pg);
     }
@@ -737,7 +753,7 @@ void ExpansionBoard::renderNormal_() {
  * @brief Publish RUN/RESET state with optional forcing.
  * @copydetails ExpansionBoard::publishSwitchState_()
  */
-void ExpansionBoard::publishSwitchState_(bool force) {
+void ExpansionBoard::publishSwitchState_(bool force, int ref = -1) {
     int runActive   = (runSw_.read()   == LOW) ? 1 : 0;
     int resetActive = (resetSw_.read() == LOW) ? 1 : 0;
 
@@ -747,9 +763,13 @@ void ExpansionBoard::publishSwitchState_(bool force) {
     lastRun = runActive;
     lastReset = resetActive;
 
-    char msg[32];
-    snprintf(msg, sizeof(msg), "SW;RUN=%d;RST=%d", runActive, resetActive);
-    ttlComms_.sendMessage(msg, MessageType::CRITICAL);
+    char msg[40];
+    if (ref >= 0) {
+        snprintf(msg, sizeof(msg), "SW;RUN=%d;RST=%d;REF=%d", runActive, resetActive, ref);
+    } else {
+        snprintf(msg, sizeof(msg), "SW;RUN=%d;RST=%d", runActive, resetActive);
+    }
+    ttlComms_.sendMessage(msg, MessageType::INFO);   // telemetry / response; no ACK expected
 
     lastSwPublishMs_ = millis();
 }
@@ -901,11 +921,35 @@ void ExpansionBoard::logProtocol_() const {
  * @brief Handle decoded TTL frames from ClearCore and update owner state.
  * @copydetails ExpansionBoard::ExpansionBoardTTL::onMessageReceived()
  */
-void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
-    sendMessage("ACK:OK");
+/* void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
+    // ---- XPB RX ACK policy (strict) ----
+    const int refPos = data.indexOf(F(";REF="));
+    const uint16_t ref = refPos > 0 ? (uint16_t)data.substring(refPos + 5).toInt() : 0;
 
-    if (owner_ && !owner_->usbInjecting_) {
-        owner_->ccAnySeen_ = true;
+    // 0) Telemetry / one-way notices: NEVER ACK here
+    if (data.startsWith("HB;") || data.startsWith("STAT;") ||
+        data.startsWith("NOTICE;") || data.startsWith("READY;")) {
+        // fall through to existing parsing
+    }
+
+    // 1) Request/Response: REQ:SW → reply SW;... (reply = the ACK)
+    else if (data.startsWith("REQ:SW")) {
+        int ref = -1;
+        const int pos = data.indexOf(F(";REF="));
+        if (pos > 0) ref = data.substring(pos + 5).toInt();
+        if (owner_) owner_->publishSwitchState_(true, ref);
+        return;  // important: don't also send an ACK
+    }
+
+    // 2) Commands from CC → ACK once (mirror REF if present)
+    else if (data.startsWith("CMD;") || data.startsWith("QUIESCE;") || data.startsWith("RESUME?")) {
+        if (ref) {
+            char ack[28]; snprintf(ack, sizeof(ack), "ACK;OK;REF=%u", ref);
+            sendMessage(ack, MessageType::INFO);  // ACKs are not ACKed
+        } else {
+            sendMessage("ACK;OK", MessageType::INFO);
+        }
+        // continue into your existing command handling...
     }
 
     // trace
@@ -917,6 +961,9 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
     }
 
     // Swallow REAL CC HB during SIM-hold
+    if (owner_ && !owner_->usbInjecting_) {
+        owner_->ccAnySeen_ = true;
+    }
     if (owner_ && owner_->usbSimHold_ && !owner_->usbInjecting_ && data.startsWith("HB;")) {
         owner_->ccHbSeen_ = true; owner_->ccHbAgeTmr_ = 0;
         owner_->dbgln("[SIM] swallowed REAL CC HB");
@@ -932,7 +979,7 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
             char line[64];
             snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d",
                     owner_->hbSeq_++, owner_->heater_.lastOut());
-            sendMessage(line, MessageType::IMPORTANT);
+            sendMessage(line, MessageType::INFO);
 
             // also publish switches so CC sees the current RUN/RST right away
             owner_->publishSwitchState_(true);
@@ -950,13 +997,21 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
         return;
     }
 
-    // Assert switches if requested
-    if (data == "REQ:SW") {
-        if (owner_) owner_->publishSwitchState_(true);
-        return;
+    // ----- Unified command block -----
+    if (data.startsWith("CMD;") || data.startsWith("QUIESCE;") || data.startsWith("RESUME?")) {
+        // ACK once here (mirror REF if present)
+        int ref = -1;
+        const int pos = data.indexOf(F(";REF="));
+        if (pos > 0) ref = data.substring(pos + 5).toInt();
+
+        if (ref >= 0) {
+            char ack[28]; snprintf(ack, sizeof(ack), "ACK;OK;REF=%d", ref);
+            sendMessage(ack, MessageType::INFO);
+        } else {
+            sendMessage("ACK;OK", MessageType::INFO);
+        }
     }
 
-    // ----- Unified command block -----
     if (data.startsWith("CMD;") && owner_) {
         String reset = kvGet(data, "RESET=");
         if (reset.length()) {
@@ -979,7 +1034,7 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                 bool ok = saveResumeTU(ph, stepSnap, loopCurSnap, loopTotSnap);
                 owner_->dbgln(ok ? "[RESUME] snapshot saved" : "[RESUME] snapshot SAVE FAILED");
 
-                // 2) Ask CC to mask XPB-stale for ~10s (bounded to 3..15s on CC)
+                // 2) Ask CC to mask XPB-stale for ~10s (bounded to 3 to 15s on CC)
                 {
                     char q[96];
                     snprintf(q, sizeof(q),
@@ -989,7 +1044,7 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                              (unsigned)loopCurSnap,
                              (unsigned)loopTotSnap,
                              (unsigned long)ph);
-                    sendMessage(q, MessageType::CRITICAL);
+                    sendCommand(q, MessageType::CRITICAL);
 
                     // Best-effort: pump for an ACK for ~200 ms
                     uint32_t tWait = millis();
@@ -1006,7 +1061,7 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                 delay(12);
 
                 // 4) Notify CC, then reset us
-                sendMessage("NOTICE;XPB_RESET=NOW", MessageType::CRITICAL);
+                sendMessage("NOTICE;XPB_RESET=NOW", MessageType::NORMAL);
                 delay(5);
                 xpbSoftResetNow();
             }
@@ -1036,45 +1091,35 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
             return;
         }
 
-        // Parse
+        // Parse HB
         String sSTATE = kvGet(data, "STATE=");
         if (sSTATE == "RUNNING") owner_->everRan_ = true;
-        String sE     = kvGet(data, "E=");
-        String sSTEP  = kvGet(data, "STEP=");
-        String sLOOP  = kvGet(data, "LOOP=");
-        String sAGE   = kvGet(data, "SW_AGE=");
-
-        // Mark link ready on first valid HB
-        if (!owner_->ccReady_) {
-            owner_->ccReady_ = true;
-
-            // If there’s a stashed resume, prompt now (don’t rely on READY)
-            if (owner_->haveStoredResume_ && !owner_->suppressResumePrompt_ && !owner_->uiPendingResume_) {
-                char line[64];
-                snprintf(line, sizeof(line), "RESUME?;STEP=%u;LOOP=%u;PHASH=%lu",
-                        (unsigned)owner_->storedStep_,
-                        (unsigned)owner_->storedLoopCur_,
-                        (unsigned long)owner_->storedPhash_);
-                sendMessage(line, MessageType::CRITICAL);
-                owner_->uiPendingResume_ = true;  // avoid re-sending on every HB
-            }
-        }
-
         if (sSTATE.length()) sSTATE.toCharArray(owner_->ccState_, sizeof(owner_->ccState_));
-
-        const bool estop = (sE.length() && sE.toInt() != 0) || (sSTATE == "E-STOP");
-        owner_->ccEstop_ = estop;
-        if (!estop) {
+        
+        String sECODE  = kvGet(data, "E_CODE=");
+        if (sECODE.length()) {
+            long v = sECODE.toInt();
+            if (v < 0) v = 0; if (v > 255) v = 255;
+            owner_->ccEstopCode_ = (uint8_t)v;
+        } else {
+            owner_->ccEstopCode_ = 0;  // backward-compat if field absent
+        }
+        // Derive estop from E_CODE
+        const bool estopNow = (owner_->ccEstopCode_ != 0);
+        owner_->ccEstop_ = estopNow;
+        if (!estopNow) {
             owner_->ccAlarmActive_ = false;
             owner_->ccAlarmMsg_[0] = '\0';
         }
-
+        
+        String sSTEP  = kvGet(data, "STEP=");
         if (sSTEP.length()) {
             long v = sSTEP.toInt();
             if (v < 0) v = 0; if (v > 255) v = 255;
             owner_->ccStep_ = (uint8_t)v;         // CC publishes 1-based; show as-is
         }
-
+        
+        String sLOOP  = kvGet(data, "LOOP=");
         if (sLOOP.length()) {
             int slash = sLOOP.indexOf('/');
             if (slash > 0) {
@@ -1087,8 +1132,30 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                 owner_->ccLoopTot_ = (uint32_t)tot;
             }
         }
-
+        
+        String sAGE   = kvGet(data, "SW_AGE=");
         if (sAGE.length()) owner_->ccSwAgeMs_ = (uint32_t)sAGE.toInt();
+        // END parse HB
+
+        // One-time "ready" if HB arrived before READY (common on some boots)
+        if (!owner_->ccReady_) {
+            owner_->ccReady_ = true;
+
+            // send initial STAT so CC immediately sees our OUT
+            char line[64];
+            snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d", owner_->hbSeq_++, owner_->heater_.lastOut());
+            sendMessage(line, MessageType::INFO);
+
+            // Offer resume if we truly have one (and haven't already asked)
+            if (owner_->haveStoredResume_ && !owner_->suppressResumePrompt_ && !owner_->uiPendingResume_) {
+                snprintf(line, sizeof(line), "RESUME?;STEP=%u;LOOP=%u;PHASH=%lu",
+                        (unsigned)owner_->storedStep_,
+                        (unsigned)owner_->storedLoopCur_,
+                        (unsigned long)owner_->storedPhash_);
+                sendMessage(line, MessageType::CRITICAL);
+                owner_->uiPendingResume_ = true;
+            }
+        }
 
         owner_->ccHbSeen_   = true;
         owner_->ccHbAgeTmr_ = 0;
@@ -1103,17 +1170,253 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
             (void)saveResumeTU(ph, stepNow, loopNow, (uint16_t)owner_->ccLoopTot_);
         }
 
-        // >>> Unambiguous proof the branch ran and applied:
-        owner_->dbg("[HB] parsed STATE=");
-        owner_->dbg(owner_->ccState_);
-        owner_->dbg(" STEP=");  owner_->dbgkv("", (unsigned long)owner_->ccStep_);
-        owner_->dbg(" LOOP=");  owner_->dbgkv("", (unsigned long)owner_->ccLoopCur_);
+        return;
+    } 
+
+    // ----- Alarm from ClearCore -----
+    if (data.startsWith("ALARM;") && owner_) {
+        String t = kvGet(data, "TYPE=");
+        String m = kvGet(data, "MSG=");
+        if (t == "ESTOP") {
+            owner_->ccAlarmActive_ = true;
+            if (m.length()) {
+                m.toCharArray(owner_->ccAlarmMsg_, sizeof(owner_->ccAlarmMsg_));
+            } else {
+                strncpy(owner_->ccAlarmMsg_, "E-STOP asserted", sizeof(owner_->ccAlarmMsg_) - 1);
+            }
+        }
+        return;
+    }
+
+    // else ignore quietly
+}*/
+
+/**
+ * @brief Handle decoded TTL frames from ClearCore and update owner state.
+ */
+void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
+    // === centralize REF detection; use presence, not value ===
+    const int refPos = data.indexOf(F(";REF="));              
+    const bool hasRef = (refPos > 0);                         
+    const uint16_t refVal = hasRef ?                         
+        (uint16_t)data.substring(refPos + 5).toInt() : 0;     
+
+    // Mark that we've seen any CC traffic (for "no link" note)
+    if (owner_ && !owner_->usbInjecting_) {            
+        owner_->ccAnySeen_ = true;
+    }
+
+    // ===== Policy: never ACK telemetry/one-way notices here =====
+    // We fall through to dedicated handlers below.
+    // HB/STAT/NOTICE/READY are processed later; no ACK emitted here.
+
+    // Swallow REAL CC HB during SIM-hold (USB injection drives UI)
+    if (owner_ && owner_->usbSimHold_ && !owner_->usbInjecting_ && data.startsWith("HB;")) {
+        owner_->ccHbSeen_ = true; owner_->ccHbAgeTmr_ = 0;
+        owner_->dbgln("[SIM] swallowed REAL CC HB");
+        return;
+    }
+
+    // ===== READY from CC =====
+    if (data.startsWith("READY;ID=CC")) {
+        if (owner_) {
+            owner_->ccReady_ = true;
+
+            // Tell CC our current heater OUT immediately (telemetry; no ACK)
+            char line[64];
+            snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d",
+                     owner_->hbSeq_++, owner_->heater_.lastOut());
+            sendMessage(line, MessageType::INFO);             
+
+            // Also publish switches so CC sees the current RUN/RST right away (unsolicited)
+            owner_->publishSwitchState_(true);                
+
+            // Optional resume prompt to CC (notice; no ACK expected)
+            if (owner_->haveStoredResume_ && !owner_->suppressResumePrompt_) {
+                snprintf(line, sizeof(line), "RESUME?;STEP=%u;LOOP=%u;PHASH=%lu",
+                         (unsigned)owner_->storedStep_,
+                         (unsigned)owner_->storedLoopCur_,
+                         (unsigned long)owner_->storedPhash_);
+                sendMessage(line, MessageType::NORMAL);
+                owner_->uiPendingResume_ = true;
+            }
+        }
+        return;
+    }
+
+    // ===== Request/Response: REQ:SW → reply with SW;... (the reply *is* the ACK) =====
+    if (data.startsWith("REQ:SW")) { 
+        if (owner_) owner_->publishSwitchState_(true, hasRef ? (int)refVal : -1); 
+        return;  // important: do NOT send a separate ACK    
+    }
+
+    // ===== Commands from CC → send exactly one ACK; mirror REF if present =====
+    // (We keep commands here—NOT at the top—so ACK happens once, then we run handlers.)
+    if (data.startsWith("CMD;") || data.startsWith("QUIESCE;")) {
+        if (hasRef) {
+            char ack[28]; snprintf(ack, sizeof(ack), "ACK;OK;REF=%u", refVal);
+            sendMessage(ack, MessageType::INFO);
+        } else {
+            sendMessage("ACK;OK", MessageType::INFO);
+        }
+
+        // --- CMD;... handling ---
+        if (data.startsWith("CMD;") && owner_) {
+            String reset = kvGet(data, "RESET=");
+            if (reset.length()) {
+                if (reset == "ARM") {
+                    int secs = kvGetIntClamped(data, "SECS=", 5, 1, 30);
+                    owner_->resetUiActive_    = true;
+                    owner_->resetUiSecs_      = (uint8_t)secs;
+                    owner_->resetUiRemaining_ = (uint8_t)secs;
+                    owner_->resetUiTmr_       = 0;
+                }
+                else if (reset == "CANCEL") {
+                    owner_->resetUiActive_ = false;
+                }
+                else if (reset == "EXEC") {
+                    // 1) Persist resume snapshot
+                    const uint16_t stepSnap    = owner_->ccStep_;
+                    const uint16_t loopCurSnap = (uint16_t)owner_->ccLoopCur_;
+                    const uint16_t loopTotSnap = (uint16_t)owner_->ccLoopTot_;
+                    const uint32_t ph          = owner_->progHash_;
+                    bool ok = saveResumeTU(ph, stepSnap, loopCurSnap, loopTotSnap);
+                    owner_->dbgln(ok ? "[RESUME] snapshot saved" : "[RESUME] snapshot SAVE FAILED");
+
+                    // 2) Ask CC to mask XPB-stale for ~10s (bounded to 3..15s on CC)
+                    {
+                        char q[96];
+                        snprintf(q, sizeof(q),
+                                 "QUIESCE;WHO=XPB;SECS=%d;STEP=%u;LOOP=%u/%u;PHASH=%lu",
+                                 10,
+                                 (unsigned)stepSnap,
+                                 (unsigned)loopCurSnap,
+                                 (unsigned)loopTotSnap,
+                                 (unsigned long)ph);
+                        sendCommand(q, MessageType::CRITICAL);
+
+                        // Best-effort: pump for an ACK for ~200 ms
+                        uint32_t tWait = millis();
+                        while ((uint32_t)(millis() - tWait) < 200U) {
+                            owner_->ttlComms_.checkForMessages();
+                            owner_->ttlComms_.checkRetries();
+                            delay(2);
+                        }
+                    }
+
+                    // 3) Mark intentional XPB reset, give SD a moment
+                    bool fOK = writeResetFlagTU();
+                    owner_->dbgln(fOK ? "[RESET] flag write OK" : "[RESET] flag write FAIL");
+                    delay(12);
+
+                    // 4) Notify CC, then reset us (notice; no ACK expected)
+                    sendMessage("NOTICE;XPB_RESET=NOW", MessageType::NORMAL);
+                    delay(5);
+                    xpbSoftResetNow();
+                }
+            }
+
+            String sSP = kvGet(data, "SP=");
+            if (sSP.length()) {
+                owner_->setHeaterTarget(sSP.toFloat());
+            }
+
+            String mode = kvGet(data, "MODE=");
+            if (mode.length()) {
+                owner_->modeTorqueToggle_ = (mode == "TORQUE");
+            }
+            return;
+        }
+
+        // --- QUIESCE;... from CC (if you later want semantics, add here) ---
+        return;                                                            
+    }
+
+    // ===== Heartbeat from ClearCore =====
+    if (data.startsWith("HB;") && owner_) {
+        // Parse HB
+        String sSTATE = kvGet(data, "STATE=");
+        if (sSTATE == "RUNNING") owner_->everRan_ = true;
+        if (sSTATE.length()) sSTATE.toCharArray(owner_->ccState_, sizeof(owner_->ccState_));
+
+        // E_CODE-based estop
+        String sECODE  = kvGet(data, "E_CODE=");
+        if (sECODE.length()) {
+            long v = sECODE.toInt();
+            if (v < 0) v = 0; if (v > 255) v = 255;
+            owner_->ccEstopCode_ = (uint8_t)v;
+        } else {
+            owner_->ccEstopCode_ = 0;  // backward-compat if field absent
+        }
+        const bool estopNow = (owner_->ccEstopCode_ != 0);
+        owner_->ccEstop_ = estopNow;
+        if (!estopNow) {
+            owner_->ccAlarmActive_ = false;
+            owner_->ccAlarmMsg_[0] = '\0';
+        }
+
+        String sSTEP  = kvGet(data, "STEP=");
+        if (sSTEP.length()) {
+            long v = sSTEP.toInt();
+            if (v < 0) v = 0; if (v > 255) v = 255;
+            owner_->ccStep_ = (uint8_t)v;         // CC publishes 1-based; show as-is
+        }
+
+        String sLOOP  = kvGet(data, "LOOP=");
+        if (sLOOP.length()) {
+            int slash = sLOOP.indexOf('/');
+            if (slash > 0) {
+                const char *cstr = sLOOP.c_str();
+                char *endp = nullptr;
+                unsigned long cur = strtoul(cstr, &endp, 10);
+                unsigned long tot = 0;
+                if (endp && *endp == '/') tot = strtoul(endp + 1, nullptr, 10);
+                owner_->ccLoopCur_ = (uint32_t)cur;
+                owner_->ccLoopTot_ = (uint32_t)tot;
+            }
+        }
+
+        String sAGE   = kvGet(data, "SW_AGE=");
+        if (sAGE.length()) owner_->ccSwAgeMs_ = (uint32_t)sAGE.toInt();
+
+        // One-time "ready" if HB arrived before READY (common on some boots)
+        if (!owner_->ccReady_) {
+            owner_->ccReady_ = true;
+
+            // send initial STAT so CC immediately sees our OUT (telemetry; no ACK)
+            char line[64];
+            snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d",
+                     owner_->hbSeq_++, owner_->heater_.lastOut());
+            sendMessage(line, MessageType::INFO);
+
+            // Offer resume if we truly have one (notice; no ACK)
+            if (owner_->haveStoredResume_ && !owner_->suppressResumePrompt_ && !owner_->uiPendingResume_) {
+                snprintf(line, sizeof(line), "RESUME?;STEP=%u;LOOP=%u;PHASH=%lu",
+                         (unsigned)owner_->storedStep_,
+                         (unsigned)owner_->storedLoopCur_,
+                         (unsigned long)owner_->storedPhash_);
+                sendMessage(line, MessageType::NORMAL);
+                owner_->uiPendingResume_ = true;
+            }
+        }
+
+        owner_->ccHbSeen_   = true;
+        owner_->ccHbAgeTmr_ = 0;
+
+        // Persist resume point only when STEP/LOOP change
+        static uint16_t lastStep = 0xFFFF, lastLoop = 0xFFFF;
+        const uint16_t stepNow = owner_->ccStep_;
+        const uint16_t loopNow = (uint16_t)owner_->ccLoopCur_;
+        if (owner_->everRan_ && (stepNow != lastStep || loopNow != lastLoop)) {
+            lastStep = stepNow; lastLoop = loopNow;
+            const uint32_t ph = owner_->storedPhash_ ? owner_->storedPhash_ : owner_->progHash_;
+            (void)saveResumeTU(ph, stepNow, loopNow, (uint16_t)owner_->ccLoopTot_);
+        }
 
         return;
     }
 
-
-    // ----- Alarm from ClearCore -----
+    // ===== Alarm from ClearCore =====
     if (data.startsWith("ALARM;") && owner_) {
         String t = kvGet(data, "TYPE=");
         String m = kvGet(data, "MSG=");

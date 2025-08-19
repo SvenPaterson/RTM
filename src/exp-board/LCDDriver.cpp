@@ -123,11 +123,12 @@ void LCDDriver::sendCommand(uint8_t cmd, const uint8_t* params, uint8_t paramLen
         SPI.transfer(params[i]);
     }
 
-    uint16_t execTime = getExecTime_ms(cmd);
-    if (execTime >= 1000) {
-        delay(execTime / 1000);
-    } else {
-        delayMicroseconds(execTime);
+    uint16_t us = getExecTime_us(cmd);
+    if (us >= 1000) {
+        delay(us / 1000);                  // whole milliseconds
+    }
+    if (us % 1000) {
+        delayMicroseconds(us % 1000);      // remaining microseconds (prevents truncation)
     }
 
     SPI.endTransaction();
@@ -147,7 +148,7 @@ void LCDDriver::sendData(const char* data, size_t len) {
     digitalWrite(LCD_CS_, HIGH);
 }
 
-uint16_t LCDDriver::getExecTime_ms(uint8_t cmd) const {
+uint16_t LCDDriver::getExecTime_us(uint8_t cmd) const {
     switch (cmd) {
         case 0x70: return 4000;   // Display Firmware
         case 0x46: case 0x47: case 0x48: case 0x51: return 1500;  // 1.5ms commands

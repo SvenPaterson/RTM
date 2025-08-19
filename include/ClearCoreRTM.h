@@ -116,6 +116,14 @@ private:
         EStop
     };
 
+    // --- E-STOP reason tracking (bitmask) ---
+    enum : uint8_t {
+        ESTOP_STALE_STAT = 0x01,    // comms stale: no STAT from XPB
+        ESTOP_SAFETY     = 0x02,    // hardware safety chain
+        // future: ESTOP_OVERTEMP = 0x04, ...
+    };
+    uint8_t estopReason_ { 0 };
+
     /* ——— user input ——— */
     bool        runActiveRemote_   = false;
     bool        resetActiveRemote_ = false;
@@ -191,12 +199,17 @@ private:
             ConnectorCOM1.Mode(Connector::TTL);
             ConnectorCOM1.Speed(9600);
             ConnectorCOM1.PortOpen();
+            Delay_ms(30);
+            while (ConnectorCOM1.AvailableForRead() > 0) {
+                ConnectorCOM1.CharGet();
+            }
             beginBase();
         }
         
         // Implement serial interface for ClearCore COM1
         void serialSend(const char* data) override {
             ConnectorCOM1.Send(data);
+            //ConnectorCOM1.Flush(); // ensure CRLF is sent
         }
         
         bool serialAvailable() override {
@@ -212,8 +225,10 @@ private:
         }
         
         // Handle received messages
-        void onMessageReceived(const String& data) override {
-            sendMessage("ACK:OK");
+        /* void onMessageReceived(const String& data) override {
+            if (!data.startsWith("STAT;")) {
+                 sendMessage("ACK:OK");
+             }
 
             // 1) Discovery / readiness
             if (data.startsWith("HELLO;ID=XPB")) {
@@ -239,7 +254,7 @@ private:
 
             if (data.startsWith("QUIESCE;")) {                         
                 int reqSecs = kvGetIntClamped(data, "SECS=", 10, 1, 60);
-                // clamp 3..15s, 10s typical
+                // clamp 3 to 15s, 10s typical
                 int maskSecs = reqSecs;
                 if (maskSecs < 3)  maskSecs = 3;
                 if (maskSecs > 15) maskSecs = 15;
@@ -278,25 +293,145 @@ private:
                 const bool dup = (seq >= 0 && seq == lastSeq);
                 if (seq >= 0) lastSeq = seq;
 
-                if (dup) return;  // drop retried STAT frames (idempotent side effects)
+                if (dup) return;  // drop retried STAT frames
 
                 if (owner_) {
                     owner_->commsHealthy_ = true;
-                    owner_->statAgeTmr_   = 0;           // fresh data just arrived
-                    owner_->setHeaterOutput(out);        // drive AO/PWM once per fresh STAT
+                    owner_->statAgeTmr_   = 0;                 // fresh data just arrived
+                    owner_->setHeaterOutput(out);
+
+                    // --- Auto-clear stale-STAT E-STOP on first good STAT ---
+                    if (owner_->state_ == State::EStop && (owner_->estopReason_ & ESTOP_STALE_STAT)) {
+                        owner_->estopReason_ &= ~ESTOP_STALE_STAT;
+                        owner_->state_ = State::Idle;          // or a "safe idle" if you prefer
+                        owner_->dbgln("[CC] Auto-cleared E-STOP (stale-STAT recovered)");
+                    }
                 }
                 return;
             }
 
+            // else ignore silently
+        } */
+        
+        // Handle received messages
+        void onMessageReceived(const String& data) override {
+            // === CHANGED: parse optional ;REF= once and reuse ===
+            const int refPos = data.indexOf(F(";REF="));                // CHANGED
+            const bool hasRef = (refPos > 0);                           // CHANGED
+            const uint16_t refVal = hasRef ?                           // CHANGED
+                (uint16_t)data.substring(refPos + 5).toInt() : 0;       // CHANGED
+
+            // === CHANGED: remove unconditional ACK entirely ===
+            // (No "ACK:OK" for everything-not-STAT anymore.)
+
+            // 1) Legacy discovery path (XPB says HELLO). Keep for back-compat.
+            if (data.startsWith("HELLO;ID=XPB")) {
+                if (owner_) {
+                    owner_->xpbBootSeen_  = true;
+                    owner_->xpbMaskActive_ = false;
+                }
+
+                // READY is a notice; no ACK expected
+                char line[64];
+                snprintf(line, sizeof(line), "READY;ID=CC;VER=1.0;UPT=%lu",
+                        (unsigned long)Milliseconds());
+                sendMessage(line, MessageType::NORMAL);                 // CHANGED: was CRITICAL
+
+                // Ask for switches as a request/response with REF (this reply is the ACK)
+                sendCommand("REQ:SW", MessageType::IMPORTANT);          // CHANGED: was sendMessage(...)
+
+                return;
+            }
+
+            // 2) XPB READY (notice) — no ACK
+            if (data.startsWith("READY;ID=XPB")) {
+                if (owner_) {
+                    owner_->xpbBootSeen_   = true;
+                    owner_->xpbMaskActive_ = false;
+                }
+                return;
+            }
+
+            // 3) QUIESCE (command from XPB) — ACK ONCE, mirror REF if present
+            if (data.startsWith("QUIESCE;")) {
+                int reqSecs = kvGetIntClamped(data, "SECS=", 10, 1, 60);
+                int maskSecs = reqSecs;
+                if (maskSecs < 3)  maskSecs = 3;
+                if (maskSecs > 15) maskSecs = 15;
+
+                if (owner_) {
+                    owner_->xpbMaskActive_  = true;
+                    owner_->xpbMaskUntilMs_ = Milliseconds() + (uint32_t)maskSecs * 1000UL;
+                    owner_->dbgln("[QUIESCE] XPB mask started");
+                }
+
+                char ack[48];
+                if (hasRef) {
+                    snprintf(ack, sizeof(ack), "ACK;QUIESCE=OK;MASK=%d;REF=%u", maskSecs, refVal);  // CHANGED: mirror REF
+                } else {
+                    snprintf(ack, sizeof(ack), "ACK;QUIESCE=OK;MASK=%d", maskSecs);
+                }
+                sendMessage(ack, MessageType::INFO);                    // CHANGED: ACKs are INFO (no ACK-of-ACK)
+
+                return;
+            }
+
+            // 4) Switch state from XPB (either unsolicited or reply to REQ:SW)
+            //    Never ACK; if this was a reply to our REQ:SW, transport will correlate on REF.
+            if (data.startsWith("SW;")) {
+                int run = kvGetIntClamped(data, "RUN=", 0, 0, 1);
+                int rst = kvGetIntClamped(data, "RST=", 0, 0, 1);
+                if (owner_) {
+                    owner_->runActiveRemote_   = (run != 0);
+                    owner_->resetActiveRemote_ = (rst != 0);
+                    owner_->swLastUpdateMs_    = Milliseconds();
+                    owner_->dbg("[SW←XPB] run="); owner_->dbgkv("", (unsigned long)run);
+                    owner_->dbg(" rst=");         owner_->dbgkv("", (unsigned long)rst);
+                }
+                return;
+            }
+
+            // 5) Telemetry from XPB (heartbeat/stat) — never ACK
+            if (data.startsWith("STAT;")) {
+                static int lastSeq = -1;
+                const int seq = kvGet(data, "SEQ=").toInt();
+                const int out = kvGetIntClamped(data, "OUT=", 0, 0, 150);
+
+                const bool dup = (seq >= 0 && seq == lastSeq);
+                if (seq >= 0) lastSeq = seq;
+                if (dup) return;  // drop retried STAT frames
+
+                if (owner_) {
+                    owner_->commsHealthy_ = true;
+                    owner_->statAgeTmr_   = 0;                 // fresh data just arrived
+                    owner_->setHeaterOutput(out);
+
+                    // Auto-clear stale-STAT E-STOP on first good STAT
+                    if (owner_->state_ == State::EStop && (owner_->estopReason_ & ESTOP_STALE_STAT)) {
+                        owner_->estopReason_ &= ~ESTOP_STALE_STAT;
+                        owner_->state_ = State::Idle;
+                        owner_->dbgln("[CC] Auto-cleared E-STOP (stale-STAT recovered)");
+                    }
+                }
+                return;
+            }
+
+            // 6) RESUME? / NOTICE / HB from XPB:
+            //    Treat as notices/telemetry. Do not ACK. If you need UI updates, handle here.
+            // (Currently ignoring silently unless you already have handlers elsewhere.)
 
             // else ignore silently
         }
-        
-        void onBadChecksum(const String& rawMsg) override {
-            sendMessage("ACK:BAD_CHECKSUM");
-            SerialPort.Send("BAD CHKSUM: ");
-            SerialPort.SendLine(rawMsg.c_str());
+
+        void onBadChecksum(const String& raw) override {
+            static uint32_t badCrcCount = 0;
+            ++badCrcCount;
+            if (badCrcCount % 10 == 1) {
+                usbLog("WARN: TTL bad checksum (rate-limited)");
+            }
+            // Do NOT send any frame here.
         }
+
 
     protected:
         void usbLog(const char *s) override {

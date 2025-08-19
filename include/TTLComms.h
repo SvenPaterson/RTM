@@ -9,13 +9,14 @@ struct PendingMessage {
     uint8_t     retryCount;
     uint8_t     maxRetries;
     bool        needsAck;
+    uint16_t    ref;
 };
 
 enum class MessageType {
-    CRITICAL,       // User commands: 3 retries, 100ms timeout
-    IMPORTANT,      // Heating control: 2 retries, 200ms timeout
-    NORMAL,         // Status requests: 1 retry, 500ms timeout
-    INFO            // Heartbeat: No retries
+    CRITICAL,       // State-change, safety: ACK + REF, 3 retries, 100ms timeout
+    IMPORTANT,      // State-change, idempotent: ACK + REF, 2 retries, 200ms timeout
+    NORMAL,         // Notifications / request-response: no ACK (response is the ACK)
+    INFO            // Telemetry/heartbeat: no ACK
 };
 
 class TTLComms {
@@ -30,6 +31,8 @@ public:
     void beginBase() { incomingMsg_.reserve(80); } // preallocate memory
     void sendMessage(const char* data, bool needsAck = false);
     void sendMessage(const char* data, MessageType type);
+    // Convenience for commands that should carry a REF and expect an ACK/response
+    void sendCommand(const char* base, MessageType type = MessageType::IMPORTANT);
     void checkRetries();
     void checkForMessages();
 
@@ -60,6 +63,9 @@ private:
     
     PendingMessage pendingMsg_;
     bool waitingForAck_ = false;
+    uint16_t ackTimeoutMs_ = ACK_TIMEOUT_MS;
+    uint16_t nextRef_    = 1;   // rolling correlation token
+    uint16_t pendingRef_ = 0;   // REF of the in-flight cmd (if any)
 
     static constexpr size_t MAX_MSG_LEN = 79;
     String incomingMsg_ = ""; 

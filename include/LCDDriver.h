@@ -48,7 +48,7 @@ class LCDDriver {
         // Helpers
         void sendCommand(uint8_t cmd, const uint8_t* params = nullptr, uint8_t paramLen = 0);
         void sendData(const char* data, size_t len);
-        uint16_t getExecTime_ms(uint8_t cmd) const;
+        uint16_t getExecTime_us(uint8_t cmd) const;
         void blankLine(char* dst);
         uint8_t getStringLength(const char* s) const;
 

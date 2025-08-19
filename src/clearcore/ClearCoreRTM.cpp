@@ -1,5 +1,8 @@
 #include "ClearCoreRTM.h"
 
+static constexpr uint16_t STAT_PERIOD_MS = 1000;
+static constexpr uint8_t  STALE_MULT     = 5;
+
 const char* const ClearCoreRTM::kStateNames[8] = {
     "DEBUG", "IDLE", "RUNNING", "PAUSED", "RESETTING",
     "RESUME", "COMPLETED", "E-STOP"
@@ -45,8 +48,6 @@ bool ClearCoreRTM::begin() {
     Delay_ms(250);
 
     // ----------- LOAD PROTOCOL ---------
-    Delay_ms(250);
-
     File csv = SD.open("protocol.csv", FILE_READ);
     if (!loadProtocol(csv)) {
         dbgln("Load config failed");
@@ -59,16 +60,23 @@ bool ClearCoreRTM::begin() {
     /* TTL Comms */
     ttlComms_.begin();
     ttlComms_.setRxUsbLogging(true, "XPB");
+    dbgln("TTL Ready");
+
     // listen for XPB ready
     {
         uint32_t tReady = Milliseconds();
-        while (Milliseconds() - tReady < 2000) {
+        while (Milliseconds() - tReady < 250) {
             ttlComms_.checkForMessages();
             ttlComms_.checkRetries();
         }
     }
-    dbgln("TTL Ready");
-    ttlComms_.sendMessage("REQ:SW", MessageType::CRITICAL);
+    
+    ttlComms_.sendMessage("READY;ID=CC", MessageType::NORMAL);
+    delay(2);
+    ttlComms_.sendMessage("NOTICE;PROTO=2;CC_FW=2025.08", MessageType::NORMAL);
+    delay(2);
+    ttlComms_.sendCommand("REQ:SW",      MessageType::IMPORTANT);
+
     dwellTmr_ = 0;
     return true;
 }
@@ -78,28 +86,27 @@ void ClearCoreRTM::tick() {
     ttlComms_.checkRetries();
 
     // --- Comms health & stale guard ---
-    // STAT stale -> normally E-STOP at >5s, but suppress if inside an active XPB mask window.
     const bool maskActiveNow = (xpbMaskActive_ && Milliseconds() < xpbMaskUntilMs_);
-    if (commsHealthy_ && statAgeTmr_ > 5000U && state_ != State::EStop) {
+    if (commsHealthy_ && 
+        statAgeTmr_ > (STALE_MULT * STAT_PERIOD_MS) && 
+        state_ != State::EStop) {
         if (!maskActiveNow) {
+            estopReason_ |= ESTOP_STALE_STAT;                    // <— tag the cause
             const char *why = xpbMaskActive_ ? "XPB stale (mask expired)" : "XPB STAT stale > 5s";
             eStopAll_(why);
-            // fall-through: E-STOP handler will take over
         }
-        // else: masked ⇒ do nothing (keep outputs/motion as-is)
     }
 
     bool eStopActive  = !SAFETY_PIN.State();
     bool runActive    = runActiveRemote_;
     bool resetActive  = resetActiveRemote_;
 
-    // heartbeat to exp-board here, not sure of minimum interval needed
-
     // first check for E-Stop
     if (eStopActive && state_ != State::EStop) {
-        eStopAll_("HW E-STOP input");   // sends ALARM;TYPE=ESTOP;MSG=..., drops motor+heater
-        return;
-    }
+    estopReason_ |= ESTOP_SAFETY;      // <— tag hardware cause
+    eStopAll_("HW E-STOP input");
+    return;
+}
 
     // check for reset request
     if (resetActive && !prevResetActive_ && state_ != State::EStop) {
@@ -127,16 +134,14 @@ void ClearCoreRTM::tick() {
             state_ = State::Running;
     }
 
+    // justEntered_ allows us to do things once upon first entering a state handler
     bool justEntered_ = (state_ != prevState_); // did we just state change?
     if (justEntered_) {
         dbg("STATE -> ");
         dbgln(stateToString(state_));
     }
     prevState_ = state_; // capture previous state
-    // justEntered_ allows us to do things once upon first entering a state handler
-    // this prevents needlessly firing screen updates or other logic every tick.
-    // It also allows us to immediately update a screen the instant we change a state.
-
+    
     // dispatch to state handlers
     switch (state_) {
         case State::Idle:
@@ -171,14 +176,15 @@ void ClearCoreRTM::tick() {
 
         char msg[96];
         snprintf(msg, sizeof(msg),
-                 "HB;SEQ=%u;STATE=%s;E=%d;STEP=%u;LOOP=%lu/%lu;SW_AGE=%lu",
-                 hbSeq_++,
-                 stateStr,
-                 (state_ == State::EStop) ? 1 : 0,
-                 (unsigned)(currentStep_ + 1),
-                 (unsigned long)(totalLoops_ - loopCount_ + 1),
-                 (unsigned long)totalLoops_,
-                 (unsigned long)(Milliseconds() - swLastUpdateMs_));
+                "HB;SEQ=%u;STATE=%s;STEP=%u;LOOP=%lu/%lu;SW_AGE=%lu;E=%d;E_CODE=%02X",
+                hbSeq_++,
+                stateStr,
+                (unsigned)(currentStep_ + 1),
+                (unsigned long)(totalLoops_ - loopCount_ + 1),
+                (unsigned long)totalLoops_,
+                (unsigned long)(Milliseconds() - swLastUpdateMs_),
+                (estopReason_ != 0) ? 1 : 0, // probably not needed
+                (unsigned)estopReason_);
         ttlComms_.sendMessage(msg, MessageType::INFO);
         ttlComms_.checkForMessages();
     }
@@ -439,7 +445,7 @@ void ClearCoreRTM::handlePaused(bool runActive, bool justEntered_) {
 
 void ClearCoreRTM::handleReset(bool resetActive, bool justEntered_) {
     if (!resetActive) {
-        ttlComms_.sendMessage("CMD;RESET=CANCEL", MessageType::CRITICAL);
+        ttlComms_.sendCommand("CMD;RESET=CANCEL", MessageType::IMPORTANT);
         motor.EnableRequest(true);
         if (state_ != preReset_) {
             prevState_ = State::Debug; // force a mismatch, check o3 to see if this makes sense anymore!
@@ -454,14 +460,14 @@ void ClearCoreRTM::handleReset(bool resetActive, bool justEntered_) {
         resetTmr_    = 0;
 
         if (resetImmediate_) {
-            ttlComms_.sendMessage("CMD;RESET=EXEC", MessageType::CRITICAL);
+            ttlComms_.sendCommand("CMD;RESET=EXEC", MessageType::CRITICAL);
             resetPhase_      = ResetPhase::ExecSent;
             xpbBootWaitTmr_  = 0;
             resetImmediate_  = false;  // one-shot
         } else {
             char line[40];
             snprintf(line, sizeof(line), "CMD;RESET=ARM;SECS=%u", (unsigned)resetArmSecs_);
-            ttlComms_.sendMessage(line, MessageType::CRITICAL);
+            ttlComms_.sendCommand(line, MessageType::IMPORTANT);
             resetPhase_ = ResetPhase::Armed;
         }
     }
@@ -556,6 +562,7 @@ void ClearCoreRTM::handleCompleted(bool resetActive, bool justEntered_) {
     return;
 }
 
+// --------- output control handlers ------------
 void ClearCoreRTM::setHeaterOutput(int out) {
     if (state_ == State::EStop || heaterInhibit_) {
         HEATER_OUTPUT_PIN.PwmDuty(0);
@@ -592,6 +599,7 @@ void ClearCoreRTM::sendAlarm_(const char *type, const char *reason) {
     char msg[80];
     const char *t = type   ? type   : "GEN";
     const char *r = reason ? reason : "";
+
     // Truncate reason to ~40 safe chars (ASCII, no semicolons)
     char buf[41];
     size_t i = 0;
@@ -601,6 +609,7 @@ void ClearCoreRTM::sendAlarm_(const char *type, const char *reason) {
         buf[i] = c;
     }
     buf[i] = '\0';
+
     snprintf(msg, sizeof(msg), "ALARM;TYPE=%s;MSG=%s", t, buf);
-    ttlComms_.sendMessage(msg, MessageType::CRITICAL);
+    ttlComms_.sendMessage(msg, MessageType::INFO);
 }
