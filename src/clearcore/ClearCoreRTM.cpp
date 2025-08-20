@@ -77,6 +77,7 @@ bool ClearCoreRTM::begin() {
     delay(2);
     ttlComms_.sendCommand("REQ:SW",      MessageType::IMPORTANT);
 
+    heartbeatTmr_ = 0;
     dwellTmr_ = 0;
     return true;
 }

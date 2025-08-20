@@ -417,11 +417,22 @@ void ExpansionBoard::tick() {
                     }
                 }
                 else if (usbLine.charAt(0) == '>') {
+                    // TEMPORARY HANDLING OF PR_BEG etc. TO TEST SYSTEM
                     String frame = usbLine.substring(1);  // drop '>'
-                    usbInjecting_ = true;
-                    ttlComms_.onMessageReceived(frame);   // call directly so we can mark it as injected
-                    usbInjecting_ = false;
-                    dbgkv("[USB INJECT] ", frame);
+                    
+                    // PR_* messages go TO ClearCore, not processed locally
+                    if (frame.startsWith("PR_")) {
+                        // Send over TTL to ClearCore
+                        ttlComms_.sendCommand(frame.c_str(), MessageType::CRITICAL);
+                        dbgkv("[USB->CC] Sending: ", frame);
+                    } 
+                    // Everything else is injected locally for testing
+                    else {
+                        usbInjecting_ = true;
+                        ttlComms_.onMessageReceived(frame);   // call directly so we can mark it as injected
+                        usbInjecting_ = false;
+                        dbgkv("[USB INJECT] ", frame);
+                    }
                 }
                 else if (usbLine.equalsIgnoreCase("SIM?")) {
                     if (Serial) {
@@ -429,6 +440,14 @@ void ExpansionBoard::tick() {
                         dbg(usbSimHold_ ? "ON" : "OFF");
                         dbg(", until=");
                         Serial.println(usbSimHoldUntilMs_, HEX);
+                    }
+                }
+                else if (usbLine.equalsIgnoreCase("UPLOAD")) {
+                    dbgln("[USB] Triggering protocol upload...");
+                    if (uploadProtocolToCC_()) {
+                        dbgln("[USB] Upload completed");
+                    } else {
+                        dbgln("[USB] Upload failed");
                     }
                 }
                 else {
@@ -916,6 +935,51 @@ void ExpansionBoard::logProtocol_() const {
   }
 }
 
+bool ExpansionBoard::uploadProtocolToCC_() {
+    if (stepCount_ == 0) {
+        dbgln("[PROTO] No protocol loaded");
+        return false;
+    }
+    
+    dbgln("[PROTO] Starting upload to CC...");
+    
+    // 1. Send PR_BEG
+    char msg[96];
+    snprintf(msg, sizeof(msg), "PR_BEG;NAME=%s;LOOPS=%lu;STEPS=%u;PHASH=%lu",
+             protocolName_.c_str(), 
+             (unsigned long)loopCount_, 
+             (unsigned)stepCount_, 
+             (unsigned long)progHash_);
+    
+    ttlComms_.sendMessage(msg, MessageType::CRITICAL);
+    delay(100);
+    ttlComms_.checkForMessages();
+    
+    // 2. Send PR_DAT chunks (dummy for now)
+    dbgln("[PROTO] Sending data chunks...");
+
+    // In XPB uploadProtocolToCC_():
+    for (uint8_t i = 0; i < stepCount_; i++) {
+        // Format: "SEQ=n;DATA=rpm,accel,dwell"
+        snprintf(msg, sizeof(msg), "PR_DAT;SEQ=%u;DATA=%ld,%lu,%lu,%u", 
+                i,
+                steps_[i].rpmTarget_,
+                steps_[i].rpmAccel_, 
+                steps_[i].dwellS_,
+                steps_[i].tempC_);
+        ttlComms_.sendMessage(msg, MessageType::IMPORTANT);
+        delay(50);
+        ttlComms_.checkForMessages();
+    }
+    
+    // 3. Send PR_END  
+    snprintf(msg, sizeof(msg), "PR_END;CRC=%lu", (unsigned long)0);
+    ttlComms_.sendMessage(msg, MessageType::CRITICAL);
+    delay(100);
+    ttlComms_.checkForMessages();
+    
+    return true;
+}
 /// ExpansionBoardTTL
 /**
  * @brief Handle decoded TTL frames from ClearCore and update owner state.

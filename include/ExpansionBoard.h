@@ -254,14 +254,15 @@ private:
     };
     static constexpr uint8_t kMaxProtocolSteps_ = 50;
     Step     steps_[kMaxProtocolSteps_];
-    uint8_t  stepCount_{0};
-    uint32_t loopCount_{1};
+    uint8_t  stepCount_   {0};
+    uint32_t loopCount_   {1};
     String   protocolName_{"Test Code"};
-    uint32_t progHash_{0};
-    uint32_t totalLoops_{1};
-    bool     targetMet_{false};
-    bool everRan_ = false;
-
+    uint32_t progHash_    {0};
+    uint32_t totalLoops_  {1};
+    bool     targetMet_   {false};
+    bool     everRan_     {false};
+    bool uploadProtocolToCC_();
+    
     // ---------- Preheat control ----------
     bool           preheatActive_{false};
     uint16_t       preheatSpC_{0};

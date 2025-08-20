@@ -142,6 +142,15 @@ private:
         uint32_t dwellMs        {0};   //!< dwell after speed reached (ms)
     };
 
+    struct ProtoRx {
+        bool active{false};
+        uint16_t seq{0};
+        uint32_t crc{0};
+        uint32_t phash{0};
+        uint8_t stepsRcvd{0};
+    } protoRx_;
+    uint32_t progHash_;
+
     static constexpr uint8_t  kMaxProtocolSteps = 50;
     static constexpr uint16_t kStepsPerRev      = 3200; // set this using ClearPath software on Stepper Motor, don't go lower than 3200
     static constexpr uint16_t kMotorMaxRpm      = 2760;
@@ -149,8 +158,8 @@ private:
     /* ——— protocol state ——— */
     std::array<Step, kMaxProtocolSteps> steps_{};
     uint8_t  stepCount_   {0};
-    uint8_t  loopCount_   {1};
-    uint8_t  totalLoops_  {1};
+    uint32_t loopCount_   {1};
+    uint32_t totalLoops_  {1};
     String   protocolName_;
 
     /* ——— runtime state ——— */
@@ -376,7 +385,126 @@ private:
                 return;
             }
 
-            // 4) Switch state from XPB (either unsolicited or reply to REQ:SW)
+            // ===== Protocol Upload: PR_BEG =====
+            if (data.startsWith("PR_BEG;")) {
+                // Only accept in IDLE or PAUSED states
+                if (owner_ && (owner_->state_ == State::Idle || owner_->state_ == State::Paused)) {
+                    // Parse protocol metadata
+                    String name = kvGet(data, "NAME=");
+                    String loopsStr = kvGet(data, "LOOPS=");
+                    uint32_t loops = loopsStr.length() ? strtoul(loopsStr.c_str(), nullptr, 10) : 1;
+                    if (loops == 0) loops = 1;
+                    int steps = kvGetIntClamped(data, "STEPS=", 0, 1, owner_->kMaxProtocolSteps);
+                    String phashStr = kvGet(data, "PHASH=");
+                    
+                    // Initialize reception
+                    owner_->protoRx_.active = true;
+                    owner_->protoRx_.seq = 0;
+                    owner_->protoRx_.crc = 0;
+                    owner_->protoRx_.phash = phashStr.toInt();  // TODO: parse as unsigned long
+                    owner_->protoRx_.stepsRcvd = 0;
+                    
+                    // Pre-fill metadata (will activate on successful END)
+                    owner_->protocolName_ = name;
+                    owner_->loopCount_ = loops;
+                    owner_->totalLoops_ = loops;
+                    owner_->stepCount_ = steps;  // Expected count
+                    
+                    // ACK with REF if present
+                    char ack[40];
+                    if (hasRef) {
+                        snprintf(ack, sizeof(ack), "ACK;PR_BEG=OK;REF=%u", refVal);
+                    } else {
+                        snprintf(ack, sizeof(ack), "ACK;PR_BEG=OK");
+                    }
+                    sendMessage(ack, MessageType::INFO);
+                } else {
+                    // Reject - wrong state
+                    char nak[40];
+                    if (hasRef) {
+                        snprintf(nak, sizeof(nak), "ACK;PR_BEG=BUSY;REF=%u", refVal);
+                    } else {
+                        snprintf(nak, sizeof(nak), "ACK;PR_BEG=BUSY");
+                    }
+                    sendMessage(nak, MessageType::INFO);
+                }
+                return;
+            }
+
+            // ===== Protocol Upload: PR_DAT =====
+            if (data.startsWith("PR_DAT;")) {
+                if (owner_ && owner_->protoRx_.active) {
+                    // Check sequence number
+                    int seq = kvGetIntClamped(data, "SEQ=", -1, 0, 255);
+                    if (seq != owner_->protoRx_.seq) {
+                        // Sequence mismatch - send NAK
+                        char nak[40];
+                        snprintf(nak, sizeof(nak), "ACK;PR_DAT=BAD_SEQ;EXP=%u;GOT=%d", 
+                                owner_->protoRx_.seq, seq);
+                        sendMessage(nak, MessageType::INFO);
+                        return;
+                    }
+                    
+                    // Parse DATA field: "rpm,accel,dwell[,temp]"
+                    String dataStr = kvGet(data, "DATA=");
+                    if (dataStr.length() > 0 && owner_->protoRx_.seq < owner_->kMaxProtocolSteps) {
+                        int c1 = dataStr.indexOf(',');
+                        int c2 = dataStr.indexOf(',', c1+1);
+                        int c3 = dataStr.indexOf(',', c2+1);
+                        
+                        if (c1 > 0 && c2 > 0) {
+                            long rpm = dataStr.substring(0, c1).toInt();
+                            long accel = dataStr.substring(c1+1, c2).toInt();
+                            long dwellS = (c3 > 0) ? 
+                                dataStr.substring(c2+1, c3).toInt() : 
+                                dataStr.substring(c2+1).toInt();
+                            // Ignore temp for now (c3 to end) - CC doesn't use it
+                            
+                            // Convert and store in steps_ array  
+                            Step &s = owner_->steps_[owner_->protoRx_.seq];
+                            s.speedSteps_s = (rpm * owner_->kStepsPerRev + (rpm >= 0 ? 30 : -30)) / 60;
+                            s.accelSteps_s2 = (accel * owner_->kStepsPerRev + 30) / 60;
+                            s.dwellMs = dwellS * 1000UL;
+                        }
+                    }
+                    
+                    owner_->protoRx_.seq++;
+                    owner_->protoRx_.stepsRcvd++;
+                    
+                    // ACK this chunk
+                    char ack[40];
+                    if (hasRef) {
+                        snprintf(ack, sizeof(ack), "ACK;OK;REF=%u", refVal);
+                    } else {
+                        snprintf(ack, sizeof(ack), "ACK;OK");
+                    }
+                    sendMessage(ack, MessageType::INFO);
+                }
+                return;
+            }
+
+            // ===== Protocol Upload: PR_END =====  
+            if (data.startsWith("PR_END;")) {
+                if (owner_ && owner_->protoRx_.active) {
+                    String crcStr = kvGet(data, "CRC=");
+                    uint32_t expectedCrc = strtoul(crcStr.c_str(), nullptr, 10);
+                    
+                    // For now, just accept it (TODO: implement CRC check)
+                    owner_->protoRx_.active = false;
+                    
+                    // Send success notice
+                    char notice[64];
+                    snprintf(notice, sizeof(notice), "NOTICE;PROTO_RX=OK;PHASH=%lu",
+                            (unsigned long)owner_->protoRx_.phash);
+                    sendMessage(notice, MessageType::INFO);
+                    
+                    owner_->progHash_ = owner_->protoRx_.phash;
+                    owner_->dbgln("[PROTO] Upload complete");
+                }
+                return;
+            }
+
+            // 5) Switch state from XPB (either unsolicited or reply to REQ:SW)
             //    Never ACK; if this was a reply to our REQ:SW, transport will correlate on REF.
             if (data.startsWith("SW;")) {
                 int run = kvGetIntClamped(data, "RUN=", 0, 0, 1);
