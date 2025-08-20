@@ -315,27 +315,59 @@ bool ExpansionBoard::begin() {
             }
         }
 
-    } else {
-        dbgln("SD not available; skipping protocol/resume load");
-    }
+        // === SMART PROTOCOL UPLOAD DECISION ===
+        // Upload to CC only when safe/necessary
+        if (stepCount_ > 0) {  // Only if we loaded a protocol successfully
+            bool shouldUpload = false;
 
-/*     // Handshake with ClearCore
-    uint32_t lastTx = 0;
-    t0 = millis();
-    while (!ccReady_ && millis() - t0 < 12000UL) {        // 12s window
-        ttlComms_.checkForMessages();
-        ttlComms_.checkRetries();
-        if (millis() - lastTx >= 200) {                   // 200 ms cadence
-            ttlComms_.sendMessage("HELLO;ID=XPB", MessageType::INFO);
-            lastTx = millis();
+            dbgln("[UPLOAD DECISION]");
+            dbgkv("  haveStoredResume_: ", haveStoredResume_ ? "true" : "false");
+            dbgkv("  suppressResumePrompt_: ", suppressResumePrompt_ ? "true" : "false");
+
+            if (!haveStoredResume_) {
+                // No resume = fresh start, need to upload
+                dbgln("  Decision: No resume state - WILL upload");
+                shouldUpload = true;
+            } 
+            else if (suppressResumePrompt_) {
+                // After intentional XPB-only reset, CC already has protocol
+                dbgln("  Decision: Post-XPB reset - WON'T upload");
+                shouldUpload = false;
+            }
+            else {
+                // Have resume for this exact protocol - preserve CC state
+                dbgln("  Decision: Valid resume exists - WON'T upload");
+                shouldUpload = false;
+            }
+            
+            if (shouldUpload) {
+                dbgln("Waiting for CC ready signal...");
+                uint32_t uploadWait = millis();
+                while (!ccReady_ && millis() - uploadWait < 2000) {
+                    ttlComms_.checkForMessages();
+                    ttlComms_.checkRetries();
+                    delay(10);
+                }
+
+                dbgkv("  ccReady_: ", ccReady_ ? "true" : "false");
+                dbgkv("  Wait time ms: ", (unsigned long)(millis() - uploadWait));
+                
+                if (ccReady_ || millis() - uploadWait >= 2000) {
+                    dbgln("Uploading protocol to CC...");
+                    if (uploadProtocolToCC_()) {
+                        dbgln("Protocol upload successful");
+                    } else {
+                        dbgln("Protocol upload failed");
+                    }
+                } else {
+                    dbgln("CC not ready - skipping upload");
+                }
+            }
         }
+
+    } else {
+        dbgln("No protocol loaded from SD - nothing to upload");
     }
-    // short grace to catch in-flight READY
-    uint32_t tGrace = millis();
-    while (!ccReady_ && millis() - tGrace < 300) {
-        ttlComms_.checkForMessages();
-        ttlComms_.checkRetries();
-    } */
 
     // Don’t warn here. We’ll show an info message only if there’s truly no CC traffic after 10s.
     ccAnySeen_ = false;

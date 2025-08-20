@@ -26,7 +26,6 @@
 #include "ClearCore.h"
 #include "ClearCoreElapsedMillis.h"
 #include "SPI.h"
-#include "SD.h"
 #include "TTLComms.h"
 #include <type_traits>
 
@@ -187,7 +186,7 @@ private:
     bool lcdToggle_{false}, lcdRuntimeToggle_{false}, modeTorqueToggle_{false};
 
     /* ——— protocol helpers ——— */
-    bool loadProtocol(File &csv);
+    // no loadProtocol needed, SD card moved to XPB
 
     /* ——— heater helpers ——— */
     void setHeaterOutput(int out);
@@ -488,18 +487,47 @@ private:
                 if (owner_ && owner_->protoRx_.active) {
                     String crcStr = kvGet(data, "CRC=");
                     uint32_t expectedCrc = strtoul(crcStr.c_str(), nullptr, 10);
+                    (void)expectedCrc;  // TODO: implement CRC check
                     
-                    // For now, just accept it (TODO: implement CRC check)
+                    // Protocol successfully received - activate it
                     owner_->protoRx_.active = false;
+                    owner_->progHash_ = owner_->protoRx_.phash;
+                    
+                    // Reset to step 0, restore full loop count
+                    owner_->currentStep_ = 0;
+                    owner_->loopCount_ = owner_->totalLoops_;
+                    
+                    // Log the received protocol
+                    owner_->dbgln("==== Protocol Received ====");
+                    owner_->dbgkv("Name: ", owner_->protocolName_);
+                    owner_->dbgkv("Loops: ", owner_->totalLoops_);
+                    owner_->dbgkv("Steps: ", owner_->stepCount_);
+                    owner_->dbgkv("PHASH: ", owner_->progHash_);
+                    
+                    // Print steps for verification
+                    for (uint8_t i = 0; i < owner_->stepCount_; ++i) {
+                        int32_t rpm = (owner_->steps_[i].speedSteps_s * 60 + 
+                                    (owner_->steps_[i].speedSteps_s >= 0 ? 
+                                    owner_->kStepsPerRev / 2 : -owner_->kStepsPerRev / 2)) 
+                                    / owner_->kStepsPerRev;
+                        uint32_t accel = (owner_->steps_[i].accelSteps_s2 * 60 + 
+                                        owner_->kStepsPerRev / 2) / owner_->kStepsPerRev;
+                        uint32_t dwell = owner_->steps_[i].dwellMs / 1000;
+                        
+                        char buf[80];
+                        snprintf(buf, sizeof(buf), "Step %2u: %6ld RPM  %4lu RPM/s²  %3lu s",
+                                i + 1, rpm, accel, dwell);
+                        owner_->dbgln(buf);
+                    }
+                    owner_->dbgln("=========================");
                     
                     // Send success notice
                     char notice[64];
                     snprintf(notice, sizeof(notice), "NOTICE;PROTO_RX=OK;PHASH=%lu",
-                            (unsigned long)owner_->protoRx_.phash);
+                            (unsigned long)owner_->progHash_);
                     sendMessage(notice, MessageType::INFO);
                     
-                    owner_->progHash_ = owner_->protoRx_.phash;
-                    owner_->dbgln("[PROTO] Upload complete");
+                    owner_->dbgln("[PROTO] Upload complete - ready to run");
                 }
                 return;
             }

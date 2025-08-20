@@ -38,23 +38,6 @@ bool ClearCoreRTM::begin() {
     motor.EStopDecelMax(kMotorMaxRpm * kStepsPerRev / 60);
     dbgln("Motor ready");
 
-    /* SD CARD */
-    if (!SD.begin()) {
-        dbgln("SD begin failed");
-        return false;
-    }
-    dbgln("SD ready");
-
-    Delay_ms(250);
-
-    // ----------- LOAD PROTOCOL ---------
-    File csv = SD.open("protocol.csv", FILE_READ);
-    if (!loadProtocol(csv)) {
-        dbgln("Load config failed");
-        return false;
-    }
-    csv.close();
-    dbgln("Load config done");
     Delay_ms(250);
 
     /* TTL Comms */
@@ -76,6 +59,14 @@ bool ClearCoreRTM::begin() {
     ttlComms_.sendMessage("NOTICE;PROTO=2;CC_FW=2025.08", MessageType::NORMAL);
     delay(2);
     ttlComms_.sendCommand("REQ:SW",      MessageType::IMPORTANT);
+
+    // Initialize with empty protocol - will receive from XPB
+    protocolName_ = "Awaiting Upload";
+    stepCount_ = 0;
+    loopCount_ = 1;
+    totalLoops_ = 1;
+    progHash_ = 0;
+    dbgln("Awaiting protocol from XPB...");
 
     heartbeatTmr_ = 0;
     dwellTmr_ = 0;
@@ -192,115 +183,6 @@ void ClearCoreRTM::tick() {
 
 }
 
-// this will drastically change once exp-board is reading protocol
-bool ClearCoreRTM::loadProtocol(File &csv) {
-    if (!csv) return false;
-
-    // 0) validation helpers
-    // speed can be negative (CW or CCW)
-    auto validSigned = [&](const String &s) {
-        if (s.length() < 1) return false;
-        for (uint16_t i = 0; i < s.length(); ++i) {
-        char c = s.charAt(i);
-        if (i == 0 && c == '-') continue;
-        if (!isDigit(c)) return false;
-        }
-        return true;
-    };
-
-    // acceleration and dwell time must be positive integers
-    auto isDigits = [&](const String &s) {
-        if (s.length() == 0) return false;
-        for (uint16_t i = 0; i < s.length(); ++i) if (!isDigit(s.charAt(i))) return false;
-        return true;
-    };
-
-    // For stripping any leading or trailing commas (and then trim spaces), excel adds them to CSVs
-    auto stripCommas = [&](String &s){
-        s.trim();
-        while (s.startsWith(",")) s = s.substring(1), s.trim();
-        while (s.endsWith(","))   s.remove(s.length() - 1), s.trim();
-    };
-    
-    // 1) Protocol name line – PROTOCOL_NAME=XXX
-    String line = csv.readStringUntil('\n');
-    const char *pfxName = "PROTOCOL_NAME=";
-    if (!line.startsWith(pfxName)) return false;
-    String nameVal = line.substring(strlen(pfxName));
-    stripCommas(nameVal);
-    protocolName_ = nameVal;
-
-    // 2) Loop count – LOOP_COUNT=N
-    line = csv.readStringUntil('\n');
-    const char *pfxLoop = "LOOP_COUNT=";
-    if (!line.startsWith(pfxLoop)) return false;
-    String lc = line.substring(strlen(pfxLoop));
-    stripCommas(lc);
-    if (!isDigits(lc)) return false;
-    loopCount_ = lc.toInt();
-    if (loopCount_ == 0) loopCount_ = 1; // safeguard
-
-    // 3) Skip header row
-    csv.readStringUntil('\n');
-
-    // 4) Iterate Protocol Steps found in CSV file
-    stepCount_ = 0;
-    while (csv.available() && stepCount_ < kMaxProtocolSteps) {
-        String row = csv.readStringUntil('\n');
-        row.trim();
-        if (row.length() == 0) continue; // skip blanks
-
-        int c1 = row.indexOf(',');
-        int c2 = row.indexOf(',', c1 + 1);
-        if (c1 < 0 || c2 < 0) return false; // malformed line
-
-        // extract fields
-        String s1 = row.substring(0, c1); // target speed
-        String s2 = row.substring(c1 + 1, c2); // acceleration
-        String s3 = row.substring(c2 + 1); // dwell time
-        s1.trim(); s2.trim(); s3.trim();
-  
-        // validate inputs
-        if (!validSigned(s1) || !isDigits(s2) || !isDigits(s3)) return false;
-
-        // convert
-        int32_t  rpmTarget = s1.toInt();
-        uint32_t rpmAccel  = s2.toInt();
-        uint32_t dwellS    = s3.toInt();
-
-        Step &s = steps_[stepCount_++];
-        s.speedSteps_s = (rpmTarget >= 0) // round‐nearest
-                       ? (rpmTarget * kStepsPerRev + 30) / 60
-                       : (rpmTarget * kStepsPerRev - 30) / 60;
-        s.accelSteps_s2 = ((rpmAccel  * kStepsPerRev + 30) / 60);
-        s.dwellMs       = dwellS     * 1000UL;
-    }
-
-    // 5) Print out protocol to Serial
-    dbgln("==== Loaded Protocol ====");
-    dbgkv("Protocol Name: ", protocolName_.c_str());
-    dbgkv("Loop Count: ", loopCount_);
-    dbgkv("Step Count: ", stepCount_);
-
-
-    totalLoops_ = loopCount_; // to help display current test state
-
-    // 6) Prints entire protocol to Terminal for debugging purposes
-    for (uint8_t i = 0; i < stepCount_; ++i) {
-        int32_t rpm = (steps_[i].speedSteps_s * 60 + (steps_[i].speedSteps_s >= 0 ? kStepsPerRev / 2 : -kStepsPerRev / 2)) / kStepsPerRev;
-        uint32_t accel = (steps_[i].accelSteps_s2 * 60 + kStepsPerRev / 2) / kStepsPerRev;
-        uint32_t dwell = steps_[i].dwellMs / 1000;
-
-        snprintf(debugBuf_, sizeof(debugBuf_), "Step %2u: %6ld RPM  %4lu RPM/s²  %3lu s",
-                 i + 1, rpm, accel, dwell);
-        dbgln(debugBuf_);
-    }
-
-    dbgln("=========================");
-    
-    return (stepCount_ > 0);
-}
-
 /* ——— State Handlers ——— */
 void ClearCoreRTM::handleIdle(bool, bool justEntered_) {
     if (justEntered_) {
@@ -325,6 +207,13 @@ void ClearCoreRTM::handleIdle(bool, bool justEntered_) {
 
 void ClearCoreRTM::handleRunning(bool runActive, bool justEntered_) {
     if (justEntered_) {
+        // Check if we have a valid protocol
+        if (stepCount_ == 0) {
+            dbgln("ERROR: No protocol loaded - cannot run");
+            state_ = State::Idle;
+            return;
+        }
+
         // solid LED
         LED_PIN.State(true);
         targetMet_ = false; // false during a ramp to target speed
