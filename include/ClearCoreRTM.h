@@ -107,6 +107,7 @@ private:
     enum class State : uint8_t {
         Debug,
         Idle,
+        Preheat,
         Running,
         Paused,
         ResetRequested,
@@ -163,7 +164,9 @@ private:
 
     /* ——— runtime state ——— */
     State    state_{State::Idle}, prevState_{State::Idle}, preReset_{State::Idle};
+    uint16_t guardBefore_ = 0xDEAD;
     uint16_t currentStep_ {0};
+    uint16_t guardAfter_ = 0xBEEF;
     uint8_t  lastResetSec_{0}, prevStepIndex_{0};
     bool     stepInit_{false}, targetMet_{false};
     bool     resumeFromPause_{false}, prevResetActive_{false};
@@ -188,7 +191,11 @@ private:
     /* ——— protocol helpers ——— */
     // no loadProtocol needed, SD card moved to XPB
 
-    /* ——— heater helpers ——— */
+    /* ——— heater behaviour ——— */
+    bool coldStart_{true};           // True on boot, false once running
+    bool waitingForTemp_{false};     // True when preheating
+    uint16_t preheatTargetC_{0};     // Target temp for preheat
+    bool autoStartAfterPreheat_{false}; // Whether to auto-start after preheat
     void setHeaterOutput(int out);
 
     /* ——— state handlers ——— */
@@ -199,6 +206,7 @@ private:
     void handleEStop     (bool resetActive, bool justEntered_);
     void handleResume    (bool runActive,   bool justEntered_);
     void handleCompleted (bool resetActive, bool justEntered_);
+    void handlePreheat   (bool runActive,   bool justEntered_);
 
     class ClearCoreTTL : public TTLComms {
     public:
@@ -324,31 +332,77 @@ private:
         // Handle received messages
         void onMessageReceived(const String& data) override {
             // === CHANGED: parse optional ;REF= once and reuse ===
-            const int refPos = data.indexOf(F(";REF="));                // CHANGED
-            const bool hasRef = (refPos > 0);                           // CHANGED
-            const uint16_t refVal = hasRef ?                           // CHANGED
-                (uint16_t)data.substring(refPos + 5).toInt() : 0;       // CHANGED
+            const int refPos = data.indexOf(F(";REF="));               
+            const bool hasRef = (refPos > 0);                           
+            const uint16_t refVal = hasRef ?                          
+                (uint16_t)data.substring(refPos + 5).toInt() : 0;      
 
             // === CHANGED: remove unconditional ACK entirely ===
             // (No "ACK:OK" for everything-not-STAT anymore.)
 
             // 1) Legacy discovery path (XPB says HELLO). Keep for back-compat.
-            if (data.startsWith("HELLO;ID=XPB")) {
-                if (owner_) {
-                    owner_->xpbBootSeen_  = true;
-                    owner_->xpbMaskActive_ = false;
-                }
+            if (data.startsWith("CMD;")) {
+                String resume = kvGet(data, "RESUME=");
+                if (resume.length()) {
+                    if (resume == "AUTO" || resume == "YES") {
+                        if (owner_->stepCount_ == 0) {
+                            owner_->dbgln("ERROR: Cannot resume - no protocol loaded");
+                            sendMessage("ACK;RESUME=ERR_NO_PROTO", MessageType::INFO);
+                            return;
+                        }
 
-                // READY is a notice; no ACK expected
-                char line[64];
-                snprintf(line, sizeof(line), "READY;ID=CC;VER=1.0;UPT=%lu",
-                        (unsigned long)Milliseconds());
-                sendMessage(line, MessageType::NORMAL);                 // CHANGED: was CRITICAL
+                        // Parse resume parameters
+                        int resumeStep = kvGetIntClamped(data, "STEP=", 1, 1, owner_->stepCount_);
+                        int resumeLoop = kvGetIntClamped(data, "LOOP=", 1, 1, owner_->totalLoops_);
+                        int autoStart = kvGetIntClamped(data, "AUTOSTART=", 0, 0, 1);
 
-                // Ask for switches as a request/response with REF (this reply is the ACK)
-                sendCommand("REQ:SW", MessageType::IMPORTANT);          // CHANGED: was sendMessage(...)
+                        // Validate step bounds
+                        if (resumeStep > owner_->stepCount_ || resumeStep < 1) {
+                            owner_->dbgln("ERROR: Resume step out of bounds");
+                            sendMessage("ACK;RESUME=ERR_BAD_STEP", MessageType::INFO);
+                            return;
+                        }
 
-                return;
+                        // Apply the resume position
+                        owner_->currentStep_ = resumeStep - 1;  // Convert to 0-based index
+                        owner_->loopCount_ = owner_->totalLoops_ - resumeLoop + 1;
+
+                        // Check if we need to preheat (cold start only)
+                        if (owner_->coldStart_ && owner_->steps_[owner_->currentStep_].tempC_ > 0) {
+                            owner_->state_ = State::Preheat;
+                            owner_->preheatTargetC_ = owner_->steps_[owner_->currentStep_].tempC_;
+                            owner_->waitingForTemp_ = true;
+                            owner_->autoStartAfterPreheat_ = (autoStart == 1);
+                            
+                            char msg[80];
+                            snprintf(msg, sizeof(msg), "PREHEAT: target=%u°C autostart=%d", 
+                                    owner_->preheatTargetC_, autoStart);
+                            owner_->dbgln(msg);
+                            
+                            // Tell XPB to set heater setpoint
+                            char cmd[64];
+                            snprintf(cmd, sizeof(cmd), "CMD;SP=%u", owner_->preheatTargetC_);
+                            sendMessage(cmd, MessageType::IMPORTANT);
+                        } else {
+                            // No preheat needed - go straight to idle or running
+                            if (autoStart == 1) {
+                                owner_->state_ = State::Running;
+                                owner_->dbgln("RESUMED: auto-starting motion");
+                            } else {
+                                owner_->state_ = State::Idle;
+                                owner_->dbgln("RESUMED: position loaded, idle");
+                            }
+                        }
+
+                        char msg[80];
+                        snprintf(msg, sizeof(msg), "RESUMED: step=%u loop=%u/%u", 
+                                resumeStep, resumeLoop, owner_->totalLoops_);
+                        owner_->dbgln(msg);
+                        
+                        sendMessage("ACK;RESUME=OK", MessageType::INFO);
+                    }
+                    return;
+                }       
             }
 
             // 2) XPB READY (notice) — no ACK
@@ -379,7 +433,7 @@ private:
                 } else {
                     snprintf(ack, sizeof(ack), "ACK;QUIESCE=OK;MASK=%d", maskSecs);
                 }
-                sendMessage(ack, MessageType::INFO);                    // CHANGED: ACKs are INFO (no ACK-of-ACK)
+                sendMessage(ack, MessageType::INFO);                    
 
                 return;
             }
@@ -407,7 +461,7 @@ private:
                     owner_->protocolName_ = name;
                     owner_->loopCount_ = loops;
                     owner_->totalLoops_ = loops;
-                    owner_->stepCount_ = steps;  // Expected count
+                    owner_->stepCount_ = steps;
                     
                     // ACK with REF if present
                     char ack[40];
@@ -433,6 +487,16 @@ private:
             // ===== Protocol Upload: PR_DAT =====
             if (data.startsWith("PR_DAT;")) {
                 if (owner_ && owner_->protoRx_.active) {
+                    // bounds checking to bug hunt currentSteps_ corruption
+                    if (owner_->protoRx_.seq >= owner_->kMaxProtocolSteps) {
+                        // Send NAK and abort
+                        char nak[40];
+                        snprintf(nak, sizeof(nak), "ACK;PR_DAT=SEQ_OOB;MAX=%u", 
+                                owner_->kMaxProtocolSteps);
+                        sendMessage(nak, MessageType::INFO);
+                        owner_->protoRx_.active = false;
+                        return;
+                    }
                     // Check sequence number
                     int seq = kvGetIntClamped(data, "SEQ=", -1, 0, 255);
                     if (seq != owner_->protoRx_.seq) {
@@ -572,7 +636,7 @@ private:
                 return;
             }
 
-            // 6) RESUME? / NOTICE / HB from XPB:
+            // 6) / NOTICE / HB from XPB:
             //    Treat as notices/telemetry. Do not ACK. If you need UI updates, handle here.
             // (Currently ignoring silently unless you already have handlers elsewhere.)
 

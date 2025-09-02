@@ -2,3 +2,4 @@
 .vscode
 *.pyc
 upload_files/__pycache__/
+ser_term_logs/

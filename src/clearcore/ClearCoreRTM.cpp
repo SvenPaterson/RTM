@@ -139,6 +139,9 @@ void ClearCoreRTM::tick() {
         case State::Idle:
             handleIdle(runActive, justEntered_);
             break;
+        case State::Preheat:
+            handlePreheat(runActive, justEntered_);
+            break;
         case State::Running:
             handleRunning(runActive, justEntered_);
             break;
@@ -179,6 +182,11 @@ void ClearCoreRTM::tick() {
                 (unsigned)estopReason_);
         ttlComms_.sendMessage(msg, MessageType::INFO);
         ttlComms_.checkForMessages();
+
+        // Check periodically for mem corruption
+        if (guardBefore_ != 0xDEAD || guardAfter_ != 0xBEEF) {
+            eStopAll_("Memory corruption detected");
+        }
     }
 
 }
@@ -450,6 +458,30 @@ void ClearCoreRTM::handleCompleted(bool resetActive, bool justEntered_) {
     }
 
     return;
+}
+
+void ClearCoreRTM::handlePreheat(bool runActive, bool justEntered_) {
+    if (justEntered_) {
+        motor.EnableRequest(false);
+        LED_PIN.State(true);
+    }
+
+    if (!waitingForTemp_) {
+        coldStart_ = false;
+
+        if (autoStartAfterPreheat_ && runActive) {
+            state_ = State::Running;
+            dbgln("Preheat complete - starting motion");
+        } else {
+            state_ = State::Idle;
+            dbgln("Preheat complete - idle");
+        }
+    }
+
+    if (ledTmr_ > 500) {
+        ledTmr_ = 0;
+        LED_PIN.State(!LED_PIN.State());
+    }
 }
 
 // --------- output control handlers ------------
