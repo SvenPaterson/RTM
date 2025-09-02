@@ -262,6 +262,9 @@ private:
     bool     targetMet_   {false};
     bool     everRan_     {false};
     bool uploadProtocolToCC_();
+    bool ccProtoReq_      {false};
+    bool needResumeAfterProto_ = false;
+    bool protoTxInProgress_ = false; 
     
     // ---------- Preheat control ----------
     bool           preheatActive_{false};

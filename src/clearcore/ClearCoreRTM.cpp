@@ -3,8 +3,8 @@
 static constexpr uint16_t STAT_PERIOD_MS = 1000;
 static constexpr uint8_t  STALE_MULT     = 5;
 
-const char* const ClearCoreRTM::kStateNames[8] = {
-    "DEBUG", "IDLE", "RUNNING", "PAUSED", "RESETTING",
+const char* const ClearCoreRTM::kStateNames[9] = {
+    "DEBUG", "IDLE", "PREHEAT", "RUNNING", "PAUSED", "RESETTING",
     "RESUME", "COMPLETED", "E-STOP"
 };
 
@@ -67,7 +67,9 @@ bool ClearCoreRTM::begin() {
     totalLoops_ = 1;
     progHash_ = 0;
     dbgln("Awaiting protocol from XPB...");
-
+    ttlComms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
+    delay(2);
+    
     heartbeatTmr_ = 0;
     dwellTmr_ = 0;
     return true;

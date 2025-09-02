@@ -1,5 +1,6 @@
 // TTLComms.cpp
 #include "TTLComms.h"
+#include <ctype.h>
 
 #define XPB_TX_ECHO_USB 1
 
@@ -31,8 +32,8 @@ void TTLComms::sendCommand(const char* base, MessageType type) {
         snprintf(payload, sizeof(payload), "%s;REF=%u", base, (unsigned)ref);
     }
 
-    // Encode with checksum + LF
-    char msg[80];
+    // Encode with checksum + LF (payload + ':' + 2 hex + '\n' + NUL)
+    char msg[MAX_MSG_LEN + 6];
     const uint8_t checksum = this->calculateXOR(payload);
     snprintf(msg, sizeof(msg), "%s:%02X\n", payload, checksum);
 
@@ -136,11 +137,15 @@ void TTLComms::checkForMessages() {
     while (serialAvailable()) {
         char c = serialRead();
         if (c == '\r') continue;
+
         if (c == '\n') {
             if (validateMessage(incomingMsg_)) {
                 processMessage(incomingMsg_);
-            } else {
-                onBadChecksum(incomingMsg_);
+            } else { // This is a bandaid because we can't figure out why two lines are glued on boot...
+                // Attempt to salvage two glued frames like "...:4FACK;...:63"
+                if (!trySplitGluedFrames_(incomingMsg_)) {
+                    onBadChecksum(incomingMsg_);  // existing rate-limited warning
+                }
             }
             incomingMsg_ = "";
         } else if (incomingMsg_.length() < MAX_MSG_LEN) {
@@ -158,7 +163,7 @@ uint8_t TTLComms::calculateXOR(const char* data) {
     return checksum;
 }
 
-bool TTLComms::validateMessage(const String& msg) {
+/* bool TTLComms::validateMessage(const String& msg) {
     const int delim = msg.lastIndexOf(':');
     const size_t len = msg.length();
     if (delim < 0) return false;
@@ -214,7 +219,40 @@ bool TTLComms::validateMessage(const String& msg) {
     }
 
     return true;
+} */
+
+bool TTLComms::validateMessage(const String& msg) {
+    const int delim = msg.lastIndexOf(':');
+    const size_t len = msg.length();
+    if (delim < 0) return false;
+
+    // Expect exactly 2 hex digits after ':'
+    const size_t csLen = len - (size_t)delim - 1;
+    if (csLen != 2) return false;
+
+    auto isHex = [](char c) {
+        return (c >= '0' && c <= '9') ||
+               (c >= 'A' && c <= 'F') ||
+               (c >= 'a' && c <= 'f');
+    };
+    const char c0 = msg[delim + 1];
+    const char c1 = msg[delim + 2];
+    if (!isHex(c0) || !isHex(c1)) return false;
+
+    auto hexVal = [](char c) -> uint8_t {
+        if (c >= '0' && c <= '9') return uint8_t(c - '0');
+        if (c >= 'A' && c <= 'F') return uint8_t(c - 'A' + 10);
+        return uint8_t(c - 'a' + 10);
+    };
+    const uint8_t given = (hexVal(c0) << 4) | hexVal(c1);
+
+    // XOR of everything before ':'
+    uint8_t calc = 0;
+    for (int i = 0; i < delim; ++i) calc ^= (uint8_t)msg[i];
+
+    return (calc == given);
 }
+
 
 void TTLComms::processMessage(const String& msg) {
     int lastColon = msg.lastIndexOf(':');
@@ -294,4 +332,43 @@ double TTLComms::kvGetDouble(const String &frame, const char *key, double defVal
 void TTLComms::setRxUsbLogging(bool enabled, const char *peerTag) {
     logRx_ = enabled;
     rxTag_ = peerTag;
+}
+
+// Try to split two glued frames like "...:4FACK;QUIESCE;...:63"
+// Returns true if it split and dispatched both parts.
+bool TTLComms::trySplitGluedFrames_(const String &line) {
+    const int n = line.length();
+    for (int i = 0; i + 3 < n; ++i) {
+        if (line[i] == ':' &&
+            isxdigit(line[i+1]) && isxdigit(line[i+2])) {
+            const int next = i + 3;
+
+            auto startsWithAt = [&](int j, const char *tok) {
+                const int L = (int)strlen(tok);
+                return j + L <= n && line.substring(j, j + L) == tok;
+            };
+
+            if (next < n && (
+                startsWithAt(next, "ACK;")     ||
+                startsWithAt(next, "READY;")   ||
+                startsWithAt(next, "NOTICE;")  ||
+                startsWithAt(next, "HB;")      ||
+                startsWithAt(next, "STAT;")    ||
+                startsWithAt(next, "SW;")      ||
+                startsWithAt(next, "PR_")      ||   // PR_BEG/PR_DAT/PR_END
+                startsWithAt(next, "QUIESCE;") ||
+                startsWithAt(next, "REQ:")
+            )) {
+                String a = line.substring(0, next);
+                String b = line.substring(next);
+                a.trim(); b.trim();
+
+                bool used = false;
+                if (a.length() && validateMessage(a)) { processMessage(a); used = true; }
+                if (b.length() && validateMessage(b)) { processMessage(b); used = true; }
+                return used;  // true only if we dispatched at least one valid half
+            }
+        }
+    }
+    return false;
 }

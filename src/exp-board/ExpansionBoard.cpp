@@ -4,6 +4,15 @@
 
 #define XPB_INJECT_FROM_USB 0
 
+// In ExpansionBoard.h (or .cpp top) add:
+uint16_t nextRef_ = 1;
+struct Ack {
+    bool ok=false;
+    uint16_t ref=0;
+    String verb;   // "PR_BEG", "OK", "PR_END", "PROTO_RX"
+    String code;   // "OK", "BUSY", "BAD_SEQ", ...
+};
+volatile Ack lastAck_;  // updated inside TTL rx handler
 
 void xpbSoftResetNow() {
     #if defined(__AVR_ATmega4809__) || defined(ARDUINO_AVR_NANO_EVERY)
@@ -212,183 +221,6 @@ namespace {  // anonymous namespace: TU-private helpers for Resume logic
  * @brief Initialize all board subsystems and start comms/UI.
  * @copydetails ExpansionBoard::begin()
  */
-
-/* bool ExpansionBoard::begin() {
-    Serial.begin(9600);
-
-    // ---- USB console attach policy ----
-    // Default: no wait. Nano Every auto-resets on USB/DTR anyway.
-    // If you use a terminal that does NOT toggle DTR and want early logs, build with -DXPB_WAIT_USB_MS=2000.
-    #ifndef XPB_WAIT_USB_MS
-    #define XPB_WAIT_USB_MS 0
-    #endif
-    if (XPB_WAIT_USB_MS > 0) {
-        unsigned long t0 = millis();
-        while (!Serial && (millis() - t0 < XPB_WAIT_USB_MS)) { // spin 
-        }
-    }
-    dbgln("\nUSB Serial Monitor Connected!");
-
-    // UART to ClearCore (not on SPI) – safe to bring up early
-    ttlComms_.begin();
-    ttlComms_.setRxUsbLogging(true, "CC"); // toggle by sending LOG=0 / LOG=1
-    delay(200);
-    dbgln("Connecting with CC..");
-    // Ask CC to suppress stale-STAT E-STOP while XPB finishes boot work
-    ttlComms_.sendCommand("QUIESCE;SECS=10");
-
-    // --- SPI bus & SD first (prevents other devices from holding MISO) ---
-    spiQuiesceAll_();
-    bool sdOk = sdInitWithRetry_();  // prints "SD ready" or one FAIL summary
-
-    // --- E-STOP UI mask on boot and after intentional XPB reset ---
-    if ((int32_t)(millis() - estopUiMaskUntilMs_) >= 0) {
-        estopUiMaskUntilMs_ = millis() + 2500UL;
-        dbgln("[UI] E-STOP boot mask 2.5s");
-    }
-    if (consumeResetFlagTU()) {
-        estopUiMaskUntilMs_ = millis() + 8000UL;
-        suppressResumePrompt_ = true;                   // NEW: don’t prompt to resume
-        dbgln("[UI] E-STOP mask active (post-XPB reset)");
-    }
-
-    // LCD AFTER SD so the LCD CS can't hold MISO low during SD init
-    if (!lcd_.begin()) { dbgln("FATAL: LCD initialization failed!"); return false; }
-    lastUi_ = static_cast<UiPage>(0xFF);
-
-    // Switches
-    runSw_.attach(RUN_SW_PIN_, INPUT_PULLUP);   runSw_.interval(25);
-    resetSw_.attach(RESET_SW_PIN_, INPUT_PULLUP); resetSw_.interval(25);
-
-    // Sensors
-    dbg("Initializing MAX31855 sensor - TC1...");
-    delay(500); // stabilize
-    if (!tc1_.begin()) { dbgln("ERROR."); while (1) delay(10); }
-    else dbgln("DONE");
-    tc1_.setFaultChecks(MAX31855_FAULT_ALL);
-
-    
-    //dbg("Initializing MAX31855 sensor - TC2...");
-    //delay(500); // stabilize
-    //if (!tc2_.begin()) { dbgln("ERROR."); while (1) delay(10); }
-    //else dbgln("DONE");
-    //tc2_.setFaultChecks(MAX31855_FAULT_ALL);
-    
-
-    // Protocol + Resume (only if SD OK)
-    if (sdOk) {
-        if (!loadProtocolFromSD_("/protocol.csv")) {
-            dbgln("Protocol load FAILED");
-        } else {
-            dbgln("Protocol loaded OK");
-            logProtocol_();   // optional debug dump
-        }
-
-        // Optional slot dump for visibility
-        auto dumpSlots = [&](){
-            File fa = SD.open(kSlotA), fb = SD.open(kSlotB);
-            if (fa) { dbgkv("[SD] RA.BIN bytes=", (unsigned long)fa.size()); fa.close(); }
-            else     dbgln("[SD] RA.BIN missing");
-            if (fb) { dbgkv("[SD] RB.BIN bytes=", (unsigned long)fb.size()); fb.close(); }
-            else     dbgln("[SD] RB.BIN missing");
-        };
-        dumpSlots();
-
-        haveStoredResume_ = loadResumeLatestTU(storedPhash_, storedStep_, storedLoopCur_, storedLoopTot_);
-        if (haveStoredResume_) {
-            if (storedPhash_ != progHash_) {
-                dbgln("Resume record PHASH mismatch -> clearing");
-                clearResumeTU();
-                haveStoredResume_ = false;
-            } else {
-                char rb[64];
-                snprintf(rb, sizeof(rb), "Resume available: step=%u loop=%u",
-                        (unsigned)storedStep_, (unsigned)storedLoopCur_);
-                dbgln(rb);
-            }
-        }
-        // Scrub "virgin" resume (created before any real run)
-        // i.e., step=1 loop=1 for the same PHASH
-        if (haveStoredResume_ && storedPhash_ == progHash_) {
-            if (storedStep_ <= 1 && storedLoopCur_ <= 1) {
-                dbgln("Resume looks virgin (step=1 loop=1) -> clearing");
-                clearResumeTU();
-                haveStoredResume_ = false;
-            }
-        }
-
-        // === SMART PROTOCOL UPLOAD DECISION ===
-        // Upload to CC only when safe/necessary
-        if (stepCount_ > 0) {  // Only if we loaded a protocol successfully
-            bool shouldUpload = false;
-
-            dbgln("[UPLOAD DECISION]");
-            dbgkv("  haveStoredResume_: ", haveStoredResume_ ? "true" : "false");
-            dbgkv("  suppressResumePrompt_: ", suppressResumePrompt_ ? "true" : "false");
-
-            if (!haveStoredResume_) {
-                // No resume = fresh start, need to upload
-                dbgln("  Decision: No resume state - WILL upload");
-                shouldUpload = true;
-            } 
-            else if (suppressResumePrompt_) {
-                // After intentional XPB-only reset, CC already has protocol
-                dbgln("  Decision: Post-XPB reset - WON'T upload");
-                shouldUpload = false;
-            }
-            else {
-                // Have resume for this exact protocol - preserve CC state
-                dbgln("  Decision: Valid resume exists - WON'T upload");
-                shouldUpload = false;
-            }
-            
-            if (shouldUpload) {
-                dbgln("Waiting for CC ready signal...");
-                uint32_t uploadWait = millis();
-                while (!ccReady_ && millis() - uploadWait < 2000) {
-                    ttlComms_.checkForMessages();
-                    ttlComms_.checkRetries();
-                    delay(10);
-                }
-
-                dbgkv("  ccReady_: ", ccReady_ ? "true" : "false");
-                dbgkv("  Wait time ms: ", (unsigned long)(millis() - uploadWait));
-                
-                if (ccReady_ || millis() - uploadWait >= 2000) {
-                    dbgln("Uploading protocol to CC...");
-                    if (uploadProtocolToCC_()) {
-                        dbgln("Protocol upload successful");
-                    } else {
-                        dbgln("Protocol upload failed");
-                    }
-                } else {
-                    dbgln("CC not ready - skipping upload");
-                }
-            }
-        }
-
-    } else {
-        dbgln("No protocol loaded from SD - nothing to upload");
-    }
-
-    // Don’t warn here. We’ll show an info message only if there’s truly no CC traffic after 10s.
-    ccAnySeen_ = false;
-    warnedNoLink_ = false;
-    sinceBoot = 0;
-    dbgln("Awaiting CC traffic...");
-
-    // DEBUGGING ONLY
-    heater_.begin();                 // maybe only when a test / preheat starts?
-    heater_.setTargetTemp(32.0);     // temp will come from CC later
-
-    publishSwitchState_(true);
-
-    sinceBoot = 0;
-    warnedNoLink_ = false;
-
-    return true;
-} */
-
 bool ExpansionBoard::begin() {
     Serial.begin(9600);
 
@@ -589,65 +421,30 @@ bool ExpansionBoard::begin() {
         }
 
         // === ALWAYS UPLOAD PROTOCOL TO CC AFTER BOOT ===
-        if (stepCount_ > 0) {  // Only if we have a protocol to upload
-            dbgln("[PROTOCOL UPLOAD]");
-            dbgln("  CC needs protocol after boot - uploading...");
-            
-            // Wait for CC ready signal
-            dbgln("  Waiting for CC ready signal...");
-            uint32_t uploadWait = millis();
-            while (!ccReady_ && millis() - uploadWait < 2000) {
-                ttlComms_.checkForMessages();
-                ttlComms_.checkRetries();
-                delay(10);
-            }
-            
-            dbgkv("  ccReady_: ", ccReady_ ? "true" : "false");
-            dbgkv("  Wait time ms: ", (unsigned long)(millis() - uploadWait));
-            
-            if (ccReady_ || millis() - uploadWait >= 2000) {
-                dbgln("  Uploading protocol to CC...");
-                if (uploadProtocolToCC_()) {
-                    dbgln("  Protocol upload successful");
-                    
-                    // === AUTO-RESUME LOGIC (NO PROMPT) ===
-                    if (haveStoredResume_ && storedPhash_ == progHash_) {
-                        // Check if RUN switch is already engaged
-                        runSw_.update();  // Make sure we have current state
-                        bool runEngaged = (runSw_.read() == LOW);
-                        
-                        dbgln("  Auto-resume check:");
-                        dbgkv("    RUN engaged: ", runEngaged ? "YES" : "NO");
-                        dbgkv("    Resume step: ", (unsigned long)storedStep_);
-                        dbgkv("    Resume loop: ", (unsigned long)storedLoopCur_);
-                        
-                        // Send resume command with auto-start flag
-                        char line[96];
-                        snprintf(line, sizeof(line), 
-                                "CMD;RESUME=AUTO;STEP=%u;LOOP=%u;PHASH=%lu;AUTOSTART=%d",
-                                (unsigned)storedStep_,
-                                (unsigned)storedLoopCur_,
-                                (unsigned long)storedPhash_,
-                                runEngaged ? 1 : 0);
-                        ttlComms_.sendCommand(line, MessageType::CRITICAL);
-                        
-                        dbgln(runEngaged ? 
-                            "  Resume sent - will auto-start after preheat" : 
-                            "  Resume sent - waiting for RUN switch");
-                        
-                        // Don't clear resume data yet - let CC confirm it's applied
-                    } else {
-                        dbgln("  No valid resume data - starting fresh at step 1");
-                    }
-                } else {
-                    dbgln("  Protocol upload failed!");
-                }
+        // === DO NOT AUTO-UPLOAD FROM HERE ===
+        if (stepCount_ > 0) {
+            dbgln("[PROTOCOL] Standing by for CC REQ:PROTO");
+
+            // Decide now whether we should auto-resume AFTER CC requests + receives protocol
+            if (haveStoredResume_ && storedPhash_ == progHash_) {
+                // scrub virgin resume as you already do, then:
+                needResumeAfterProto_ = true;
+
+                // optional: log intent
+                char rb[96];
+                snprintf(rb, sizeof(rb),
+                        "[RESUME] Will auto-resume after CC completes protocol load: step=%u loop=%u",
+                        (unsigned)storedStep_, (unsigned)storedLoopCur_);
+                dbgln(rb);
             } else {
-                dbgln("  CC not ready - skipping upload");
+                dbgln("[RESUME] No valid stored resume or PHASH mismatch");
+                needResumeAfterProto_ = false;
             }
         } else {
             dbgln("No protocol loaded from SD - nothing to upload");
+            needResumeAfterProto_ = false;
         }
+
 
     } else {
         dbgln("SD init failed - no protocol available");
@@ -775,56 +572,15 @@ void ExpansionBoard::tick() {
     }
     #endif
 
-    // ----- SWITCH SCAN (debounced edges) -----
-    bool runEdgeDown  = false, runEdgeUp  = false;
-    bool rstEdgeDown  = false, rstEdgeUp  = false;
-
-    if (runSw_.update()) {
-        runEdgeDown = runSw_.fell();   // INPUT_PULLUP: HIGH->LOW = pressed
-        runEdgeUp   = runSw_.rose();   // LOW->HIGH    = released
-    }
-    if (resetSw_.update()) {
-        rstEdgeDown = resetSw_.fell();
-        rstEdgeUp   = resetSw_.rose();
+    // ----- NORMAL SWITCH PUBLISH (no prompt active) -----
+    runSw_.update();
+    resetSw_.update();
+    if (runSw_.changed() || resetSw_.changed()) {
+        publishSwitchState_();  // reads debounced levels inside
+    } else if (millis() - lastSwPublishMs_ > 60000UL) {
+        publishSwitchState_(true); // 60s keep-alive
     }
 
-    // ----- HANDLE RESUME PROMPT FIRST (consume edges, suppress normal publishing) -----
-/*     if (uiPendingResume_) {
-        if (runEdgeDown) {
-            // User chose RESUME
-            char line[64];
-            snprintf(line, sizeof(line),
-                     "CMD;RESUME=YES;STEP=%u;LOOP=%u;PHASH=%lu",
-                     (unsigned)storedStep_, (unsigned)storedLoopCur_, (unsigned long)storedPhash_);
-            ttlComms_.sendMessage(line, MessageType::CRITICAL);
-
-            clearResumeTU();
-            haveStoredResume_ = false;
-            uiPendingResume_  = false;
-
-            // Publish current switch state so CC sees RUN=1 immediately
-            publishSwitchState_(true);
-        } else if (rstEdgeDown) {
-            // User chose RESTART
-            ttlComms_.sendMessage("CMD;RESUME=NO", MessageType::CRITICAL);
-
-            clearResumeTU();
-            haveStoredResume_ = false;
-            uiPendingResume_  = false;
-
-            // Ensure CC gets the current switch state (likely RUN=0)
-            publishSwitchState_(true);
-        }
-        // NOTE: While the prompt is displayed, skip normal switch publishing & keep-alive below.
-    } else {
-        // ----- NORMAL SWITCH PUBLISH (no prompt active) -----
-        if (runSw_.changed() || resetSw_.changed()) {
-            publishSwitchState_();  // reads debounced levels inside
-        } else if (millis() - lastSwPublishMs_ > 60000UL) {
-            publishSwitchState_(true); // 60s keep-alive
-        }
-    }
- */
     // ----- SENSORS / CONTROL -----
     updateData();  // MAX31855, etc.
 
@@ -868,9 +624,7 @@ void ExpansionBoard::tick() {
             page = UiPage::EStop;
         }
     } 
-/*     else if (uiPendingResume_) {
-        page = UiPage::ResumePrompt;
-    }  */
+
     else if (!resetUiActive_ && ccHbSeen_ && ccHbAgeTmr_ > 3000U) {
         page = UiPage::LostComms;
     } 
@@ -1269,7 +1023,6 @@ bool ExpansionBoard::uploadProtocolToCC_() {
     // 2. Send PR_DAT chunks (dummy for now)
     dbgln("[PROTO] Sending data chunks...");
 
-    // In XPB uploadProtocolToCC_():
     for (uint8_t i = 0; i < stepCount_; i++) {
         // Format: "SEQ=n;DATA=rpm,accel,dwell"
         snprintf(msg, sizeof(msg), "PR_DAT;SEQ=%u;DATA=%ld,%lu,%lu,%u", 
@@ -1288,7 +1041,7 @@ bool ExpansionBoard::uploadProtocolToCC_() {
     ttlComms_.sendMessage(msg, MessageType::CRITICAL);
     delay(100);
     ttlComms_.checkForMessages();
-    
+
     return true;
 }
 /// ExpansionBoardTTL
@@ -1593,31 +1346,6 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
     }
 
     // ===== READY from CC =====
-    /* if (data.startsWith("READY;ID=CC")) {
-        if (owner_) {
-            owner_->ccReady_ = true;
-
-            // Tell CC our current heater OUT immediately (telemetry; no ACK)
-            char line[64];
-            snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d",
-                     owner_->hbSeq_++, owner_->heater_.lastOut());
-            sendMessage(line, MessageType::INFO);             
-
-            // Also publish switches so CC sees the current RUN/RST right away (unsolicited)
-            owner_->publishSwitchState_(true);                
-
-            // Optional resume prompt to CC (notice; no ACK expected)
-            if (owner_->haveStoredResume_ && !owner_->suppressResumePrompt_) {
-                snprintf(line, sizeof(line), "RESUME?;STEP=%u;LOOP=%u;PHASH=%lu",
-                         (unsigned)owner_->storedStep_,
-                         (unsigned)owner_->storedLoopCur_,
-                         (unsigned long)owner_->storedPhash_);
-                sendMessage(line, MessageType::NORMAL);
-                owner_->uiPendingResume_ = true;
-            }
-        }
-        return;
-    } */
     if (data.startsWith("READY;ID=CC")) {
         if (owner_) {
             owner_->ccReady_ = true;
@@ -1640,6 +1368,56 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
     if (data.startsWith("REQ:SW")) { 
         if (owner_) owner_->publishSwitchState_(true, hasRef ? (int)refVal : -1); 
         return;  // important: do NOT send a separate ACK    
+    }
+
+    if (data.startsWith("REQ:PROTO;")) {
+        if (!owner_->ccProtoReq_) {
+            owner_->ccProtoReq_ = true;
+            owner_->uploadProtocolToCC_();
+        }
+    }
+
+    // ===== NOTICE from CC: protocol receive completed =====
+    // Format we expect: "NOTICE;PROTO_RX=OK;PHASH=<uint32>"
+    if (data.startsWith("NOTICE;")) {
+        // Only act on PROTO_RX=OK
+        String sProto = kvGet(data, "PROTO_RX=");
+        if (sProto.length() && sProto == "OK") {
+            // Parse PHASH (defaults to 0 if missing or bad)
+            String sPH = kvGet(data, "PHASH=");
+            uint32_t rxPhash = sPH.length() ? (uint32_t)sPH.toInt() : 0UL;
+
+            // Fire resume once, and only if it matches the stored PHASH plan
+            if (owner_) {
+                if (owner_->needResumeAfterProto_ &&
+                    rxPhash != 0UL &&
+                    rxPhash == owner_->storedPhash_) {
+
+                    // Re-check RUN at the last possible moment for AUTOSTART
+                    owner_->runSw_.update();
+                    bool runEngaged = (owner_->runSw_.read() == LOW);
+
+                    char line[96];
+                    snprintf(line, sizeof(line),
+                            "CMD;RESUME=AUTO;STEP=%u;LOOP=%u;PHASH=%lu;AUTOSTART=%d",
+                            (unsigned)owner_->storedStep_,
+                            (unsigned)owner_->storedLoopCur_,
+                            (unsigned long)owner_->storedPhash_,
+                            runEngaged ? 1 : 0);
+                    sendCommand(line, MessageType::CRITICAL);
+
+                    owner_->dbgln(runEngaged
+                        ? "[RESUME] Sent (auto-start after preheat)"
+                        : "[RESUME] Sent (waiting for RUN switch)");
+
+                    // Consume intent so we never send twice
+                    owner_->needResumeAfterProto_ = false;
+                }
+            }
+        }
+
+        // We don't ACK NOTICE; it's one-way telemetry
+        return;
     }
 
     // ===== Commands from CC → send exactly one ACK; mirror REF if present =====

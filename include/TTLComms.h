@@ -28,14 +28,13 @@ public:
     virtual int  serialPeek() = 0;
     
     // Common functionality
-    void beginBase() { incomingMsg_.reserve(80); } // preallocate memory
+    void beginBase() { incomingMsg_.reserve(MAX_MSG_LEN + 8); } // preallocate memory
     void sendMessage(const char* data, bool needsAck = false);
     void sendMessage(const char* data, MessageType type);
     // Convenience for commands that should carry a REF and expect an ACK/response
     void sendCommand(const char* base, MessageType type = MessageType::IMPORTANT);
     void checkRetries();
     void checkForMessages();
-
     void setRxUsbLogging(bool enabled, const char *peerTag = nullptr);
 
     // Message callback - override in derived classes
@@ -60,6 +59,8 @@ protected:
 private:
     static constexpr uint32_t ACK_TIMEOUT_MS = 500;
     static constexpr uint8_t MAX_RETRIES = 5;
+
+    bool trySplitGluedFrames_(const String &line);
     
     PendingMessage pendingMsg_;
     bool waitingForAck_ = false;
@@ -67,7 +68,7 @@ private:
     uint16_t nextRef_    = 1;   // rolling correlation token
     uint16_t pendingRef_ = 0;   // REF of the in-flight cmd (if any)
 
-    static constexpr size_t MAX_MSG_LEN = 79;
+    static constexpr size_t MAX_MSG_LEN = 160;
     String incomingMsg_ = ""; 
 
     bool        logRx_ = false;

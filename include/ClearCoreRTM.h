@@ -130,7 +130,7 @@ private:
     uint32_t    swLastUpdateMs_    = 0;
 
     // string mapping for displaying active state on LCD
-    static const char* const kStateNames[8];
+    static const char* const kStateNames[9];
     static inline const char * stateToString(State s) {
         return kStateNames[static_cast<uint8_t>(s)];
     }
@@ -140,6 +140,7 @@ private:
         int32_t  speedSteps_s   {0};   //!< target speed in steps/s
         uint32_t accelSteps_s2  {0};   //!< accel in steps/s²
         uint32_t dwellMs        {0};   //!< dwell after speed reached (ms)
+        uint16_t tempC          {0};
     };
 
     struct ProtoRx {
@@ -342,64 +343,64 @@ private:
 
             // 1) Legacy discovery path (XPB says HELLO). Keep for back-compat.
             if (data.startsWith("CMD;")) {
-                String resume = kvGet(data, "RESUME=");
+                const String resume = kvGet(data, "RESUME=");
                 if (resume.length()) {
                     if (resume == "AUTO" || resume == "YES") {
+                        // 1) must have protocol
                         if (owner_->stepCount_ == 0) {
                             owner_->dbgln("ERROR: Cannot resume - no protocol loaded");
-                            sendMessage("ACK;RESUME=ERR_NO_PROTO", MessageType::INFO);
+                            sendMessage("ACK;RESUME=ERR_NO_PROTO", MessageType::IMPORTANT);
                             return;
                         }
 
                         // Parse resume parameters
                         int resumeStep = kvGetIntClamped(data, "STEP=", 1, 1, owner_->stepCount_);
                         int resumeLoop = kvGetIntClamped(data, "LOOP=", 1, 1, owner_->totalLoops_);
-                        int autoStart = kvGetIntClamped(data, "AUTOSTART=", 0, 0, 1);
+                        int autoStart  = kvGetIntClamped(data, "AUTOSTART=", 0, 0, 1);
 
                         // Validate step bounds
                         if (resumeStep > owner_->stepCount_ || resumeStep < 1) {
                             owner_->dbgln("ERROR: Resume step out of bounds");
-                            sendMessage("ACK;RESUME=ERR_BAD_STEP", MessageType::INFO);
+                            sendMessage("ACK;RESUME=ERR_BAD_STEP", MessageType::IMPORTANT);
                             return;
                         }
 
                         // Apply the resume position
-                        owner_->currentStep_ = resumeStep - 1;  // Convert to 0-based index
-                        owner_->loopCount_ = owner_->totalLoops_ - resumeLoop + 1;
+                        owner_->currentStep_ = (uint16_t)(resumeStep - 1);  // Convert to 0-based index
+                        owner_->loopCount_ = owner_->totalLoops_ - (uint32_t)resumeLoop + 1;
 
                         // Check if we need to preheat (cold start only)
-                        if (owner_->coldStart_ && owner_->steps_[owner_->currentStep_].tempC_ > 0) {
-                            owner_->state_ = State::Preheat;
-                            owner_->preheatTargetC_ = owner_->steps_[owner_->currentStep_].tempC_;
-                            owner_->waitingForTemp_ = true;
-                            owner_->autoStartAfterPreheat_ = (autoStart == 1);
-                            
-                            char msg[80];
-                            snprintf(msg, sizeof(msg), "PREHEAT: target=%u°C autostart=%d", 
-                                    owner_->preheatTargetC_, autoStart);
-                            owner_->dbgln(msg);
-                            
-                            // Tell XPB to set heater setpoint
-                            char cmd[64];
+                        // Preheat decision (only when AUTOSTART=1)
+                        const uint16_t targetC = owner_->steps_[owner_->currentStep_].tempC;
+                        if (autoStart == 1 && owner_->coldStart_ && targetC > 0) {
+                            owner_->state_                 = State::Preheat;
+                            owner_->preheatTargetC_        = targetC;
+                            owner_->waitingForTemp_        = true;
+                            owner_->autoStartAfterPreheat_ = true; // implied by AUTOSTART=1
+
+                            char cmd[48];
                             snprintf(cmd, sizeof(cmd), "CMD;SP=%u", owner_->preheatTargetC_);
                             sendMessage(cmd, MessageType::IMPORTANT);
+
+                            owner_->dbgln("PREHEAT queued (AUTOSTART=1)");
                         } else {
-                            // No preheat needed - go straight to idle or running
+                            // No preheat path
+                            owner_->coldStart_ = false;  // important so a later resume doesn't re-preheat
                             if (autoStart == 1) {
-                                owner_->state_ = State::Running;
-                                owner_->dbgln("RESUMED: auto-starting motion");
+                                owner_->state_ = State::Resume;        // funnel through unified resume
+                                owner_->dbgln("RESUMED: auto-start (no preheat)");
                             } else {
-                                owner_->state_ = State::Idle;
-                                owner_->dbgln("RESUMED: position loaded, idle");
+                                owner_->state_ = State::Idle;          // booted idle; we do not preheat
+                                owner_->dbgln("RESUMED: position loaded, idle (no preheat)");
                             }
                         }
 
                         char msg[80];
-                        snprintf(msg, sizeof(msg), "RESUMED: step=%u loop=%u/%u", 
+                        snprintf(msg, sizeof(msg), "RESUMED: step=%u loop=%u/%lu", 
                                 resumeStep, resumeLoop, owner_->totalLoops_);
                         owner_->dbgln(msg);
                         
-                        sendMessage("ACK;RESUME=OK", MessageType::INFO);
+                        sendMessage("ACK;RESUME=OK", MessageType::IMPORTANT);
                     }
                     return;
                 }       
@@ -585,6 +586,14 @@ private:
                     }
                     owner_->dbgln("=========================");
                     
+                    char ack[40];
+                    if (hasRef) {
+                        snprintf(ack, sizeof(ack), "ACK;OK;REF=%u", refVal);
+                    } else {
+                        snprintf(ack, sizeof(ack), "ACK;OK");
+                    }
+                    sendMessage(ack, MessageType::INFO);
+                    
                     // Send success notice
                     char notice[64];
                     snprintf(notice, sizeof(notice), "NOTICE;PROTO_RX=OK;PHASH=%lu",
@@ -634,12 +643,24 @@ private:
                         owner_->dbgln("[CC] Auto-cleared E-STOP (stale-STAT recovered)");
                     }
                     
+                    // preheat completion check
                     if (owner_->waitingForTemp_ && owner_->state_ == State::Preheat) {
-                        if (temp >= owner_->preheatTargetC_ - 2) {
-                            owner_->waitingForTemp_ = false;
-                            owner_->dbgln("Pre-heat target reached");
+                        static uint8_t inRangeCount = 0;
+                        const int err = temp - (int)owner_->preheatTargetC_;
+                        if (err >= -2 && err <= 2) {
+                            if (++inRangeCount >= 2) {  // tiny debounce
+                                owner_->waitingForTemp_ = false;
+                                owner_->coldStart_ = false;
+                                owner_->dbgln("Pre-heat target reached");
+                                owner_->state_ = State::Resume;  // always resume from preheat
+                                owner_->dbgln("Auto-continue -> RESUME");
+                                inRangeCount = 0;
+                            }
+                        } else {
+                            inRangeCount = 0;
                         }
                     }
+
                 }
                 return;
             }
