@@ -847,7 +847,9 @@ void ExpansionBoard::tick() {
         heartbeatTmr_ = 0;
         char line[80];
         const int out = heater_.lastOut();
-        snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d", hbSeq_++, out);
+        const int tempC = isnan(latestSumpC_) ? 0 : (int)latestSumpC_;
+        snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d;TEMP=%d", 
+                 hbSeq_++, out, tempC);
         ttlComms_.sendMessage(line, MessageType::INFO);
     }
 

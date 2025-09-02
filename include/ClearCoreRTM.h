@@ -616,6 +616,7 @@ private:
                 static int lastSeq = -1;
                 const int seq = kvGet(data, "SEQ=").toInt();
                 const int out = kvGetIntClamped(data, "OUT=", 0, 0, 150);
+                const int temp = kvGetIntClamped(data, "TEMP=", 0, 0, 200);
 
                 const bool dup = (seq >= 0 && seq == lastSeq);
                 if (seq >= 0) lastSeq = seq;
@@ -631,6 +632,13 @@ private:
                         owner_->estopReason_ &= ~ESTOP_STALE_STAT;
                         owner_->state_ = State::Idle;
                         owner_->dbgln("[CC] Auto-cleared E-STOP (stale-STAT recovered)");
+                    }
+                    
+                    if (owner_->waitingForTemp_ && owner_->state_ == State::Preheat) {
+                        if (temp >= owner_->preheatTargetC_ - 2) {
+                            owner_->waitingForTemp_ = false;
+                            owner_->dbgln("Pre-heat target reached");
+                        }
                     }
                 }
                 return;
