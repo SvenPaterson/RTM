@@ -82,15 +82,17 @@ private:
     void eStopAll_(const char *reason);
     void sendAlarm_(const char *type, const char *reason);
     bool heaterInhibit_{false};
+    bool heartbeatSystemEnabled_{false};
+    elapsedMillis heartbeatTmr_, xpbStaleTmr_;
 
     /* ——— debug helpers ——— */
     char debugBuf_[150];
     inline void dbg(const char *s)                    { if (SerialPort) SerialPort.Send(s); }
     inline void dbgln(const char *s)                  { if (SerialPort) SerialPort.SendLine(s); }
-    inline void dbgkv(const char *k, const char *v)   { if (SerialPort) { SerialPort.Send(k); SerialPort.SendLine(v); } }
+    inline void dbgkv(const char *k, const char *v)   { if (SerialPort) { SerialPort.Send(k); SerialPort.Send(v); } }
     inline void dbgkv(const char *k, const String &v) { dbgkv(k, v.c_str()); }
-    inline void dbgkv(const char *k, int32_t v)       { if (SerialPort) { SerialPort.Send(k); SerialPort.SendLine(v); } }
-    inline void dbgkv(const char *k, uint32_t v)      { if (SerialPort) { SerialPort.Send(k); SerialPort.SendLine(v); } }
+    inline void dbgkv(const char *k, int32_t v)       { if (SerialPort) { SerialPort.Send(k); SerialPort.Send(v); } }
+    inline void dbgkv(const char *k, uint32_t v)      { if (SerialPort) { SerialPort.Send(k); SerialPort.Send(v); } }
     inline void dbgkv(const char *k, uint16_t v)      { dbgkv(k, (uint32_t)v); }
     inline void dbgkv(const char *k, uint8_t v)       { dbgkv(k, (uint32_t)v); }
 
@@ -106,6 +108,8 @@ private:
     /* ——— runtime states ——— */
     enum class State : uint8_t {
         Debug,
+        BOOT,
+        PROTO_LOADING,
         Idle,
         Preheat,
         Running,
@@ -151,6 +155,7 @@ private:
         uint8_t stepsRcvd{0};
     } protoRx_;
     uint32_t progHash_;
+    elapsedMillis protoRequestTmr_;
 
     static constexpr uint8_t  kMaxProtocolSteps = 50;
     static constexpr uint16_t kStepsPerRev      = 3200; // set this using ClearPath software on Stepper Motor, don't go lower than 3200
@@ -162,9 +167,10 @@ private:
     uint32_t loopCount_   {1};
     uint32_t totalLoops_  {1};
     String   protocolName_;
+    bool     currentlyLoadingProto_{false}, isProtoLoaded_{false};
 
     /* ——— runtime state ——— */
-    State    state_{State::Idle}, prevState_{State::Idle}, preReset_{State::Idle};
+    State    state_{State::BOOT}, prevState_{State::BOOT}, preReset_{State::BOOT};
     uint16_t guardBefore_ = 0xDEAD;
     uint16_t currentStep_ {0};
     uint16_t guardAfter_ = 0xBEEF;
@@ -179,6 +185,7 @@ private:
     elapsedMillis ledTmr_, dwellTmr_, testRunTmr_, lcdTmr_;
     uint16_t lcdToggle_ms_{3000}; // default to every 3s
     uint32_t runMins_{0};
+    
 
     /* ——— LCD front/shadow buffers ——— */
     char buf_[kNumCols + 1] = {};
@@ -200,6 +207,8 @@ private:
     void setHeaterOutput(int out);
 
     /* ——— state handlers ——— */
+    void handleBoot      (bool resetActive, bool justEntered_);
+    void handleProtoLoad (                  bool justEntered_);
     void handleIdle      (bool runActive,   bool justEntered_);
     void handleRunning   (bool runActive,   bool justEntered_);
     void handlePaused    (bool runActive,   bool justEntered_);
@@ -441,8 +450,9 @@ private:
 
             // ===== Protocol Upload: PR_BEG =====
             if (data.startsWith("PR_BEG;")) {
-                // Only accept in IDLE or PAUSED states
-                if (owner_ && (owner_->state_ == State::Idle || owner_->state_ == State::Paused)) {
+                owner_->currentlyLoadingProto_ = true;
+                // Only accept in BOOT state
+                if (owner_ && (owner_->state_ == State::BOOT)) {
                     // Parse protocol metadata
                     String name = kvGet(data, "NAME=");
                     String loopsStr = kvGet(data, "LOOPS=");
@@ -472,6 +482,7 @@ private:
                         snprintf(ack, sizeof(ack), "ACK;PR_BEG=OK");
                     }
                     sendMessage(ack, MessageType::INFO);
+                    owner_->state_ = State::PROTO_LOADING;
                 } else {
                     // Reject - wrong state
                     char nak[40];
@@ -565,9 +576,13 @@ private:
                     // Log the received protocol
                     owner_->dbgln("==== Protocol Received ====");
                     owner_->dbgkv("Name: ", owner_->protocolName_);
+                    owner_->dbgln("");
                     owner_->dbgkv("Loops: ", owner_->totalLoops_);
+                    owner_->dbgln("");
                     owner_->dbgkv("Steps: ", owner_->stepCount_);
+                    owner_->dbgln("");
                     owner_->dbgkv("PHASH: ", owner_->progHash_);
+                    owner_->dbgln("");
                     
                     // Print steps for verification
                     for (uint8_t i = 0; i < owner_->stepCount_; ++i) {
@@ -599,9 +614,18 @@ private:
                     snprintf(notice, sizeof(notice), "NOTICE;PROTO_RX=OK;PHASH=%lu",
                             (unsigned long)owner_->progHash_);
                     sendMessage(notice, MessageType::INFO);
-                    
+
                     owner_->dbgln("[PROTO] Upload complete - ready to run");
+                    owner_->state_ = State::Idle;
+                } else {
+                    owner_->dbgln("[PROTO} Upload failed");
+                    owner_->state_ = State::BOOT;
                 }
+
+                // what do we do here if there wasn't a successful proto upload?
+                // do we compare the XPB provided phash against a calculated phash
+                // then ack we have successfully recieved?
+                owner_->currentlyLoadingProto_ = false;
                 return;
             }
 
@@ -616,6 +640,7 @@ private:
                     owner_->swLastUpdateMs_    = Milliseconds();
                     owner_->dbg("[SW←XPB] run="); owner_->dbgkv("", (unsigned long)run);
                     owner_->dbg(" rst=");         owner_->dbgkv("", (unsigned long)rst);
+                    owner_->dbgln("");
                 }
                 return;
             }
@@ -633,7 +658,7 @@ private:
 
                 if (owner_) {
                     owner_->commsHealthy_ = true;
-                    owner_->statAgeTmr_   = 0;                 // fresh data just arrived
+                    owner_->xpbStaleTmr_   = 0;                 // fresh data just arrived
                     owner_->setHeaterOutput(out);
 
                     // Auto-clear stale-STAT E-STOP on first good STAT
@@ -690,10 +715,8 @@ private:
     private:
         ClearCoreRTM *owner_{nullptr};
     };
-
-    // In ClearCore-RTM.h private members:
     ClearCoreTTL ttlComms_;
-    elapsedMillis heartbeatTmr_;
+    
 };
 
 

@@ -983,10 +983,10 @@ bool ExpansionBoard::loadProtocolFromSD_(const char *path) {
  */
 void ExpansionBoard::logProtocol_() const {
   dbgln("==== Protocol (XPB) ====");
-  dbgkv("Name: ", protocolName_.c_str());
-  dbgkv("Loops: ", (unsigned long)loopCount_);
-  dbgkv("Steps: ", (unsigned long)stepCount_);
-  dbgkv("PHASH: ", (unsigned long)progHash_);
+  dbgkv("\nName: ", protocolName_.c_str());
+  dbgkv("\nLoops: ", (unsigned long)loopCount_);
+  dbgkv("\nSteps: ", (unsigned long)stepCount_);
+  dbgkv("\nPHASH: ", (unsigned long)progHash_);
   for (uint8_t i=0;i<stepCount_;++i) {
     // Convert back to human RPM/RPMs for print
     static constexpr uint16_t kStepsPerRev = 3200;

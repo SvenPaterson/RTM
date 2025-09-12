@@ -61,16 +61,17 @@ bool ClearCoreRTM::begin() {
     ttlComms_.sendCommand("REQ:SW",      MessageType::IMPORTANT);
 
     // Initialize with empty protocol - will receive from XPB
-    protocolName_ = "Awaiting Upload";
-    stepCount_ = 0;
-    loopCount_ = 1;
-    totalLoops_ = 1;
-    progHash_ = 0;
-    dbgln("Awaiting protocol from XPB...");
-    ttlComms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
-    delay(2);
+    state_ = State::BOOT;
+
+    // MOVED TO handleBoot()
+    //dbgln("Awaiting protocol from XPB...");
+    //ttlComms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
+    //delay(2);
+
+    // MOVED to handleProtoLoad()
+    //heartbeatTmr_ = 0;
     
-    heartbeatTmr_ = 0;
+    
     dwellTmr_ = 0;
     return true;
 }
@@ -82,10 +83,9 @@ void ClearCoreRTM::tick() {
     // --- Comms health & stale guard ---
     const bool maskActiveNow = (xpbMaskActive_ && Milliseconds() < xpbMaskUntilMs_);
     if (commsHealthy_ && 
-        statAgeTmr_ > (STALE_MULT * STAT_PERIOD_MS) && 
-        state_ != State::EStop) {
+        xpbStaleTmr_ > (STALE_MULT * STAT_PERIOD_MS) && state_ != State::EStop) {
         if (!maskActiveNow) {
-            estopReason_ |= ESTOP_STALE_STAT;                    // <— tag the cause
+            estopReason_ |= ESTOP_STALE_STAT;
             const char *why = xpbMaskActive_ ? "XPB stale (mask expired)" : "XPB STAT stale > 5s";
             eStopAll_(why);
         }
@@ -97,35 +97,38 @@ void ClearCoreRTM::tick() {
 
     // first check for E-Stop
     if (eStopActive && state_ != State::EStop) {
-    estopReason_ |= ESTOP_SAFETY;      // <— tag hardware cause
-    eStopAll_("HW E-STOP input");
-    return;
-}
-
-    // check for reset request
-    if (resetActive && !prevResetActive_ && state_ != State::EStop) {
-        if (state_ != State::Running) {
-            // capture re-reset state so it can be restored later
-            preReset_ = state_;
-            state_ = State::ResetRequested;
-            //renderScreen();
-            resetTmr_ = 0;
-        }
+        estopReason_ |= ESTOP_SAFETY;      // <— tag hardware cause
+        eStopAll_("HW E-STOP input");
+        return;
     }
-    prevResetActive_ = resetActive;
 
     // transition logic for pause / resume / start
-    if (!runActive && !resetActive && state_ == State::Running) {
+    if (state_ != State::BOOT && state_ != State::PROTO_LOADING) {
+
+        // check for reset request
+        if (resetActive && !prevResetActive_ && state_ != State::EStop) {
+            if (state_ != State::Running) {
+                // capture re-reset state so it can be restored later
+                preReset_ = state_;
+                state_ = State::ResetRequested;
+                //renderScreen();
+                resetTmr_ = 0;
+            }
+        }
+        prevResetActive_ = resetActive;
+
+        if (!runActive && !resetActive && state_ == State::Running) {
             // middle‐position ⇒ Pause
             state_ = State::Paused;
-    }
-    else if (runActive && state_ == State::Paused) {
+        }
+        else if (runActive && state_ == State::Paused) {
             // User selects Run position again ⇒ Resume
             state_ = State::Resume;
-    }
-    else if (runActive && state_ == State::Idle) {
+        }
+        else if (runActive && state_ == State::Idle) {
             // User selects Run position for first time ⇒ Running
             state_ = State::Running;
+        }
     }
 
     // justEntered_ allows us to do things once upon first entering a state handler
@@ -138,6 +141,12 @@ void ClearCoreRTM::tick() {
     
     // dispatch to state handlers
     switch (state_) {
+        case State::BOOT:
+            handleBoot(runActive, justEntered_);
+            break;
+        case State::PROTO_LOADING:
+            handleProtoLoad(justEntered_);
+            break;
         case State::Idle:
             handleIdle(runActive, justEntered_);
             break;
@@ -166,7 +175,7 @@ void ClearCoreRTM::tick() {
             break;
     }
 
-    if (heartbeatTmr_ >= 1000) {
+    if (heartbeatTmr_ >= 1000 && heartbeatSystemEnabled_) {
         heartbeatTmr_ = 0;
         const bool maskActiveNowHb = (xpbMaskActive_ && Milliseconds() < xpbMaskUntilMs_);
         const char *stateStr = maskActiveNowHb ? "WAITING_XPB" : stateToString(state_);
@@ -194,9 +203,48 @@ void ClearCoreRTM::tick() {
 }
 
 /* ——— State Handlers ——— */
-void ClearCoreRTM::handleIdle(bool, bool justEntered_) {
+void ClearCoreRTM::handleBoot(bool resetActive, bool justEntered_) {
+    if (justEntered_) { 
+        heartbeatSystemEnabled_ = false;
+        protoRequestTmr_ = 0;
+        dbgln("BOOT: Requesting protocol from XPB...");
+        ttlComms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
+
+        protocolName_ = "Awaiting Upload";
+        stepCount_ = 0;
+        loopCount_ = 1;
+        totalLoops_ = 1;
+        progHash_ = 0;
+
+        // can't remember how we are rendering the screen
+        // but the above default stats should display while we load
+    }
+
+    if (protoRequestTmr_ > 5000) {
+        dbgln("Awaiting protocol from XPB...");
+        ttlComms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
+        delay(2);
+        protoRequestTmr_ = 0;
+    }
+
+    return;
+}
+
+void ClearCoreRTM::handleProtoLoad(bool justEntered_) {
+    if (justEntered_) { 
+        heartbeatSystemEnabled_ = false;
+        dbgln("LOADING: Protocol chunks being recieved...");
+    }
+    // do nothing while we wait for proto to load?
+    // do we even need handleProtoLoad if we aren't doing anything?
+    return;
+}
+
+void ClearCoreRTM::handleIdle(bool runActive, bool justEntered_) {
     if (justEntered_) {
-        //renderScreen(); // no need to update the screen before a test starts
+        // start beating
+        heartbeatSystemEnabled_ = true;
+        xpbStaleTmr_ = 0;
     }
     
     // flash LED slowly

@@ -88,11 +88,11 @@ private:
     /// @brief Print blank line if Serial is enabled.
     inline void dbgln()              const { if (Serial) Serial.println(); }
     /// @brief Print key/value (c-string) with newline if Serial is enabled.
-    inline void dbgkv(const char *k, const char *v)   const { if (Serial) { Serial.print(k); Serial.println(v); } }
+    inline void dbgkv(const char *k, const char *v)   const { if (Serial) { Serial.print(k); Serial.print(v); } }
     /// @brief Print key/value (String) with newline if Serial is enabled.
-    inline void dbgkv(const char *k, const String &v) const { if (Serial) { Serial.print(k); Serial.println(v); } }
+    inline void dbgkv(const char *k, const String &v) const { if (Serial) { Serial.print(k); Serial.print(v); } }
     /// @brief Print key/value (number) with newline if Serial is enabled.
-    inline void dbgkv(const char *k, unsigned long v) const { if (Serial) { Serial.print(k); Serial.println(v); } }
+    inline void dbgkv(const char *k, unsigned long v) const { if (Serial) { Serial.print(k); Serial.print(v); } }
 
     // ---------- CC heartbeat / state mirror ----------
     elapsedMillis ccHbAgeTmr_;
