@@ -3,10 +3,23 @@
 static constexpr uint16_t STAT_PERIOD_MS = 1000;
 static constexpr uint8_t  STALE_MULT     = 5;
 
-const char* const ClearCoreRTM::kStateNames[9] = {
-    "DEBUG", "IDLE", "PREHEAT", "RUNNING", "PAUSED", "RESETTING",
-    "RESUME", "COMPLETED", "E-STOP"
+const char* const ClearCoreRTM::kStateNames[] = {
+    "DEBUG",        // State::Debug
+    "BOOT",         // State::BOOT
+    "PROTO LOAD",   // State::PROTO_LOADING
+    "IDLE",         // State::Idle
+    "PREHEAT",      // State::Preheat
+    "RUNNING",      // State::Running
+    "PAUSED",       // State::Paused
+    "RESET REQ",    // State::ResetRequested
+    "RESUME",       // State::Resume
+    "COMPLETED",    // State::Completed
+    "E-STOP"        // State::EStop
 };
+static_assert(
+    static_cast<size_t>(ClearCoreRTM::State::EStop) + 1 ==
+        sizeof(ClearCoreRTM::kStateNames) / sizeof(ClearCoreRTM::kStateNames[0]),
+    "kStateNames must match ClearCoreRTM::State");
 
 bool ClearCoreRTM::begin() {
     /* USB Serial Comms for Debugging */

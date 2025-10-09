@@ -1370,11 +1370,20 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
         return;  // important: do NOT send a separate ACK    
     }
 
-    if (data.startsWith("REQ:PROTO;")) {
-        if (!owner_->ccProtoReq_) {
+    if (data.startsWith("REQ:PROTO")) {
+        if (hasRef) {
+            char ack[32];
+            snprintf(ack, sizeof(ack), "ACK;OK;REF=%u", refVal);
+            sendMessage(ack, MessageType::INFO);
+        } else {
+            sendMessage("ACK;OK", MessageType::INFO);
+        }
+
+        if (owner_ && !owner_->ccProtoReq_) {
             owner_->ccProtoReq_ = true;
             owner_->uploadProtocolToCC_();
         }
+        return;
     }
 
     // ===== NOTICE from CC: protocol receive completed =====
