@@ -37,9 +37,10 @@ To iron out the boot-and-reset issues captured so far:
 
 * Gate the ClearCore's auto-run promotion behind an explicit XPB resume allowance (or have the XPB
   suppress its resume when RUN is already high) so we never enter the `ERR_WRONG_STAT` retry loop.
-  **Update:** the ClearCore now treats the XPB's active-low RUN input as gated until it either sees
-  the line released high or the XPB issues a resume/autostart, so a latched low no longer promotes
-  the state machine while the XPB is still uploading the protocol.【F:src/clearcore/ClearCoreRTM.cpp†L103-L205】【F:include/ClearCoreRTM.h†L131-L200】【F:logs/cold_boot_no_resume.txt†L1-L17】
+  **Update:** the ClearCore now keeps the active-low RUN masked through `BOOT/PROTO_LOADING`, then
+  reopens the gate once the protocol upload completes. If RUN is still asserted at that moment we
+  queue a single synthetic edge so the controller preheats/resumes automatically after verification,
+  matching the power-loss auto-resume expectation.【F:src/clearcore/ClearCoreRTM.cpp†L103-L205】【F:include/ClearCoreRTM.h†L131-L200】
   * **Validation plan:**
     1. Cold-boot both controllers with the XPB RUN pin held low (call-for-run) and confirm the CC
        stays in `BOOT/PROTO_LOADING` while logging `[RUN] Ignoring RUN line held low before XPB

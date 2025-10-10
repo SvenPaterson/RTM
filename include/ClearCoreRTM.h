@@ -130,6 +130,7 @@ private:
     bool        runActiveRemote_   = false;
     bool        resetActiveRemote_ = false;
     bool        runGateReleased_   = false; //!< RUN line (active-low) ignored until XPB grants start or we observe a post-boot high
+    bool        latchedRunPending_ = false; //!< Latched RUN request awaiting protocol verification
     uint32_t    swLastUpdateMs_    = 0;
 
     // string mapping for displaying active state on LCD
@@ -637,6 +638,13 @@ private:
                     owner_->dbgln("[PROTO] Upload complete - ready to run");
                     owner_->state_ = State::Idle;
                     owner_->isProtoLoaded_ = true;
+                    owner_->runGateReleased_ = true;
+                    owner_->latchedRunPending_ = owner_->runActiveRemote_;
+                    if (owner_->latchedRunPending_) {
+                        owner_->dbgln("[RUN] Latched RUN will auto-start after proto verification");
+                    } else {
+                        owner_->dbgln("[RUN] Gate reopened after protocol verification");
+                    }
 
                 } else {
                     // Harmless duplicate PR_END (likely XPB retry): ACK & ignore

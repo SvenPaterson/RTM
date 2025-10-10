@@ -112,8 +112,22 @@ void ClearCoreRTM::tick() {
     }
 
     if (!runGateReleased_ && runWentHigh) {
-        runGateReleased_ = true;   // XPB line returned high, treat future low transitions as intentional
+        runGateReleased_   = true;   // XPB line returned high, treat future low transitions as intentional
+        latchedRunPending_ = false;
         dbgln("[RUN] Gate released: XPB RUN returned high");
+    }
+
+    bool runRiseAllowed = false;
+    if (runGateReleased_) {
+        if (runRoseLow) {
+            runRiseAllowed = true;
+        } else if (latchedRunPending_ && runLineLow) {
+            latchedRunPending_ = false;
+            runRiseAllowed     = true;
+            dbgln("[RUN] Auto-promoting latched RUN after protocol verification");
+        }
+    } else if (runRoseLow) {
+        dbgln("[RUN] Ignoring RUN line held low before XPB resume");
     }
 
     // transition logic for pause / resume / start
@@ -250,7 +264,8 @@ void ClearCoreRTM::tick() {
 /* ——— State Handlers ——— */
 void ClearCoreRTM::handleBoot(bool resetActive, bool justEntered_) {
     if (justEntered_) {
-        runGateReleased_ = false;   // active-low RUN stays masked until XPB grants it again
+        runGateReleased_   = false;   // active-low RUN stays masked until XPB grants it again
+        latchedRunPending_ = false;
         heartbeatSystemEnabled_ = false;
         protoRequestTmr_ = 0;
 
