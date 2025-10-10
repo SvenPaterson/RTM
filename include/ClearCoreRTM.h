@@ -134,7 +134,7 @@ private:
     uint32_t    swLastUpdateMs_    = 0;
 
     // string mapping for displaying active state on LCD
-    static const char* const kStateNames[9];
+    static const char* const kStateNames[11];
     static inline const char * stateToString(State s) {
         return kStateNames[static_cast<uint8_t>(s)];
     }
@@ -167,7 +167,7 @@ private:
     uint32_t loopCount_   {1};
     uint32_t totalLoops_  {1};
     String   protocolName_;
-    bool     currentlyLoadingProto_{false}, isProtoLoaded_{false};
+    bool     isProtoLoaded_{false};
 
     /* ——— runtime state ——— */
     State    state_{State::BOOT}, prevState_{State::BOOT}, preReset_{State::BOOT};
@@ -176,7 +176,8 @@ private:
     uint16_t guardAfter_ = 0xBEEF;
     uint8_t  lastResetSec_{0}, prevStepIndex_{0};
     bool     stepInit_{false}, targetMet_{false};
-    bool     resumeFromPause_{false}, prevResetActive_{false};
+    bool     resumeFromPause_{false};
+    bool     prevRunActive_{false}, prevResetActive_{false};
     int32_t  targetSpeed_ {0}, currentSpeed_{0};
     uint32_t targetAccel_ {0}, currentAccel_{0};
     uint32_t pause_time_{0}, test_run_time_{0};
@@ -356,7 +357,13 @@ private:
                 if (resume.length()) {
                     if (resume == "AUTO" || resume == "YES") {
                         // 1) must have protocol
-                        if (owner_->stepCount_ == 0) {
+                        if (owner_->state_ != State::Idle) {
+                            owner_->dbgln("ERROR: Cannot resume - not in IDLE");
+                            sendMessage("ACK;RESUME=ERR_WRONG_STAT", MessageType::IMPORTANT);
+                            return;
+                        }
+
+                        if (!owner_->isProtoLoaded_) {
                             owner_->dbgln("ERROR: Cannot resume - no protocol loaded");
                             sendMessage("ACK;RESUME=ERR_NO_PROTO", MessageType::IMPORTANT);
                             return;
@@ -366,6 +373,9 @@ private:
                         int resumeStep = kvGetIntClamped(data, "STEP=", 1, 1, owner_->stepCount_);
                         int resumeLoop = kvGetIntClamped(data, "LOOP=", 1, 1, owner_->totalLoops_);
                         int autoStart  = kvGetIntClamped(data, "AUTOSTART=", 0, 0, 1);
+                        
+                        // Is run switch still engaged?
+                        const bool runIsEngaged = owner_->runActiveRemote_;
 
                         // Validate step bounds
                         if (resumeStep > owner_->stepCount_ || resumeStep < 1) {
@@ -377,11 +387,21 @@ private:
                         // Apply the resume position
                         owner_->currentStep_ = (uint16_t)(resumeStep - 1);  // Convert to 0-based index
                         owner_->loopCount_ = owner_->totalLoops_ - (uint32_t)resumeLoop + 1;
+                        
+                        // --- Gating Rules ---
+                        // if AUTOSTART==0 or RUN is not LOW, don't preheat nor start.
+                        if (autoStart != 1 || !runIsEngaged) {
+                            owner_->autoStartAfterPreheat_ = false;
+                            owner_->waitingForTemp_        = false;
+                            owner_->coldStart_             = false;
+                            owner_->dbgln("RESUMED: position loaded, AUTOSTART=0 or RUN=OFF -> IDLE");
+                            sendMessage("ACK;RESUME=OK", MessageType::IMPORTANT);
+                            return;
+                        }
 
-                        // Check if we need to preheat (cold start only)
-                        // Preheat decision (only when AUTOSTART=1)
+                        // AUTOSTART = 1 and RUN is engaged
                         const uint16_t targetC = owner_->steps_[owner_->currentStep_].tempC;
-                        if (autoStart == 1 && owner_->coldStart_ && targetC > 0) {
+                        if (owner_->coldStart_ && targetC > 0) {
                             owner_->state_                 = State::Preheat;
                             owner_->preheatTargetC_        = targetC;
                             owner_->waitingForTemp_        = true;
@@ -395,21 +415,13 @@ private:
                         } else {
                             // No preheat path
                             owner_->coldStart_ = false;  // important so a later resume doesn't re-preheat
-                            if (autoStart == 1) {
-                                owner_->state_ = State::Resume;        // funnel through unified resume
-                                owner_->dbgln("RESUMED: auto-start (no preheat)");
-                            } else {
-                                owner_->state_ = State::Idle;          // booted idle; we do not preheat
-                                owner_->dbgln("RESUMED: position loaded, idle (no preheat)");
-                            }
+                            owner_->state_ = State::Resume;        // funnel through unified resume
+                            owner_->dbgln("RESUMED: AUTOSTART=1, RUN=ON (no preheat)");
+                            
                         }
-
-                        char msg[80];
-                        snprintf(msg, sizeof(msg), "RESUMED: step=%u loop=%u/%lu", 
-                                resumeStep, resumeLoop, owner_->totalLoops_);
-                        owner_->dbgln(msg);
                         
                         sendMessage("ACK;RESUME=OK", MessageType::IMPORTANT);
+                        return;
                     }
                     return;
                 }       
@@ -450,7 +462,7 @@ private:
 
             // ===== Protocol Upload: PR_BEG =====
             if (data.startsWith("PR_BEG;")) {
-                owner_->currentlyLoadingProto_ = true;
+                //owner_->currentlyLoadingProto_ = true;
                 // Only accept in BOOT state
                 if (owner_ && (owner_->state_ == State::BOOT)) {
                     // Parse protocol metadata
@@ -608,7 +620,8 @@ private:
                         snprintf(ack, sizeof(ack), "ACK;OK");
                     }
                     sendMessage(ack, MessageType::INFO);
-                    
+                    delay(3);
+
                     // Send success notice
                     char notice[64];
                     snprintf(notice, sizeof(notice), "NOTICE;PROTO_RX=OK;PHASH=%lu",
@@ -617,15 +630,28 @@ private:
 
                     owner_->dbgln("[PROTO] Upload complete - ready to run");
                     owner_->state_ = State::Idle;
+                    owner_->isProtoLoaded_ = true;
+
                 } else {
-                    owner_->dbgln("[PROTO} Upload failed");
-                    owner_->state_ = State::BOOT;
+                    // Harmless duplicate PR_END (likely XPB retry): ACK & ignore
+                    char ack[40];
+                    if (hasRef) snprintf(ack, sizeof(ack), "ACK;OK;REF=%u", refVal);
+                    else        snprintf(ack, sizeof(ack), "ACK;OK");
+                    sendMessage(ack, MessageType::INFO);
+
+                    if (owner_ && owner_->isProtoLoaded_) {
+                        owner_->dbgln("[PROTO] Duplicate PR_END ignored");
+                        // keep state as-is
+                    } else if (owner_) {
+                        owner_->dbgln("[PROTO] Upload failed (no active RX)");
+                        owner_->state_ = State::BOOT;
+                    }
                 }
 
                 // what do we do here if there wasn't a successful proto upload?
                 // do we compare the XPB provided phash against a calculated phash
                 // then ack we have successfully recieved?
-                owner_->currentlyLoadingProto_ = false;
+                //owner_->currentlyLoadingProto_ = false;
                 return;
             }
 
