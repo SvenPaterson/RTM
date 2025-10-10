@@ -29,8 +29,6 @@ bool ClearCoreRTM::begin() {
     dbgln("SerialReady");
 
     /* GPIO */
-    PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
-    PRGM_RESET_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
     SAFETY_PIN.Mode(Connector::INPUT_DIGITAL);
     HEATER_OUTPUT_PIN.Mode(Connector::OUTPUT_PWM);
     HEATER_SAFETY_PIN.Mode(Connector::OUTPUT_DIGITAL);
