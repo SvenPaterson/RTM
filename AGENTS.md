@@ -34,6 +34,11 @@ subdirectory defines its own `AGENTS.md` with more specific guidance.
 - when providing response, if there is a useful debug step the user can perform to
   verify your change then let them know. This could be a specific sequence of actions to
   ellicit a specific system response to test changes.
+- if the user is on WSL for windows they will need to be reminded to run the following commands
+  in an elevated PowerShell window and leave it open while working:
+      usbipd attach --wsl --auto-attach --hardware-id 2890:8022
+      usbipd attach --wsl --auto-attach --hardware-id 2890:0022
+      usbipd attach --wsl --auto-attach --hardware-id 2341:0058
 
 These conventions are intended to keep the ongoing investigation organized as we
 triage the ClearCore/XPB boot and reset interactions.
