@@ -142,7 +142,6 @@ void ClearCoreRTM::tick() {
         }
         prevResetActive_ = resetActive;
 
-        const bool runRiseAllowed = runRoseLow && runGateReleased_;
         if (runRoseLow && !runGateReleased_) {
             dbgln("[RUN] Ignoring RUN line held low before XPB resume");
         }
