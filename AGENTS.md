@@ -30,5 +30,10 @@ subdirectory defines its own `AGENTS.md` with more specific guidance.
 - Note whether automated tests or reproductions were run; if none, call that
   out explicitly.
 
+## Reply to User
+- when providing response, if there is a useful debug step the user can perform to
+  verify your change then let them know. This could be a specific sequence of actions to
+  ellicit a specific system response to test changes.
+
 These conventions are intended to keep the ongoing investigation organized as we
 triage the ClearCore/XPB boot and reset interactions.
