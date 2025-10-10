@@ -39,7 +39,18 @@ To iron out the boot-and-reset issues captured so far:
   suppress its resume when RUN is already high) so we never enter the `ERR_WRONG_STAT` retry loop.
   **Update:** the ClearCore now ignores the latched RUN level until the switch has been observed low
   or the XPB issues a resume/autostart, so the boot-time promotion no longer fires while the XPB is
-  still uploading the protocol.【F:src/clearcore/ClearCoreRTM.cpp†L108-L176】【F:include/ClearCoreRTM.h†L130-L410】【F:logs/cold_boot_no_resume.txt†L1-L17】
+  still uploading the protocol.【F:src/clearcore/ClearCoreRTM.cpp†L108-L180】【F:include/ClearCoreRTM.h†L131-L220】【F:logs/cold_boot_no_resume.txt†L1-L17】
+  * **Validation plan:**
+    1. Cold-boot the ClearCore with the RUN rocker latched high and confirm the state machine logs
+       `[RUN] Ignoring latched RUN...` while remaining in `BOOT/PROTO_LOADING` until either the
+       switch is toggled low or the XPB issues `RESUME AUTOSTART=1`; this exercises the
+       `runEdgeArmed_` guard added in `tick()` and reset in `handleBoot()`.【F:src/clearcore/ClearCoreRTM.cpp†L131-L181】【F:src/clearcore/ClearCoreRTM.cpp†L255-L281】
+    2. After the XPB handshake completes, toggle RUN low then high and verify the controller
+       transitions from `IDLE` to `PREHEAT/RUN` as before, demonstrating that the guard re-arms once
+       a low level is observed and allows intentional rises.【F:src/clearcore/ClearCoreRTM.cpp†L132-L177】
+    3. From `IDLE`, command an XPB `RESUME AUTOSTART=1` with RUN already high and confirm the
+       ClearCore accepts the resume, sets up preheat if required, and only then promotes into motion;
+       this covers the resume handler releasing the guard for coordinated auto-starts.【F:include/ClearCoreRTM.h†L360-L413】
 * Surface RUN/RESET latch state on the LCD whenever the controller is not idle, and make the switch-age timer freeze explicitly signal "RUN held" so operators know why the system started without interaction.【F:src/exp-board/ExpansionBoard.cpp†L783-L829】【F:logs/user_requested_reset.txt†L69-L127】
 * Instrument the TTL transport for checksum failures and ensure duplicate `PR_END` / `QUIESCE` frames are genuine retries; add back-off so we do not spam commands when the peer already acknowledged them.【F:src/shared/TTLComms.cpp†L258-L353】【F:logs/user_requested_reset.txt†L85-L127】
 * Harden resume persistence: wrap the snapshot writer with retries and surface failures prominently, then verify the reset flow waits for a confirmed snapshot before forcing the XPB reset.【F:logs/user_requested_reset.txt†L96-L119】
