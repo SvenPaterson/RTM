@@ -274,112 +274,10 @@ bool ExpansionBoard::begin() {
     else dbgln("DONE");
     tc1_.setFaultChecks(MAX31855_FAULT_ALL);
 
-    /*
-    dbg("Initializing MAX31855 sensor - TC2...");
-    delay(500); // stabilize
-    if (!tc2_.begin()) { dbgln("ERROR."); while (1) delay(10); }
-    else dbgln("DONE");
-    tc2_.setFaultChecks(MAX31855_FAULT_ALL);
-    */
-
-    // Protocol + Resume (only if SD OK)
-    /* if (sdOk) {
-        if (!loadProtocolFromSD_("/protocol.csv")) {
-            dbgln("Protocol load FAILED");
-        } else {
-            dbgln("Protocol loaded OK");
-            logProtocol_();   // optional debug dump
-        }
-
-        // Optional slot dump for visibility
-        auto dumpSlots = [&](){
-            File fa = SD.open(kSlotA), fb = SD.open(kSlotB);
-            if (fa) { dbgkv("[SD] RA.BIN bytes=", (unsigned long)fa.size()); fa.close(); }
-            else     dbgln("[SD] RA.BIN missing");
-            if (fb) { dbgkv("[SD] RB.BIN bytes=", (unsigned long)fb.size()); fb.close(); }
-            else     dbgln("[SD] RB.BIN missing");
-        };
-        dumpSlots();
-
-        // Load resume data if it exists
-        haveStoredResume_ = loadResumeLatestTU(storedPhash_, storedStep_, storedLoopCur_, storedLoopTot_);
-        if (haveStoredResume_) {
-            if (storedPhash_ != progHash_) {
-                dbgln("Resume record PHASH mismatch -> clearing");
-                clearResumeTU();
-                haveStoredResume_ = false;
-            } else {
-                char rb[64];
-                snprintf(rb, sizeof(rb), "Resume available: step=%u loop=%u",
-                        (unsigned)storedStep_, (unsigned)storedLoopCur_);
-                dbgln(rb);
-            }
-        }
-        
-        // Scrub "virgin" resume (created before any real run)
-        if (haveStoredResume_ && storedPhash_ == progHash_) {
-            if (storedStep_ <= 1 && storedLoopCur_ <= 1) {
-                dbgln("Resume looks virgin (step=1 loop=1) -> clearing");
-                clearResumeTU();
-                haveStoredResume_ = false;
-            }
-        }
-
-        // === ALWAYS UPLOAD PROTOCOL TO CC AFTER BOOT ===
-        if (stepCount_ > 0) {  // Only if we have a protocol to upload
-            dbgln("[PROTOCOL UPLOAD]");
-            dbgln("  CC needs protocol after boot - uploading...");
-            
-            // Wait for CC ready signal
-            dbgln("  Waiting for CC ready signal...");
-            uint32_t uploadWait = millis();
-            while (!ccReady_ && millis() - uploadWait < 2000) {
-                ttlComms_.checkForMessages();
-                ttlComms_.checkRetries();
-                delay(10);
-            }
-            
-            dbgkv("  ccReady_: ", ccReady_ ? "true" : "false");
-            dbgkv("  Wait time ms: ", (unsigned long)(millis() - uploadWait));
-            
-            if (ccReady_ || millis() - uploadWait >= 2000) {
-                dbgln("  Uploading protocol to CC...");
-                if (uploadProtocolToCC_()) {
-                    dbgln("  Protocol upload successful");
-                    
-                    // NOW check if we should offer resume (after protocol is loaded)
-                    if (haveStoredResume_ && storedPhash_ == progHash_ && !suppressResumePrompt_) {
-                        dbgln("  Sending resume prompt to user...");
-                        char line[64];
-                        snprintf(line, sizeof(line), "RESUME?;STEP=%u;LOOP=%u;PHASH=%lu",
-                                (unsigned)storedStep_,
-                                (unsigned)storedLoopCur_,
-                                (unsigned long)storedPhash_);
-                        ttlComms_.sendMessage(line, MessageType::NORMAL);
-                        uiPendingResume_ = true;
-                    } else if (suppressResumePrompt_) {
-                        dbgln("  Suppressing resume prompt (XPB-only reset)");
-                        // CC has protocol, will start at step 1 when RUN pressed
-                    } else {
-                        dbgln("  No valid resume data - will start fresh");
-                    }
-                } else {
-                    dbgln("  Protocol upload failed!");
-                }
-            } else {
-                dbgln("  CC not ready - skipping upload");
-            }
-        } else {
-            dbgln("No protocol loaded from SD - nothing to upload");
-        }
-
-    } else {
-        dbgln("SD init failed - no protocol available");
-    } */
-
     // Protocol + Resume (only if SD OK)
     if (sdOk) {
-        if (!loadProtocolFromSD_("/protocol.csv")) {
+        successfulProtoLoadFromSD_ = loadProtocolFromSD_("/protocol.csv");
+        if (!successfulProtoLoadFromSD_) {
             dbgln("Protocol load FAILED");
         } else {
             dbgln("Protocol loaded OK");
@@ -424,7 +322,9 @@ bool ExpansionBoard::begin() {
         // === DO NOT AUTO-UPLOAD FROM HERE ===
         if (stepCount_ > 0) {
             dbgln("[PROTOCOL] Standing by for CC REQ:PROTO");
-
+            protoState_ = ProtoTxState::WaitingReq;
+            //isProtoLoadedOntoCC_ = false;
+            
             // Decide now whether we should auto-resume AFTER CC requests + receives protocol
             if (haveStoredResume_ && storedPhash_ == progHash_) {
                 // scrub virgin resume as you already do, then:
@@ -442,6 +342,7 @@ bool ExpansionBoard::begin() {
             }
         } else {
             dbgln("No protocol loaded from SD - nothing to upload");
+            protoState_ = ProtoTxState::SDFail;
             needResumeAfterProto_ = false;
         }
 
@@ -450,9 +351,9 @@ bool ExpansionBoard::begin() {
         dbgln("SD init failed - no protocol available");
     }
 
-    // Don't warn here. We'll show an info message only if there's truly no CC traffic after 10s.
     ccAnySeen_ = false;
     warnedNoLink_ = false;
+    linkState_ = LinkState::NoLink;
     sinceBoot = 0;
     dbgln("Awaiting CC traffic...");
 
@@ -463,7 +364,6 @@ bool ExpansionBoard::begin() {
     publishSwitchState_(true);
 
     sinceBoot = 0;
-    warnedNoLink_ = false;
 
     return true;
 }
@@ -480,10 +380,10 @@ void ExpansionBoard::tick() {
 
     // Soft "no link yet" note after 10s with no CC traffic at all
     if (!ccAnySeen_ && !warnedNoLink_ && sinceBoot > 10000) {
-        warnedNoLink_ = true;
+        linkState_ = LinkState::NoLink;
         dbgln("INFO: No CC traffic yet (>10s). Continuing without link.");
-        // UI stays on the normal "Connecting" page you already render.
     }
+    linkState_ = ccAnySeen_ ? LinkState::Alive : LinkState::NoLink;
 
     // ----- USB injection / commands -----
     #ifdef XPB_INJECT_FROM_USB
@@ -572,15 +472,11 @@ void ExpansionBoard::tick() {
     }
     #endif
 
-    // ----- NORMAL SWITCH PUBLISH (no prompt active) -----
-    runSw_.update();
-    resetSw_.update();
-    if (runSw_.changed() || resetSw_.changed()) {
-        publishSwitchState_();  // reads debounced levels inside
-    } else if (millis() - lastSwPublishMs_ > 60000UL) {
-        publishSwitchState_(true); // 60s keep-alive
-    }
-
+    // ----- SWITCH PUBLISH w/ 60s keep-alive -----
+    runSw_.update(); resetSw_.update();
+    if (runSw_.changed() || resetSw_.changed()) publishSwitchState_();
+    else if (millis() - lastSwPublishMs_ > 60000UL) publishSwitchState_(true);
+    
     // ----- SENSORS / CONTROL -----
     updateData();  // MAX31855, etc.
 
@@ -609,11 +505,53 @@ void ExpansionBoard::tick() {
         ttlComms_.sendMessage(line, MessageType::INFO);
     }
 
+    // --- Protocol timeouts ---
+    if (protoState_ == ProtoTxState::BegSent ||
+        protoState_ == ProtoTxState::EndSent ||
+        protoState_ == ProtoTxState::AwaitResult) {
+        if (protoSince_ > kProtoAckTimeoutMs_) {
+            protoState_ = ProtoTxState::Timeout;
+        }
+    }
+    else if (protoState_ == ProtoTxState::Sending) {
+        if (protoSince_ > kProtoSilenceTimeoutMs) {
+            protoState_ = ProtoTxState::Timeout;
+        }
+    }
+
     // ----- UI DECISION (exactly one page per tick) -----
-    UiPage page;
+    UiPage page = UiPage::Normal;
+    const bool protoBusy =
+        (protoState_ == ProtoTxState::BegSent)  ||
+        (protoState_ == ProtoTxState::Sending)  ||
+        (protoState_ == ProtoTxState::EndSent)  ||
+        (protoState_ == ProtoTxState::AwaitResult);
+
     if (!ccReady_) {
-        page = UiPage::Connecting;
-    } 
+        bootPhase_ = {successfulProtoLoadFromSD_ ? BootPhase::SDLoaded : BootPhase::Start};
+        page = UiPage::Boot;
+    }
+    else if (protoBusy) {
+        bootPhase_ = BootPhase::TxInProgress;
+        page = UiPage::Boot;
+    }
+    else if (protoState_ == ProtoTxState::Failed || protoState_ == ProtoTxState::Timeout) {
+        page = UiPage::ProtoTxFail;
+    }
+    else if (bootPhase_ == BootPhase::TxSuccess) {
+        page = UiPage::Boot;
+        if (bootMsgSince_ > kBootSuccessShowMs) {
+            bootPhase_ = BootPhase::Done;
+            page = UiPage::Normal;
+        }
+    }
+    else if (bootPhase_ == BootPhase::ResumeBrief) {
+        page = UiPage::Boot;
+        if (bootMsgSince_ > kBootResumeShowMs) {
+            bootPhase_ = BootPhase::Done;
+            page = UiPage::Normal;
+        }
+    }
     else if (ccEstop_) {
         // Prefer "Resetting" during (a) our post-XPB-reset mask window, or
         // (b) when CC HBs have gone stale (>1s) during an E-STOP reboot.
@@ -623,15 +561,16 @@ void ExpansionBoard::tick() {
         } else {
             page = UiPage::EStop;
         }
-    } 
-
-    else if (!resetUiActive_ && ccHbSeen_ && ccHbAgeTmr_ > 3000U) {
-        page = UiPage::LostComms;
-    } 
+    }
     else if (resetUiActive_) {
         page = UiPage::ResetCountdown;
+    }
+    else if (!successfulProtoLoadFromSD_) {
+        page = UiPage::ProtoMissingSD;
     } 
-    else {
+    else if (ccHbSeen_ && ccHbAgeTmr_ > 3000U) {
+        page = UiPage::LostComms;
+    } else {
         page = UiPage::Normal;
     }
 
@@ -698,8 +637,66 @@ void ExpansionBoard::renderUi_(UiPage page) {
     }
 
     switch (page) {
-        case UiPage::Connecting:
-            lcd_.setLineCenter(2, "Connecting with CC...");
+        case UiPage::Boot:
+            lcd_.setLineLeft(0, "BOOTING...");
+            // line 1/2/3: phase specific
+            switch (bootPhase_) {
+                case BootPhase::Start:
+                    lcd_.setLineLeft(1, "PROTOCOL:");
+                    lcd_.setLineCenter(2, "looking for protocol");
+                    break;
+                
+                case BootPhase::SDLoaded: {
+                    // Protocol name on line 1, short hint on 2
+                    char nameBuf[LCDDriver::kNumCols+1];
+                    strncpy(nameBuf, protocolName_.c_str(), LCDDriver::kNumCols);
+                    nameBuf[LCDDriver::kNumCols] = '\0';
+                    lcd_.setLineLR(1, "PROTOCOL:", nameBuf);
+                    lcd_.setLineCenter(2, "Waiting for CC to");
+                    lcd_.setLineCenter(3, "to request protocol");
+                    break;
+                }
+
+                case BootPhase::TxInProgress: {
+                    // Show % based on PR_DAT count
+                    char buf[21];
+                    uint8_t pct = stepCount_ ? (uint8_t)((protoStepSent_ * 100UL) / stepCount_) : 0;
+                    snprintf(buf, sizeof(buf), "Uploading... %u%%", (unsigned)pct);
+                    lcd_.setLineLR(2, "UPLOADING:", buf);
+                    break;
+                }
+
+                case BootPhase::TxSuccess: {
+                    lcd_.setLineLR(0, "BOOTING...", "SUCCESS!");
+                    lcd_.setLineCenter(1, "Finalizing...");
+                    break;
+                }
+
+                case BootPhase::ResumeBrief: {
+                    char buf[LCDDriver::kNumCols+1];
+                    snprintf(buf, sizeof(buf), "Step %u  Loop %u",
+                            (unsigned)storedStep_, (unsigned)storedLoopCur_);
+                    lcd_.setLineLeft(0, "RESUMING:");
+                    lcd_.setLineLeft(1, "EXISTING TEST:");
+                    lcd_.setLineCenter(2, buf);
+                    break;
+                }
+
+                case BootPhase::Done:
+                default:
+                    // Should not land here for long; router will move to Normal
+                    lcd_.setLineCenter(1, "Ready");
+                    break;
+            }
+            break;
+
+        case UiPage::ProtoMissingSD:
+            lcd_.setLineCenter(2, "Protocol Missing on SD!");
+            break;
+
+        case UiPage::ProtoTxFail:
+            lcd_.setLineCenter(2, "Protocol Tx to CC");
+            lcd_.setLineCenter(3, "FAILED!");
             break;
 
         case UiPage::Resetting:
@@ -750,7 +747,7 @@ void ExpansionBoard::renderUi_(UiPage page) {
 
     if (entering) {
         const char* name =
-            page == UiPage::Connecting     ? "Connecting"  :
+            page == UiPage::Boot           ? "Boot"        :
             page == UiPage::Resetting      ? "Resetting"   :
             page == UiPage::LostComms      ? "LostComms"   :
             page == UiPage::EStop          ? "EStop"       :
@@ -977,6 +974,15 @@ bool ExpansionBoard::loadProtocolFromSD_(const char *path) {
   return (stepCount_ > 0);
 }
 
+void ExpansionBoard::clearResumeSlots_() {
+    (void)deleteIfExists_("/RA.BIN");
+    (void)deleteIfExists_("/RB.BIN");
+}
+static bool deleteIfExists_(const char *path) {
+    if (!SD.exists(path)) return true;
+    return SD.remove(path);
+}
+
 /**
  * @brief Print a human-readable summary of the loaded protocol.
  * @copydetails ExpansionBoard::logProtocol_()
@@ -1001,13 +1007,16 @@ void ExpansionBoard::logProtocol_() const {
 }
 
 bool ExpansionBoard::uploadProtocolToCC_() {
-    if (stepCount_ == 0) {
-        dbgln("[PROTO] No protocol loaded");
+    if (!stepCount_) {
+        dbgln("[PROTO] No protocol from SD loaded to XPB");
+        protoState_ = ProtoTxState::Failed;
+        //isProtoLoadedOntoCC_ = false;
         return false;
     }
     
     dbgln("[PROTO] Starting upload to CC...");
-    
+    bootPhase_ = BootPhase::TxInProgress;
+
     // 1. Send PR_BEG
     char msg[96];
     snprintf(msg, sizeof(msg), "PR_BEG;NAME=%s;LOOPS=%lu;STEPS=%u;PHASH=%lu",
@@ -1017,6 +1026,9 @@ bool ExpansionBoard::uploadProtocolToCC_() {
              (unsigned long)progHash_);
     
     ttlComms_.sendMessage(msg, MessageType::CRITICAL);
+    protoState_ = ProtoTxState::BegSent;
+    protoStepSent_ = 0;
+    protoSince_ = 0;
     delay(100);
     ttlComms_.checkForMessages();
     
@@ -1032,6 +1044,7 @@ bool ExpansionBoard::uploadProtocolToCC_() {
                 steps_[i].dwellS_,
                 steps_[i].tempC_);
         ttlComms_.sendMessage(msg, MessageType::IMPORTANT);
+        protoStepSent_ = i + 1;
         delay(50);
         ttlComms_.checkForMessages();
     }
@@ -1039,285 +1052,48 @@ bool ExpansionBoard::uploadProtocolToCC_() {
     // 3. Send PR_END  
     snprintf(msg, sizeof(msg), "PR_END;CRC=%lu", (unsigned long)0);
     ttlComms_.sendMessage(msg, MessageType::CRITICAL);
-    delay(100);
-    ttlComms_.checkForMessages();
+    protoState_ = ProtoTxState::EndSent;
+    protoSince_ = 0;
+    //delay(100);
+    //ttlComms_.checkForMessages();
 
     return true;
 }
-/// ExpansionBoardTTL
-/**
- * @brief Handle decoded TTL frames from ClearCore and update owner state.
- * @copydetails ExpansionBoard::ExpansionBoardTTL::onMessageReceived()
- */
-/* void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
-    // ---- XPB RX ACK policy (strict) ----
-    const int refPos = data.indexOf(F(";REF="));
-    const uint16_t ref = refPos > 0 ? (uint16_t)data.substring(refPos + 5).toInt() : 0;
 
-    // 0) Telemetry / one-way notices: NEVER ACK here
-    if (data.startsWith("HB;") || data.startsWith("STAT;") ||
-        data.startsWith("NOTICE;") || data.startsWith("READY;")) {
-        // fall through to existing parsing
+const char* ExpansionBoard::statusStringForUi_() {
+  // Link first
+  if (!ccReady_ || linkState_ == LinkState::NoLink) return "Connecting";
+
+  // Hard faults
+  if (ccEstop_) {
+    if ((int32_t)(millis() - estopUiMaskUntilMs_) < 0 || (ccHbSeen_ && ccHbAgeTmr_ > 1000U))
+      return "Resetting";    // reboot grace window
+    return "E-STOP";
+  }
+
+  // Protocol pipeline
+  switch (protoState_) {
+    case ProtoTxState::WaitingReq:  return "Waiting for CC";
+    case ProtoTxState::BegSent:     return "Uploading (init)";
+    case ProtoTxState::Sending: {
+      static char buf[16];
+      uint8_t pct = stepCount_ ? (uint8_t)((protoStepSent_*100UL)/stepCount_) : 0;
+      snprintf(buf, sizeof(buf), "Uploading %u%%", pct);
+      return buf;
     }
+    case ProtoTxState::EndSent:     return "Uploading (final)";
+    case ProtoTxState::AwaitResult: return "Verifying";
+    case ProtoTxState::Failed:      return "Proto FAIL";
+    case ProtoTxState::Timeout:     return "Proto TIMEOUT";
+    case ProtoTxState::Complete:    break; // fall through to runtime states
+    case ProtoTxState::Idle:        break;
+  }
 
-    // 1) Request/Response: REQ:SW → reply SW;... (reply = the ACK)
-    else if (data.startsWith("REQ:SW")) {
-        int ref = -1;
-        const int pos = data.indexOf(F(";REF="));
-        if (pos > 0) ref = data.substring(pos + 5).toInt();
-        if (owner_) owner_->publishSwitchState_(true, ref);
-        return;  // important: don't also send an ACK
-    }
-
-    // 2) Commands from CC → ACK once (mirror REF if present)
-    else if (data.startsWith("CMD;") || data.startsWith("QUIESCE;") || data.startsWith("RESUME?")) {
-        if (ref) {
-            char ack[28]; snprintf(ack, sizeof(ack), "ACK;OK;REF=%u", ref);
-            sendMessage(ack, MessageType::INFO);  // ACKs are not ACKed
-        } else {
-            sendMessage("ACK;OK", MessageType::INFO);
-        }
-        // continue into your existing command handling...
-    }
-
-    // trace
-    if (owner_) {
-        owner_->dbg("[RX->XPB] ");
-        owner_->dbgkv("", data);
-        owner_->dbg("   flags: inject="); owner_->dbgkv("", (unsigned long)(owner_->usbInjecting_ ? 1 : 0));
-        owner_->dbg(" sim=");              owner_->dbgkv("", (unsigned long)(owner_->usbSimHold_  ? 1 : 0));
-    }
-
-    // Swallow REAL CC HB during SIM-hold
-    if (owner_ && !owner_->usbInjecting_) {
-        owner_->ccAnySeen_ = true;
-    }
-    if (owner_ && owner_->usbSimHold_ && !owner_->usbInjecting_ && data.startsWith("HB;")) {
-        owner_->ccHbSeen_ = true; owner_->ccHbAgeTmr_ = 0;
-        owner_->dbgln("[SIM] swallowed REAL CC HB");
-        return;
-    }
-
-    // Discovery / readiness: CC announces READY once.
-    if (data.startsWith("READY;ID=CC")) {
-        if (owner_) {
-            owner_->ccReady_ = true;
-
-            // tell CC our current heater OUT immediately
-            char line[64];
-            snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d",
-                    owner_->hbSeq_++, owner_->heater_.lastOut());
-            sendMessage(line, MessageType::INFO);
-
-            // also publish switches so CC sees the current RUN/RST right away
-            owner_->publishSwitchState_(true);
-
-            // Optional resume prompt
-            if (owner_->haveStoredResume_ && !owner_->suppressResumePrompt_) {
-                snprintf(line, sizeof(line), "RESUME?;STEP=%u;LOOP=%u;PHASH=%lu",
-                        (unsigned)owner_->storedStep_,
-                        (unsigned)owner_->storedLoopCur_,
-                        (unsigned long)owner_->storedPhash_);
-                sendMessage(line, MessageType::CRITICAL);
-                owner_->uiPendingResume_ = true;
-            }
-        }
-        return;
-    }
-
-    // ----- Unified command block -----
-    if (data.startsWith("CMD;") || data.startsWith("QUIESCE;") || data.startsWith("RESUME?")) {
-        // ACK once here (mirror REF if present)
-        int ref = -1;
-        const int pos = data.indexOf(F(";REF="));
-        if (pos > 0) ref = data.substring(pos + 5).toInt();
-
-        if (ref >= 0) {
-            char ack[28]; snprintf(ack, sizeof(ack), "ACK;OK;REF=%d", ref);
-            sendMessage(ack, MessageType::INFO);
-        } else {
-            sendMessage("ACK;OK", MessageType::INFO);
-        }
-    }
-
-    if (data.startsWith("CMD;") && owner_) {
-        String reset = kvGet(data, "RESET=");
-        if (reset.length()) {
-            if (reset == "ARM") {
-                int secs = kvGetIntClamped(data, "SECS=", 5, 1, 30);
-                owner_->resetUiActive_    = true;
-                owner_->resetUiSecs_      = (uint8_t)secs;
-                owner_->resetUiRemaining_ = (uint8_t)secs;
-                owner_->resetUiTmr_       = 0;
-            }
-            else if (reset == "CANCEL") {
-                owner_->resetUiActive_ = false;
-            }
-            else if (reset == "EXEC") {
-                // 1) Persist resume snapshot
-                const uint16_t stepSnap    = owner_->ccStep_;
-                const uint16_t loopCurSnap = (uint16_t)owner_->ccLoopCur_;
-                const uint16_t loopTotSnap = (uint16_t)owner_->ccLoopTot_;
-                const uint32_t ph          = owner_->progHash_;
-                bool ok = saveResumeTU(ph, stepSnap, loopCurSnap, loopTotSnap);
-                owner_->dbgln(ok ? "[RESUME] snapshot saved" : "[RESUME] snapshot SAVE FAILED");
-
-                // 2) Ask CC to mask XPB-stale for ~10s (bounded to 3 to 15s on CC)
-                {
-                    char q[96];
-                    snprintf(q, sizeof(q),
-                             "QUIESCE;WHO=XPB;SECS=%d;STEP=%u;LOOP=%u/%u;PHASH=%lu",
-                             10,
-                             (unsigned)stepSnap,
-                             (unsigned)loopCurSnap,
-                             (unsigned)loopTotSnap,
-                             (unsigned long)ph);
-                    sendCommand(q, MessageType::CRITICAL);
-
-                    // Best-effort: pump for an ACK for ~200 ms
-                    uint32_t tWait = millis();
-                    while ((uint32_t)(millis() - tWait) < 200U) {
-                        owner_->ttlComms_.checkForMessages();
-                        owner_->ttlComms_.checkRetries();
-                        delay(2);
-                    }
-                }
-
-                // 3) Mark intentional XPB reset, give SD a moment
-                bool fOK = writeResetFlagTU();
-                owner_->dbgln(fOK ? "[RESET] flag write OK" : "[RESET] flag write FAIL");
-                delay(12);
-
-                // 4) Notify CC, then reset us
-                sendMessage("NOTICE;XPB_RESET=NOW", MessageType::NORMAL);
-                delay(5);
-                xpbSoftResetNow();
-            }
-        }
-
-        String sSP = kvGet(data, "SP=");
-        if (sSP.length()) {
-            owner_->setHeaterTarget(sSP.toFloat());
-        }
-
-        String mode = kvGet(data, "MODE=");
-        if (mode.length()) {
-            owner_->modeTorqueToggle_ = (mode == "TORQUE");
-        }
-        return;
-    }
-
-    // ----- Heartbeat from ClearCore -----
-    if (data.startsWith("HB;") && owner_) {
-
-        // If SIM-hold is active and this is a REAL CC HB (not injected),
-        // swallow it so USB-injected frames drive the UI.
-        if (owner_->usbSimHold_ && !owner_->usbInjecting_) {
-            owner_->ccHbSeen_   = true;
-            owner_->ccHbAgeTmr_ = 0;
-            owner_->dbgln("[SIM] swallowed REAL CC HB");
-            return;
-        }
-
-        // Parse HB
-        String sSTATE = kvGet(data, "STATE=");
-        if (sSTATE == "RUNNING") owner_->everRan_ = true;
-        if (sSTATE.length()) sSTATE.toCharArray(owner_->ccState_, sizeof(owner_->ccState_));
-        
-        String sECODE  = kvGet(data, "E_CODE=");
-        if (sECODE.length()) {
-            long v = sECODE.toInt();
-            if (v < 0) v = 0; if (v > 255) v = 255;
-            owner_->ccEstopCode_ = (uint8_t)v;
-        } else {
-            owner_->ccEstopCode_ = 0;  // backward-compat if field absent
-        }
-        // Derive estop from E_CODE
-        const bool estopNow = (owner_->ccEstopCode_ != 0);
-        owner_->ccEstop_ = estopNow;
-        if (!estopNow) {
-            owner_->ccAlarmActive_ = false;
-            owner_->ccAlarmMsg_[0] = '\0';
-        }
-        
-        String sSTEP  = kvGet(data, "STEP=");
-        if (sSTEP.length()) {
-            long v = sSTEP.toInt();
-            if (v < 0) v = 0; if (v > 255) v = 255;
-            owner_->ccStep_ = (uint8_t)v;         // CC publishes 1-based; show as-is
-        }
-        
-        String sLOOP  = kvGet(data, "LOOP=");
-        if (sLOOP.length()) {
-            int slash = sLOOP.indexOf('/');
-            if (slash > 0) {
-                const char *cstr = sLOOP.c_str();
-                char *endp = nullptr;
-                unsigned long cur = strtoul(cstr, &endp, 10);
-                unsigned long tot = 0;
-                if (endp && *endp == '/') tot = strtoul(endp + 1, nullptr, 10);
-                owner_->ccLoopCur_ = (uint32_t)cur;
-                owner_->ccLoopTot_ = (uint32_t)tot;
-            }
-        }
-        
-        String sAGE   = kvGet(data, "SW_AGE=");
-        if (sAGE.length()) owner_->ccSwAgeMs_ = (uint32_t)sAGE.toInt();
-        // END parse HB
-
-        // One-time "ready" if HB arrived before READY (common on some boots)
-        if (!owner_->ccReady_) {
-            owner_->ccReady_ = true;
-
-            // send initial STAT so CC immediately sees our OUT
-            char line[64];
-            snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d", owner_->hbSeq_++, owner_->heater_.lastOut());
-            sendMessage(line, MessageType::INFO);
-
-            // Offer resume if we truly have one (and haven't already asked)
-            if (owner_->haveStoredResume_ && !owner_->suppressResumePrompt_ && !owner_->uiPendingResume_) {
-                snprintf(line, sizeof(line), "RESUME?;STEP=%u;LOOP=%u;PHASH=%lu",
-                        (unsigned)owner_->storedStep_,
-                        (unsigned)owner_->storedLoopCur_,
-                        (unsigned long)owner_->storedPhash_);
-                sendMessage(line, MessageType::CRITICAL);
-                owner_->uiPendingResume_ = true;
-            }
-        }
-
-        owner_->ccHbSeen_   = true;
-        owner_->ccHbAgeTmr_ = 0;
-
-        // Persist resume point only when STEP/LOOP change
-        static uint16_t lastStep = 0xFFFF, lastLoop = 0xFFFF;
-        const uint16_t stepNow = owner_->ccStep_;
-        const uint16_t loopNow = (uint16_t)owner_->ccLoopCur_;
-        if (owner_->everRan_ && (stepNow != lastStep || loopNow != lastLoop)) {
-            lastStep = stepNow; lastLoop = loopNow;
-            const uint32_t ph = owner_->storedPhash_ ? owner_->storedPhash_ : owner_->progHash_;
-            (void)saveResumeTU(ph, stepNow, loopNow, (uint16_t)owner_->ccLoopTot_);
-        }
-
-        return;
-    } 
-
-    // ----- Alarm from ClearCore -----
-    if (data.startsWith("ALARM;") && owner_) {
-        String t = kvGet(data, "TYPE=");
-        String m = kvGet(data, "MSG=");
-        if (t == "ESTOP") {
-            owner_->ccAlarmActive_ = true;
-            if (m.length()) {
-                m.toCharArray(owner_->ccAlarmMsg_, sizeof(owner_->ccAlarmMsg_));
-            } else {
-                strncpy(owner_->ccAlarmMsg_, "E-STOP asserted", sizeof(owner_->ccAlarmMsg_) - 1);
-            }
-        }
-        return;
-    }
-
-    // else ignore quietly
-}*/
+  // Runtime niceties. Prefer our own flags; only *then* show CC's STATE text.
+  if (resetUiActive_) return "Resetting";
+  if (ccHbSeen_ && ccHbAgeTmr_ > 3000U) return "Link Lost";
+  return ccState_[0] ? ccState_ : "Idle";
+}
 
 /**
  * @brief Handle decoded TTL frames from ClearCore and update owner state.
@@ -1329,9 +1105,28 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
     const uint16_t refVal = hasRef ?                         
         (uint16_t)data.substring(refPos + 5).toInt() : 0;     
 
+    // Consider any ACK;...;REF= as a valid ack for retry bookkeeping
+    if (data.startsWith("ACK;")) {
+        if (owner_) owner_->lastProtoRef_ = refVal;
+
+        if (owner_ && owner_->protoState_ == ProtoTxState::BegSent) {
+            owner_->protoState_ = ProtoTxState::Sending;
+            owner_->protoSince_ = 0;
+            // (optional) owner_->dbgln("[PROTO] PR_BEG ACK → Sending");
+        }
+
+        // If we already sent PR_END, any ACK is our cue to await final NOTICE
+        if (owner_ && owner_->protoState_ == ProtoTxState::EndSent) {
+            owner_->protoState_ = ProtoTxState::AwaitResult;
+            owner_->protoSince_ = 0;
+            // (optional) owner_->dbgln("[PROTO] PR_END ACK → AwaitResult");
+        }
+}
+
     // Mark that we've seen any CC traffic (for "no link" note)
     if (owner_ && !owner_->usbInjecting_) {            
         owner_->ccAnySeen_ = true;
+        owner_->linkState_ = LinkState::Alive;
     }
 
     // ===== Policy: never ACK telemetry/one-way notices here =====
@@ -1371,54 +1166,74 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
     }
 
     if (data.startsWith("REQ:PROTO;")) {
-        if (!owner_->ccProtoReq_) {
+        if (owner_->protoState_ == ProtoTxState::WaitingReq || 
+            owner_->protoState_ == ProtoTxState::Idle) {
             owner_->ccProtoReq_ = true;
             owner_->uploadProtocolToCC_();
+            owner_->bootPhase_ = BootPhase::TxInProgress;
+            owner_->protoSince_ = 0;
         }
     }
 
     // ===== NOTICE from CC: protocol receive completed =====
     // Format we expect: "NOTICE;PROTO_RX=OK;PHASH=<uint32>"
     if (data.startsWith("NOTICE;")) {
-        // Only act on PROTO_RX=OK
-        String sProto = kvGet(data, "PROTO_RX=");
-        if (sProto.length() && sProto == "OK") {
-            // Parse PHASH (defaults to 0 if missing or bad)
-            String sPH = kvGet(data, "PHASH=");
-            uint32_t rxPhash = sPH.length() ? (uint32_t)sPH.toInt() : 0UL;
-
-            // Fire resume once, and only if it matches the stored PHASH plan
+        const String rx = kvGet(data, "PROTO_RX=");
+        if (rx == "OK") {
             if (owner_) {
-                if (owner_->needResumeAfterProto_ &&
-                    rxPhash != 0UL &&
-                    rxPhash == owner_->storedPhash_) {
+                owner_->ccProtoReq_ = false;
+                owner_->protoState_ = ProtoTxState::Complete;
 
-                    // Re-check RUN at the last possible moment for AUTOSTART
+                // PHASH check
+                const String sPH = kvGet(data, "PHASH=");
+                const uint32_t rxPhash = sPH.length() ? (uint32_t)sPH.toInt() : 0UL;
+
+                // === cold-boot resume policy ===
+                if (owner_->needResumeAfterProto_
+                    && rxPhash != 0UL
+                    && rxPhash == owner_->storedPhash_) {
+
+                    // last-moment RUN check
                     owner_->runSw_.update();
-                    bool runEngaged = (owner_->runSw_.read() == LOW);
+                    const bool runEngaged = (owner_->runSw_.read() == LOW);
 
-                    char line[96];
-                    snprintf(line, sizeof(line),
-                            "CMD;RESUME=AUTO;STEP=%u;LOOP=%u;PHASH=%lu;AUTOSTART=%d",
-                            (unsigned)owner_->storedStep_,
-                            (unsigned)owner_->storedLoopCur_,
-                            (unsigned long)owner_->storedPhash_,
-                            runEngaged ? 1 : 0);
-                    sendCommand(line, MessageType::CRITICAL);
-
-                    owner_->dbgln(runEngaged
-                        ? "[RESUME] Sent (auto-start after preheat)"
-                        : "[RESUME] Sent (waiting for RUN switch)");
-
-                    // Consume intent so we never send twice
-                    owner_->needResumeAfterProto_ = false;
+                    if (runEngaged) {
+                        // Only now do we actually resume.
+                        char line[96];
+                        snprintf(line, sizeof(line),
+                                "CMD;RESUME=AUTO;STEP=%u;LOOP=%u;PHASH=%lu;AUTOSTART=%d",
+                                (unsigned)owner_->storedStep_,
+                                (unsigned)owner_->storedLoopCur_,
+                                (unsigned long)owner_->storedPhash_,
+                                1);  // AUTOSTART=1 since RUN is engaged
+                        sendCommand(line, MessageType::CRITICAL);
+                        owner_->dbgln("[RESUME] Sent (RUN switch engaged)");
+                    } else {
+                        // Do not resume. Go to brief boot note then normal idle.
+                        owner_->dbgln("[RESUME] Held (RUN switch OFF) -> Idling");
+                        owner_->bootPhase_    = BootPhase::ResumeBrief;
+                        owner_->bootMsgSince_ = 0;
+                    }
+                } else {
+                    owner_->dbgln("[RESUME] No valid resume (PHASH mismatch or none)");
                 }
             }
+            return;
         }
 
-        // We don't ACK NOTICE; it's one-way telemetry
-        return;
-    }
+        if (rx == "FAIL") {
+            if (owner_) {
+                //owner_->isProtoLoadedOntoCC_ = false;
+                owner_->ccProtoReq_ = false;
+                owner_->protoState_ = ProtoTxState::Failed;
+            }
+            // (Optional) store an error reason for the UI
+            return;
+        }
+
+        return; // ignore other NOTICEs
+}
+
 
     // ===== Commands from CC → send exactly one ACK; mirror REF if present =====
     // (We keep commands here—NOT at the top—so ACK happens once, then we run handlers.)
@@ -1482,6 +1297,7 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                     // 4) Notify CC, then reset us (notice; no ACK expected)
                     sendMessage("NOTICE;XPB_RESET=NOW", MessageType::NORMAL);
                     delay(5);
+                    owner_->clearResumeSlots_();
                     xpbSoftResetNow();
                 }
             }

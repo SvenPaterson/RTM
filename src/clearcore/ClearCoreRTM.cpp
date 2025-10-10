@@ -3,9 +3,18 @@
 static constexpr uint16_t STAT_PERIOD_MS = 1000;
 static constexpr uint8_t  STALE_MULT     = 5;
 
-const char* const ClearCoreRTM::kStateNames[9] = {
-    "DEBUG", "IDLE", "PREHEAT", "RUNNING", "PAUSED", "RESETTING",
-    "RESUME", "COMPLETED", "E-STOP"
+const char* const ClearCoreRTM::kStateNames[11] = {
+    "DEBUG", 
+    "BOOT", 
+    "PROTO_LOADING", 
+    "IDLE", 
+    "PREHEAT", 
+    "RUNNING", 
+    "PAUSED", 
+    "RESETTING",
+    "RESUME", 
+    "COMPLETED", 
+    "E-STOP"
 };
 
 bool ClearCoreRTM::begin() {
@@ -105,30 +114,56 @@ void ClearCoreRTM::tick() {
     // transition logic for pause / resume / start
     if (state_ != State::BOOT && state_ != State::PROTO_LOADING) {
 
-        // check for reset request
+        // --- RESET rising edge (as you had) ---
         if (resetActive && !prevResetActive_ && state_ != State::EStop) {
             if (state_ != State::Running) {
-                // capture re-reset state so it can be restored later
                 preReset_ = state_;
                 state_ = State::ResetRequested;
-                //renderScreen();
                 resetTmr_ = 0;
             }
         }
         prevResetActive_ = resetActive;
 
+        // --- RUN logic: pause on level, start/resume on RISING EDGE only ---
         if (!runActive && !resetActive && state_ == State::Running) {
-            // middle‐position ⇒ Pause
+            // switch moved out of RUN while running -> pause
             state_ = State::Paused;
         }
-        else if (runActive && state_ == State::Paused) {
-            // User selects Run position again ⇒ Resume
-            state_ = State::Resume;
+        else if ((runActive && !prevRunActive_) && state_ == State::Paused) {
+            // If cold start and targetC > 0 we should preheat before resuming motion
+            const uint16_t targetC = steps_[currentStep_].tempC;
+            if (coldStart_ && targetC > 0) {
+                state_                 = State::Preheat;
+                preheatTargetC_        = targetC;
+                waitingForTemp_        = true;
+                autoStartAfterPreheat_ = true;   // user-initiated start
+                dbgln("PAUSED→PREHEAT (system resume)");
+                // ask XPB to set heater
+                char cmd[48];
+                snprintf(cmd, sizeof(cmd), "CMD;SP=%u", preheatTargetC_);
+                ttlComms_.sendMessage(cmd, MessageType::IMPORTANT);
+            } else {
+                state_ = State::Resume;          // fast path, no preheat needed
+            }
         }
-        else if (runActive && state_ == State::Idle) {
-            // User selects Run position for first time ⇒ Running
-            state_ = State::Running;
+        else if ((runActive && !prevRunActive_) && state_ == State::Idle) {
+            const uint16_t targetC = steps_[currentStep_].tempC;
+            if (coldStart_ && targetC > 0) {
+                state_                 = State::Preheat;
+                preheatTargetC_        = targetC;
+                waitingForTemp_        = true;
+                autoStartAfterPreheat_ = true;   // user-initiated start
+                dbgln("IDLE→PREHEAT (user start)");
+                char cmd[48];
+                snprintf(cmd, sizeof(cmd), "CMD;SP=%u", preheatTargetC_);
+                ttlComms_.sendMessage(cmd, MessageType::IMPORTANT);
+            } else {
+                state_ = State::Running;         // fast path, no preheat needed
+            }
         }
+
+        // latch for next tick
+        prevRunActive_ = runActive;
     }
 
     // justEntered_ allows us to do things once upon first entering a state handler
@@ -207,20 +242,21 @@ void ClearCoreRTM::handleBoot(bool resetActive, bool justEntered_) {
     if (justEntered_) { 
         heartbeatSystemEnabled_ = false;
         protoRequestTmr_ = 0;
-        dbgln("BOOT: Requesting protocol from XPB...");
-        ttlComms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
 
-        protocolName_ = "Awaiting Upload";
-        stepCount_ = 0;
-        loopCount_ = 1;
-        totalLoops_ = 1;
-        progHash_ = 0;
+        if (!isProtoLoaded_) {
+            dbgln("BOOT: Requesting protocol from XPB...");
+            ttlComms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
 
-        // can't remember how we are rendering the screen
-        // but the above default stats should display while we load
+            protocolName_ = "Awaiting Upload";
+            stepCount_ = 0;
+            loopCount_ = 1;
+            totalLoops_ = 1;
+            progHash_ = 0;
+
+        }
     }
 
-    if (protoRequestTmr_ > 5000) {
+    if (protoRequestTmr_ > 5000 && !isProtoLoaded_) {
         dbgln("Awaiting protocol from XPB...");
         ttlComms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
         delay(2);
@@ -233,7 +269,7 @@ void ClearCoreRTM::handleBoot(bool resetActive, bool justEntered_) {
 void ClearCoreRTM::handleProtoLoad(bool justEntered_) {
     if (justEntered_) { 
         heartbeatSystemEnabled_ = false;
-        dbgln("LOADING: Protocol chunks being recieved...");
+        dbgln("PROTO_LOADING: Protocol chunks being recieved...");
     }
     // do nothing while we wait for proto to load?
     // do we even need handleProtoLoad if we aren't doing anything?
@@ -245,6 +281,7 @@ void ClearCoreRTM::handleIdle(bool runActive, bool justEntered_) {
         // start beating
         heartbeatSystemEnabled_ = true;
         xpbStaleTmr_ = 0;
+        dbgln("IDLE: Heatbeet system enabled");
     }
     
     // flash LED slowly
@@ -257,7 +294,6 @@ void ClearCoreRTM::handleIdle(bool runActive, bool justEntered_) {
     if (lcdTmr_ > lcdToggle_ms_ && state_ != State::EStop) {
         lcdTmr_ = 0;
         lcdToggle_ = !lcdToggle_;
-        //renderScreen();
         testRunTmr_ = 0; // prevent run timer from ticking
     }
     return;

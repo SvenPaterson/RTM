@@ -125,6 +125,7 @@ void TTLComms::checkRetries() {
         if (pendingMsg_.retryCount < pendingMsg_.maxRetries) {
             pendingMsg_.retryCount++;
             pendingMsg_.sentTime = millis();
+            
             serialSend(pendingMsg_.encoded.c_str());
         }
         else {

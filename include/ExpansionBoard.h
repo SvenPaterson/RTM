@@ -75,7 +75,6 @@ private:
     bool          ccReady_ = false;
     bool          ccAnySeen_ = false;
     elapsedMillis sinceBoot;
-    bool warnedNoLink_ = false;
     uint32_t estopUiMaskUntilMs_ = 0;       // While now < this, show "Resetting" instead of E-STOP.
     /// @brief If true, suppress the Resume? prompt after boot (XPB-only reboot).
     bool suppressResumePrompt_{false};
@@ -95,6 +94,10 @@ private:
     inline void dbgkv(const char *k, unsigned long v) const { if (Serial) { Serial.print(k); Serial.print(v); } }
 
     // ---------- CC heartbeat / state mirror ----------
+    enum class LinkState : uint8_t {NoLink, Alive};
+    LinkState  linkState_ = LinkState::NoLink;
+    bool warnedNoLink_ = false;
+
     elapsedMillis ccHbAgeTmr_;
     bool          ccHbSeen_{false};
     uint16_t      hbSeq_ = 0;
@@ -172,7 +175,8 @@ private:
      * @post Updates protocolName_, loopCount_, stepCount_, steps_[], progHash_.
      */
     bool loadProtocolFromSD_(const char *path);
-
+    void clearResumeSlots_();
+    
     /**
      * @brief Incremental CRC-32 (poly 0xEDB88320) updater.
      * @param crc Running CRC (use 0 to start a new CRC).
@@ -188,15 +192,16 @@ private:
     void logProtocol_() const;
 
     bool     haveStoredResume_{false};
+    bool     successfulProtoLoadFromSD_{false};
     uint32_t storedPhash_{0};
     uint16_t storedStep_{0}, storedLoopCur_{0}, storedLoopTot_{0};
 
     // ---------- Sensors ----------
     Adafruit_MAX31855 tc1_{TC1_CS_}, tc2_{TC2_CS_};
-    uint16_t     kDataIntervalMs_ = 100;
+    uint16_t      kDataIntervalMs_ = 100;
     elapsedMillis dataTmr_;
-    double       latestSealC_ = NAN;
-    double       latestSumpC_ = NAN;
+    double        latestSealC_ = NAN;
+    double        latestSumpC_ = NAN;
 
     /**
      * @brief Read one MAX31855 in °C and report faults to Serial.
@@ -223,13 +228,26 @@ private:
 
     /// @brief UI pages.
     enum class UiPage : uint8_t {
-        Connecting, Resetting, LostComms, EStop,
-        ResumePrompt, ResetCountdown, Preheat, Normal
+        Boot, ProtoMissingSD, ProtoTxFail,
+        Resetting, LostComms, EStop, ResumePrompt, ResetCountdown, 
+        Preheat, Normal
     };
+    UiPage lastUi_{UiPage::Boot};
 
-    UiPage lastUi_{UiPage::Connecting};
-    bool   uiPendingResume_{false};
-    
+    enum class BootPhase : uint8_t {
+        Start,
+        SDLoaded,
+        TxInProgress,
+        TxSuccess,
+        ResumeBrief,
+        Done
+    };
+    BootPhase bootPhase_ = BootPhase::Start;
+    int8_t txPct_ = -1;
+    elapsedMillis bootMsgSince_{0};
+    static constexpr uint16_t kBootResumeShowMs = 1250;
+    static constexpr uint16_t kBootSuccessShowMs = 2000;
+
     /**
      * @brief Render the top-level UI page (one page per tick).
      * @param page Target page to render.
@@ -264,8 +282,29 @@ private:
     bool uploadProtocolToCC_();
     bool ccProtoReq_      {false};
     bool needResumeAfterProto_ = false;
-    bool protoTxInProgress_ = false; 
     
+    // ------- Protocol Tx State --------
+    enum class ProtoTxState : uint8_t {
+        Idle,          // CC hasn't asked yet
+        WaitingReq,    // Proto loaded from SD, waiting for REQ:PROTO from CC
+        SDFail,        // Loading from SD failed
+        BegSent,       // PR_BEG sent, waiting for ACK
+        Sending,       // PR_DAT streaming
+        EndSent,       // PR_END sent
+        AwaitResult,   // waiting for NOTICE;PROTO_RX=*
+        Complete,      // NOTICE;PROTO_RX=OK received (and PHASH matches)
+        Failed,        // PROTO_RX=FAIL
+        Timeout        // our own timeout
+    };
+    const char* statusStringForUi_();
+
+    ProtoTxState protoState_ = ProtoTxState::Idle;
+    elapsedMillis protoSince_{0};      
+    uint16_t     lastProtoRef_ = 0;
+    uint8_t      protoStepSent_ = 0;
+    static constexpr uint16_t kProtoAckTimeoutMs_ = 1500;
+    static constexpr uint16_t kProtoSilenceTimeoutMs = 3000;
+
     // ---------- Preheat control ----------
     bool           preheatActive_{false};
     uint16_t       preheatSpC_{0};
