@@ -131,6 +131,7 @@ private:
     bool        resetActiveRemote_ = false;
     bool        runGateReleased_   = false; //!< RUN line (active-low) ignored until XPB grants start or we observe a post-boot high
     bool        latchedRunPending_ = false; //!< Latched RUN request awaiting protocol verification
+    enum class RunTrigger : uint8_t { ManualEdge, LatchedAuto };
     uint32_t    swLastUpdateMs_    = 0;
 
     // string mapping for displaying active state on LCD
@@ -222,6 +223,7 @@ private:
     void handleResume    (bool runActive,   bool justEntered_);
     void handleCompleted (bool resetActive, bool justEntered_);
     void handlePreheat   (bool runActive,   bool justEntered_);
+    bool promoteRun_(RunTrigger trigger);
 
     class ClearCoreTTL : public TTLComms {
     public:
@@ -641,7 +643,12 @@ private:
                     owner_->runGateReleased_ = true;
                     owner_->latchedRunPending_ = owner_->runActiveRemote_;
                     if (owner_->latchedRunPending_) {
-                        owner_->dbgln("[RUN] Latched RUN will auto-start after proto verification");
+                        if (owner_->promoteRun_(ClearCoreRTM::RunTrigger::LatchedAuto)) {
+                            owner_->latchedRunPending_ = false;
+                        }
+                    }
+                    if (owner_->latchedRunPending_) {
+                        owner_->dbgln("[RUN] Latched RUN held until Idle/Pause is ready");
                     } else {
                         owner_->dbgln("[RUN] Gate reopened after protocol verification");
                     }

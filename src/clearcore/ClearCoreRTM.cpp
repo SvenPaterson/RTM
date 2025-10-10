@@ -117,14 +117,13 @@ void ClearCoreRTM::tick() {
         dbgln("[RUN] Gate released: XPB RUN returned high");
     }
 
-    bool runRiseAllowed = false;
+    bool runRiseManual = false;
+    bool runRiseLatched = false;
     if (runGateReleased_) {
         if (runRoseLow) {
-            runRiseAllowed = true;
+            runRiseManual = true;
         } else if (latchedRunPending_ && runLineLow) {
-            latchedRunPending_ = false;
-            runRiseAllowed     = true;
-            dbgln("[RUN] Auto-promoting latched RUN after protocol verification");
+            runRiseLatched = true;
         }
     } else if (runRoseLow) {
         dbgln("[RUN] Ignoring RUN line held low before XPB resume");
@@ -153,36 +152,12 @@ void ClearCoreRTM::tick() {
             // switch moved out of RUN while running -> pause
             state_ = State::Paused;
         }
-        else if (runRiseAllowed && state_ == State::Paused) {
-            // If cold start and targetC > 0 we should preheat before resuming motion
-            const uint16_t targetC = steps_[currentStep_].tempC;
-            if (coldStart_ && targetC > 0) {
-                state_                 = State::Preheat;
-                preheatTargetC_        = targetC;
-                waitingForTemp_        = true;
-                autoStartAfterPreheat_ = true;   // user-initiated start
-                dbgln("PAUSED→PREHEAT (system resume)");
-                // ask XPB to set heater
-                char cmd[48];
-                snprintf(cmd, sizeof(cmd), "CMD;SP=%u", preheatTargetC_);
-                ttlComms_.sendMessage(cmd, MessageType::IMPORTANT);
-            } else {
-                state_ = State::Resume;          // fast path, no preheat needed
-            }
+        else if (runRiseManual) {
+            (void)promoteRun_(RunTrigger::ManualEdge);
         }
-        else if (runRiseAllowed && state_ == State::Idle) {
-            const uint16_t targetC = steps_[currentStep_].tempC;
-            if (coldStart_ && targetC > 0) {
-                state_                 = State::Preheat;
-                preheatTargetC_        = targetC;
-                waitingForTemp_        = true;
-                autoStartAfterPreheat_ = true;   // user-initiated start
-                dbgln("IDLE→PREHEAT (user start)");
-                char cmd[48];
-                snprintf(cmd, sizeof(cmd), "CMD;SP=%u", preheatTargetC_);
-                ttlComms_.sendMessage(cmd, MessageType::IMPORTANT);
-            } else {
-                state_ = State::Running;         // fast path, no preheat needed
+        else if (runRiseLatched) {
+            if (promoteRun_(RunTrigger::LatchedAuto)) {
+                latchedRunPending_ = false;
             }
         }
     }
@@ -259,6 +234,60 @@ void ClearCoreRTM::tick() {
         }
     }
 
+}
+
+bool ClearCoreRTM::promoteRun_(RunTrigger trigger) {
+    if (!runActiveRemote_) {
+        return false;
+    }
+
+    const bool latched = (trigger == RunTrigger::LatchedAuto);
+    const uint16_t targetC = steps_[currentStep_].tempC;
+
+    auto queuePreheat = [&](const char *logManual, const char *logLatched) {
+        state_                 = State::Preheat;
+        preheatTargetC_        = targetC;
+        waitingForTemp_        = true;
+        autoStartAfterPreheat_ = true;
+        if (latched) {
+            if (logLatched) dbgln(logLatched);
+        } else {
+            if (logManual) dbgln(logManual);
+        }
+
+        char cmd[48];
+        snprintf(cmd, sizeof(cmd), "CMD;SP=%u", preheatTargetC_);
+        ttlComms_.sendMessage(cmd, MessageType::IMPORTANT);
+    };
+
+    if (state_ == State::Paused) {
+        if (coldStart_ && targetC > 0) {
+            queuePreheat("PAUSED→PREHEAT (system resume)", "[RUN] Latched resume -> PREHEAT");
+        } else {
+            state_ = State::Resume;
+            if (latched) {
+                dbgln("[RUN] Latched resume -> RESUME");
+            }
+        }
+        return true;
+    }
+
+    if (state_ == State::Idle) {
+        if (coldStart_ && targetC > 0) {
+            queuePreheat("IDLE→PREHEAT (user start)", "[RUN] Latched start -> PREHEAT");
+        } else {
+            state_ = State::Running;
+            if (latched) {
+                dbgln("[RUN] Latched start -> RUNNING");
+            }
+        }
+        return true;
+    }
+
+    if (latched) {
+        dbgln("[RUN] Latched RUN held waiting for Idle/Pause state");
+    }
+    return false;
 }
 
 /* ——— State Handlers ——— */
