@@ -29,8 +29,6 @@ bool ClearCoreRTM::begin() {
     dbgln("SerialReady");
 
     /* GPIO */
-    PRGM_RUN_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
-    PRGM_RESET_BUS_PIN.Mode(Connector::INPUT_DIGITAL);
     SAFETY_PIN.Mode(Connector::INPUT_DIGITAL);
     HEATER_OUTPUT_PIN.Mode(Connector::OUTPUT_PWM);
     HEATER_SAFETY_PIN.Mode(Connector::OUTPUT_DIGITAL);
@@ -144,6 +142,11 @@ void ClearCoreRTM::tick() {
             }
         }
         prevResetActive_ = resetActive;
+
+        const bool runRiseAllowed = runRoseLow && runGateReleased_;
+        if (runRoseLow && !runGateReleased_) {
+            dbgln("[RUN] Ignoring RUN line held low before XPB resume");
+        }
 
         // --- RUN logic: pause on level, start/resume on RISING EDGE only ---
         if (!runLineLow && !resetActive && state_ == State::Running) {
