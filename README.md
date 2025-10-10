@@ -113,3 +113,4 @@ Additional details to capture as the design matures:
 * Capture enclosure photos that highlight mounting points, emergency stop hardware, and cable routing for technicians and auditors.
 
 This README will be expanded as more hardware information becomes available and the control software evolves.
+

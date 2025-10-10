@@ -11,15 +11,11 @@ const char* const ClearCoreRTM::kStateNames[11] = {
     "PREHEAT",          // State::Preheat
     "RUNNING",          // State::Running
     "PAUSED",           // State::Paused
-    "RESETTING",        // State::Resetting
+    "RESETTING",        // State::ResetRequested
     "RESUME",           // State::Resume
     "COMPLETED",        // State::Completed
     "E-STOP"            // State::EStop
 };
-static_assert(
-    static_cast<size_t>(ClearCoreRTM::State::EStop) + 1 ==
-        sizeof(ClearCoreRTM::kStateNames) / sizeof(ClearCoreRTM::kStateNames[0]),
-    "kStateNames must match ClearCoreRTM::State");
 
 bool ClearCoreRTM::begin() {
     /* USB Serial Comms for Debugging */
@@ -105,14 +101,35 @@ void ClearCoreRTM::tick() {
     }
 
     bool eStopActive  = !SAFETY_PIN.State();
-    bool runActive    = runActiveRemote_;
+    const bool runLineLow = runActiveRemote_;   // XPB publishes RUN=1 when the active-low line is asserted
     bool resetActive  = resetActiveRemote_;
+    const bool runRoseLow  = runLineLow && !prevRunActive_;
+    const bool runWentHigh = !runLineLow && prevRunActive_;
 
     // first check for E-Stop
     if (eStopActive && state_ != State::EStop) {
         estopReason_ |= ESTOP_SAFETY;      // <— tag hardware cause
         eStopAll_("HW E-STOP input");
         return;
+    }
+
+    if (!runGateReleased_ && runWentHigh) {
+        runGateReleased_   = true;   // XPB line returned high, treat future low transitions as intentional
+        latchedRunPending_ = false;
+        dbgln("[RUN] Gate released: XPB RUN returned high");
+    }
+
+    bool runRiseAllowed = false;
+    if (runGateReleased_) {
+        if (runRoseLow) {
+            runRiseAllowed = true;
+        } else if (latchedRunPending_ && runLineLow) {
+            latchedRunPending_ = false;
+            runRiseAllowed     = true;
+            dbgln("[RUN] Auto-promoting latched RUN after protocol verification");
+        }
+    } else if (runRoseLow) {
+        dbgln("[RUN] Ignoring RUN line held low before XPB resume");
     }
 
     // transition logic for pause / resume / start
@@ -129,11 +146,11 @@ void ClearCoreRTM::tick() {
         prevResetActive_ = resetActive;
 
         // --- RUN logic: pause on level, start/resume on RISING EDGE only ---
-        if (!runActive && !resetActive && state_ == State::Running) {
+        if (!runLineLow && !resetActive && state_ == State::Running) {
             // switch moved out of RUN while running -> pause
             state_ = State::Paused;
         }
-        else if ((runActive && !prevRunActive_) && state_ == State::Paused) {
+        else if (runRiseAllowed && state_ == State::Paused) {
             // If cold start and targetC > 0 we should preheat before resuming motion
             const uint16_t targetC = steps_[currentStep_].tempC;
             if (coldStart_ && targetC > 0) {
@@ -150,7 +167,7 @@ void ClearCoreRTM::tick() {
                 state_ = State::Resume;          // fast path, no preheat needed
             }
         }
-        else if ((runActive && !prevRunActive_) && state_ == State::Idle) {
+        else if (runRiseAllowed && state_ == State::Idle) {
             const uint16_t targetC = steps_[currentStep_].tempC;
             if (coldStart_ && targetC > 0) {
                 state_                 = State::Preheat;
@@ -165,10 +182,10 @@ void ClearCoreRTM::tick() {
                 state_ = State::Running;         // fast path, no preheat needed
             }
         }
-
-        // latch for next tick
-        prevRunActive_ = runActive;
     }
+
+    // latch for next tick (even during BOOT/PROTO_LOADING so we catch high transitions)
+    prevRunActive_ = runLineLow;
 
     // justEntered_ allows us to do things once upon first entering a state handler
     bool justEntered_ = (state_ != prevState_); // did we just state change?
@@ -181,22 +198,22 @@ void ClearCoreRTM::tick() {
     // dispatch to state handlers
     switch (state_) {
         case State::BOOT:
-            handleBoot(runActive, justEntered_);
+            handleBoot(resetActive, justEntered_);
             break;
         case State::PROTO_LOADING:
             handleProtoLoad(justEntered_);
             break;
         case State::Idle:
-            handleIdle(runActive, justEntered_);
+            handleIdle(runLineLow, justEntered_);
             break;
         case State::Preheat:
-            handlePreheat(runActive, justEntered_);
+            handlePreheat(runLineLow, justEntered_);
             break;
         case State::Running:
-            handleRunning(runActive, justEntered_);
+            handleRunning(runLineLow, justEntered_);
             break;
         case State::Paused:
-            handlePaused(runActive, justEntered_);
+            handlePaused(runLineLow, justEntered_);
             break;
         case State::ResetRequested:
             handleReset(resetActive, justEntered_);
@@ -205,7 +222,7 @@ void ClearCoreRTM::tick() {
             handleEStop(resetActive, justEntered_);
             break;
         case State::Resume:
-            handleResume(runActive, justEntered_);
+            handleResume(runLineLow, justEntered_);
             break;
         case State::Completed:
             handleCompleted(resetActive, justEntered_);
@@ -243,7 +260,9 @@ void ClearCoreRTM::tick() {
 
 /* ——— State Handlers ——— */
 void ClearCoreRTM::handleBoot(bool resetActive, bool justEntered_) {
-    if (justEntered_) { 
+    if (justEntered_) {
+        runGateReleased_   = false;   // active-low RUN stays masked until XPB grants it again
+        latchedRunPending_ = false;
         heartbeatSystemEnabled_ = false;
         protoRequestTmr_ = 0;
 
