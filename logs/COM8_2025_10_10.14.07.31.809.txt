@@ -1,0 +1,23 @@
+14:07:31:889 -> 
+14:07:31:890 -> USB Serial Monitor Connected!
+14:07:32:190 -> Connecting with CC..
+14:07:32:213 -> [TX CC] QUIESCE;SECS=10;REF=1:3A
+14:07:32:248 -> 
+14:07:32:249 -> SD ready
+14:07:32:260 -> [UI] E-STOP boot mask 2.5s
+14:07:32:441 -> Initializing MAX31855 sensor - TC1...DONE
+14:07:32:979 -> Protocol loaded OK
+14:07:33:000 -> ==== Protocol (XPB) ====
+14:07:33:027 -> 
+14:07:33:028 -> Name: RDP110X Torque Test
+14:07:33:055 -> Loops: 10
+14:07:33:066 -> Steps: 16
+14:07:33:076 -> PHASH: 1693371856Step  1:     30 RPM    30 RPM/s   20s  33degC
+14:07:33:142 -> Step  2:      0 RPM    30 RPM/s    1s  30degC
+14:07:33:197 -> Step  3:   1800 RPM   900 RPM/s   30s  40degC
+14:07:33:240 -> Step  4:      0 RPM   900 RPM/s    1s  25degC
+14:07:33:294 -> Step  5:     30 RPM    30 RPM/s   20s  20degC
+14:07:33:338 -> Step  6:      0 RPM    30 RPM/s    1s  56degC
+14:07:33:387 -> Step  7:   1800 RPM    30 RPM/s    1s  27degC
+14:07:33:436 -> Step  8:      0 RPM    30 RPM/s    1s  35degC
+14:07:33:485 -> Step  9:     30 RPM    30 RPM
