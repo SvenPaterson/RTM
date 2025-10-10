@@ -1,7 +1,7 @@
 # Boot-Up Serial Review Findings
 
 ## 1. Auto-resume races with run switch
-The ClearCore immediately transitions from `IDLE` to `RUNNING` on the first rising edge it sees from the RUN switch, even during cold boot, because it treats the latched remote RUN input as a start trigger (`runActive && !prevRunActive_`).【F:src/clearcore/ClearCoreRTM.cpp†L132-L170】 When the expansion board later issues `CMD;RESUME=AUTO;...` after completing the protocol upload, the ClearCore rejects it with `ERR_WRONG_STAT` because it is already in the `RUNNING` state and only accepts resume commands while `IDLE`.【F:include/ClearCoreRTM.h†L355-L425】 This matches the captured log where the CC reports repeated `ERR_WRONG_STAT` ACKs immediately after entering `RUNNING` when the RUN pin is latched active during boot.
+The ClearCore immediately transitions from `IDLE` to `RUNNING` on the first rising edge it sees from the RUN switch, even during cold boot, because it treats the latched remote RUN input as a start trigger (`runActive && !prevRunActive_`).【F:src/clearcore/ClearCoreRTM.cpp†L134-L186】 When the expansion board later issues `CMD;RESUME=AUTO;...` after completing the protocol upload, the ClearCore rejects it with `ERR_WRONG_STAT` because it is already in the `RUNNING` state and only accepts resume commands while `IDLE`.【F:include/ClearCoreRTM.h†L360-L420】 This matches the captured log where the CC reports repeated `ERR_WRONG_STAT` ACKs immediately after entering `RUNNING` when the XPB's active-low RUN line is held asserted during boot.
 
 The new cold boots performed with `RA.BIN`/`RB.BIN` deleted show the CC and XPB remaining in `IDLE` with steadily increasing `SW_AGE` so long as RUN stays low, proving the resume collision is limited to the “RUN held on boot” condition rather than a general resume failure.【F:logs/cold_boot_no_resume.txt†L1-L17】 Decide whether the CC should defer auto-starting until it has a chance to honor an incoming resume request, or whether the XPB should suppress the auto-resume command when it sees the CC already running.  Without that handshake, the two ends will fight and the stored resume step will never be applied.
 
@@ -11,7 +11,7 @@ With the RUN pin hard-low during boot, the XPB immediately advertises `RUN=1` th
 transitions into `RUNNING` as soon as it leaves the protocol loader.
 `ClearCoreRTM::tick()` only requires a rising edge while already in `Idle` to promote the
 state, so a latched RUN input at boot causes the CC to advance before the XPB can finish
-its auto-resume negotiation.【F:src/clearcore/ClearCoreRTM.cpp†L131-L170】【F:include/ClearCoreRTM.h†L300-L312】
+its auto-resume negotiation.【F:src/clearcore/ClearCoreRTM.cpp†L134-L175】【F:include/ClearCoreRTM.h†L305-L315】
 
 When RUN stays low—as in the new captures—the LCD’s `SW age` counter increments normally and both controllers sit in `IDLE`, so the steady-state display path checks out.【F:logs/cold_boot_no_resume.txt†L1-L17】 The problem shows up only in the latched-run boot: the LCD keeps receiving `SW;RUN=1` updates every few hundred milliseconds, so `SW age` sticks at zero even though the CC has already entered `RUNNING`. Consider exposing the latched RUN state and/or CC state string on the LCD whenever the CC is actively running so technicians can see that the system is live.【F:src/exp-board/ExpansionBoard.cpp†L783-L829】
 
@@ -23,7 +23,7 @@ The ClearCore prints a duplicate `PR_END` notice as well as `WARN: TTL bad check
 
 ## 5. Miscellaneous follow-ups
 * Confirm that the XPB backs off after the CC reports `ERR_WRONG_STAT`; the log shows multiple retries with the same REF, so ensure the retry policy stops once an explicit error ACK is received.【F:src/shared/TTLComms.cpp†L258-L353】
-* Verify whether the heater setpoint / preheat command path is exercised during an auto-resume.  If the CC suppresses auto-start to wait for XPB resume, make sure the stored step's temperature target still flows through the preheat handler before resuming motion.【F:include/ClearCoreRTM.h†L402-L423】【F:src/clearcore/ClearCoreRTM.cpp†L132-L166】
+* Verify whether the heater setpoint / preheat command path is exercised during an auto-resume.  If the CC suppresses auto-start to wait for XPB resume, make sure the stored step's temperature target still flows through the preheat handler before resuming motion.【F:include/ClearCoreRTM.h†L399-L418】【F:src/clearcore/ClearCoreRTM.cpp†L145-L175】
 
 ## 6. User-requested reset flow
 The operator-driven reset capture shows the controllers exchanging the full `RESET=ARM`/`RESET=EXEC` handshake while both ends sit in `WAITING_XPB`, so the high-level flow is wired correctly.【F:logs/user_requested_reset.txt†L1-L127】【F:logs/user_requested_reset.txt†L129-L268】 Still, three issues surface:
@@ -35,7 +35,23 @@ The operator-driven reset capture shows the controllers exchanging the full `RES
 ## 7. Path to resolution
 To iron out the boot-and-reset issues captured so far:
 
-* Gate the ClearCore's auto-run promotion behind an explicit XPB resume allowance (or have the XPB suppress its resume when RUN is already high) so we never enter the `ERR_WRONG_STAT` retry loop.【F:src/clearcore/ClearCoreRTM.cpp†L132-L170】【F:logs/cold_boot_no_resume.txt†L1-L17】
+* Gate the ClearCore's auto-run promotion behind an explicit XPB resume allowance (or have the XPB
+  suppress its resume when RUN is already high) so we never enter the `ERR_WRONG_STAT` retry loop.
+  **Update:** the ClearCore now keeps the active-low RUN masked through `BOOT/PROTO_LOADING`, then
+  reopens the gate once the protocol upload completes. If RUN is still asserted at that moment a
+  dedicated helper promotes the latched request immediately (or waits until we reach `IDLE/PAUSED`),
+  so brown-out recoveries proceed without the extra RUN toggle noted in the latest capture.【F:src/clearcore/ClearCoreRTM.cpp†L103-L210】【F:include/ClearCoreRTM.h†L131-L220】【F:logs/cold_boot_no_resume.txt†L1-L17】
+  * **Validation plan:**
+    1. Cold-boot both controllers with the XPB RUN pin held low (call-for-run) and confirm the CC
+       stays in `BOOT/PROTO_LOADING` while logging `[RUN] Ignoring RUN line held low before XPB
+       resume` until the line is released high or a `RESUME AUTOSTART=1` arrives; this exercises the
+       `runGateReleased_` guard reset in `handleBoot()`.【F:src/clearcore/ClearCoreRTM.cpp†L116-L205】
+    2. After the XPB handshake completes, momentarily release RUN high and drive it low again to
+       verify the controller transitions from `IDLE` into `PREHEAT/RUN`, proving the gate opens once
+       the active-low line has been seen high.【F:src/clearcore/ClearCoreRTM.cpp†L134-L175】
+    3. From `IDLE`, send `RESUME AUTOSTART=1` while keeping RUN asserted low and confirm the
+       ClearCore accepts the resume and advances only after the XPB command; this covers the resume
+       handler overriding the gate for coordinated auto-starts.【F:include/ClearCoreRTM.h†L360-L413】
 * Surface RUN/RESET latch state on the LCD whenever the controller is not idle, and make the switch-age timer freeze explicitly signal "RUN held" so operators know why the system started without interaction.【F:src/exp-board/ExpansionBoard.cpp†L783-L829】【F:logs/user_requested_reset.txt†L69-L127】
 * Instrument the TTL transport for checksum failures and ensure duplicate `PR_END` / `QUIESCE` frames are genuine retries; add back-off so we do not spam commands when the peer already acknowledged them.【F:src/shared/TTLComms.cpp†L258-L353】【F:logs/user_requested_reset.txt†L85-L127】
 * Harden resume persistence: wrap the snapshot writer with retries and surface failures prominently, then verify the reset flow waits for a confirmed snapshot before forcing the XPB reset.【F:logs/user_requested_reset.txt†L96-L119】

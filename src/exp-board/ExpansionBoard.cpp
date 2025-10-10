@@ -974,13 +974,14 @@ bool ExpansionBoard::loadProtocolFromSD_(const char *path) {
   return (stepCount_ > 0);
 }
 
-void ExpansionBoard::clearResumeSlots_() {
-    (void)deleteIfExists_("/RA.BIN");
-    (void)deleteIfExists_("/RB.BIN");
-}
 static bool deleteIfExists_(const char *path) {
     if (!SD.exists(path)) return true;
     return SD.remove(path);
+}
+
+void ExpansionBoard::clearResumeSlots_() {
+    (void)deleteIfExists_("/RA.BIN");
+    (void)deleteIfExists_("/RB.BIN");
 }
 
 /**
