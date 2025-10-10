@@ -129,11 +129,15 @@ private:
     /* ——— user input ——— */
     bool        runActiveRemote_   = false;
     bool        resetActiveRemote_ = false;
-    bool        runGateReleased_   = false; //!< RUN line (active-low) ignored until XPB grants start or a high level is observed
+    bool        runGateReleased_   = false; //!< RUN line (active-low) ignored until XPB grants start or we observe a post-boot high
     uint32_t    swLastUpdateMs_    = 0;
 
     // string mapping for displaying active state on LCD
     static const char* const kStateNames[11];
+    static_assert(
+        static_cast<uint8_t>(State::EStop) + 1 ==
+        sizeof(kStateNames) / sizeof(kStateNames[0]),
+        "kStateNames must match ClearCoreRTM::State");
     static inline const char * stateToString(State s) {
         return kStateNames[static_cast<uint8_t>(s)];
     }

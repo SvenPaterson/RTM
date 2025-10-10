@@ -11,15 +11,11 @@ const char* const ClearCoreRTM::kStateNames[11] = {
     "PREHEAT",          // State::Preheat
     "RUNNING",          // State::Running
     "PAUSED",           // State::Paused
-    "RESETTING",        // State::Resetting
+    "RESETTING",        // State::ResetRequested
     "RESUME",           // State::Resume
     "COMPLETED",        // State::Completed
     "E-STOP"            // State::EStop
 };
-static_assert(
-    static_cast<size_t>(ClearCoreRTM::State::EStop) + 1 ==
-        sizeof(ClearCoreRTM::kStateNames) / sizeof(ClearCoreRTM::kStateNames[0]),
-    "kStateNames must match ClearCoreRTM::State");
 
 bool ClearCoreRTM::begin() {
     /* USB Serial Comms for Debugging */
@@ -107,12 +103,19 @@ void ClearCoreRTM::tick() {
     bool eStopActive  = !SAFETY_PIN.State();
     const bool runLineLow = runActiveRemote_;   // XPB publishes RUN=1 when the active-low line is asserted
     bool resetActive  = resetActiveRemote_;
+    const bool runRoseLow  = runLineLow && !prevRunActive_;
+    const bool runWentHigh = !runLineLow && prevRunActive_;
 
     // first check for E-Stop
     if (eStopActive && state_ != State::EStop) {
         estopReason_ |= ESTOP_SAFETY;      // <— tag hardware cause
         eStopAll_("HW E-STOP input");
         return;
+    }
+
+    if (!runGateReleased_ && runWentHigh) {
+        runGateReleased_ = true;   // XPB line returned high, treat future low transitions as intentional
+        dbgln("[RUN] Gate released: XPB RUN returned high");
     }
 
     // transition logic for pause / resume / start
@@ -127,13 +130,6 @@ void ClearCoreRTM::tick() {
             }
         }
         prevResetActive_ = resetActive;
-
-        const bool runRoseLow = runLineLow && !prevRunActive_;
-        const bool runWentHigh = !runLineLow && prevRunActive_;
-        if (!runGateReleased_ && runWentHigh) {
-            runGateReleased_ = true;   // XPB line returned high, treat future low transitions as intentional
-            dbgln("[RUN] Gate released: XPB RUN returned high");
-        }
 
         const bool runRiseAllowed = runRoseLow && runGateReleased_;
         if (runRoseLow && !runGateReleased_) {
@@ -177,10 +173,10 @@ void ClearCoreRTM::tick() {
                 state_ = State::Running;         // fast path, no preheat needed
             }
         }
-
-        // latch for next tick
-        prevRunActive_ = runLineLow;
     }
+
+    // latch for next tick (even during BOOT/PROTO_LOADING so we catch high transitions)
+    prevRunActive_ = runLineLow;
 
     // justEntered_ allows us to do things once upon first entering a state handler
     bool justEntered_ = (state_ != prevState_); // did we just state change?
