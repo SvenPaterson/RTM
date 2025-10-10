@@ -19,10 +19,11 @@ subdirectory defines its own `AGENTS.md` with more specific guidance.
   snippets to keep timestamps readable.
 
 ## Logs (`logs/` directory)
-- Name new captures with a concise description in snake_case and the `.txt`
-  extension (for example: `2024-09-03_cold_boot.txt`).
-- Store raw captures without editing timestamps or message ordering; add context
-  in the code review document rather than inside the log files.
+- Log caputuring can be toggled on by the human user and will be automatically stored 
+  in the logs folder with following format "COM#_YYYY_MM_DD.HH.MM.SSS.txt". Always check
+  the logs folder for recent captures to reference with recent bugs.
+- Prompt the user to turn on log capturing if it would be pertinent to the task at hand
+  or if it looks like they forgot to do so
 
 ## Pull request messages
 - Provide a bullet list summary of key findings.
