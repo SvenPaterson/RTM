@@ -45,9 +45,7 @@
 
 /* === MOTOR & DISPLAY CONFIGURATION ===================================== */
 #define motor               ConnectorM0
-#define PRGM_RUN_BUS_PIN    ConnectorDI6
 #define LED_PIN             ConnectorIO0
-#define PRGM_RESET_BUS_PIN  ConnectorDI7
 #define SerialPort          ConnectorUsb
 #define SAFETY_PIN          ConnectorDI8
 #define HEATER_OUTPUT_PIN   ConnectorIO1
