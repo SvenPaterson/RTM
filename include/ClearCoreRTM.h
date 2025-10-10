@@ -131,7 +131,7 @@ private:
     /* ——— user input ——— */
     bool        runActiveRemote_   = false;
     bool        resetActiveRemote_ = false;
-    bool        runEdgeArmed_      = false; //!< Defers RUN rising edges until XPB handshake/low seen
+    bool        runGateReleased_   = false; //!< RUN line (active-low) ignored until XPB grants start or a high level is observed
     uint32_t    swLastUpdateMs_    = 0;
 
     // string mapping for displaying active state on LCD
@@ -390,7 +390,7 @@ private:
                         owner_->loopCount_ = owner_->totalLoops_ - (uint32_t)resumeLoop + 1;
 
                         // Allow future RUN edges now that XPB has explicitly coordinated resume
-                        owner_->runEdgeArmed_ = true;
+                        owner_->runGateReleased_ = true;   // XPB explicitly allowed coordinated start
 
                         // --- Gating Rules ---
                         // if AUTOSTART==0 or RUN is not LOW, don't preheat nor start.
