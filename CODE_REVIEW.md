@@ -35,7 +35,11 @@ The operator-driven reset capture shows the controllers exchanging the full `RES
 ## 7. Path to resolution
 To iron out the boot-and-reset issues captured so far:
 
-* Gate the ClearCore's auto-run promotion behind an explicit XPB resume allowance (or have the XPB suppress its resume when RUN is already high) so we never enter the `ERR_WRONG_STAT` retry loop.【F:src/clearcore/ClearCoreRTM.cpp†L132-L170】【F:logs/cold_boot_no_resume.txt†L1-L17】
+* Gate the ClearCore's auto-run promotion behind an explicit XPB resume allowance (or have the XPB
+  suppress its resume when RUN is already high) so we never enter the `ERR_WRONG_STAT` retry loop.
+  **Update:** the ClearCore now ignores the latched RUN level until the switch has been observed low
+  or the XPB issues a resume/autostart, so the boot-time promotion no longer fires while the XPB is
+  still uploading the protocol.【F:src/clearcore/ClearCoreRTM.cpp†L108-L176】【F:include/ClearCoreRTM.h†L130-L410】【F:logs/cold_boot_no_resume.txt†L1-L17】
 * Surface RUN/RESET latch state on the LCD whenever the controller is not idle, and make the switch-age timer freeze explicitly signal "RUN held" so operators know why the system started without interaction.【F:src/exp-board/ExpansionBoard.cpp†L783-L829】【F:logs/user_requested_reset.txt†L69-L127】
 * Instrument the TTL transport for checksum failures and ensure duplicate `PR_END` / `QUIESCE` frames are genuine retries; add back-off so we do not spam commands when the peer already acknowledged them.【F:src/shared/TTLComms.cpp†L258-L353】【F:logs/user_requested_reset.txt†L85-L127】
 * Harden resume persistence: wrap the snapshot writer with retries and surface failures prominently, then verify the reset flow waits for a confirmed snapshot before forcing the XPB reset.【F:logs/user_requested_reset.txt†L96-L119】

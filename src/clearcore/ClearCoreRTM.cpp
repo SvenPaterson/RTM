@@ -128,12 +128,22 @@ void ClearCoreRTM::tick() {
         }
         prevResetActive_ = resetActive;
 
+        const bool runRise = runActive && !prevRunActive_;
+        if (!runEdgeArmed_ && !runActive) {
+            runEdgeArmed_ = true;   // saw a low level -> future rises are intentional
+        }
+
+        const bool runRiseAllowed = runRise && runEdgeArmed_;
+        if (runRise && !runEdgeArmed_) {
+            dbgln("[RUN] Ignoring latched RUN (awaiting XPB resume)");
+        }
+
         // --- RUN logic: pause on level, start/resume on RISING EDGE only ---
         if (!runActive && !resetActive && state_ == State::Running) {
             // switch moved out of RUN while running -> pause
             state_ = State::Paused;
         }
-        else if ((runActive && !prevRunActive_) && state_ == State::Paused) {
+        else if (runRiseAllowed && state_ == State::Paused) {
             // If cold start and targetC > 0 we should preheat before resuming motion
             const uint16_t targetC = steps_[currentStep_].tempC;
             if (coldStart_ && targetC > 0) {
@@ -150,7 +160,7 @@ void ClearCoreRTM::tick() {
                 state_ = State::Resume;          // fast path, no preheat needed
             }
         }
-        else if ((runActive && !prevRunActive_) && state_ == State::Idle) {
+        else if (runRiseAllowed && state_ == State::Idle) {
             const uint16_t targetC = steps_[currentStep_].tempC;
             if (coldStart_ && targetC > 0) {
                 state_                 = State::Preheat;
@@ -243,7 +253,8 @@ void ClearCoreRTM::tick() {
 
 /* ——— State Handlers ——— */
 void ClearCoreRTM::handleBoot(bool resetActive, bool justEntered_) {
-    if (justEntered_) { 
+    if (justEntered_) {
+        runEdgeArmed_ = false;   // always re-arm the RUN gate on cold boot/protocol reload
         heartbeatSystemEnabled_ = false;
         protoRequestTmr_ = 0;
 
