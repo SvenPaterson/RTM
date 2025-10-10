@@ -131,10 +131,15 @@ private:
     /* ——— user input ——— */
     bool        runActiveRemote_   = false;
     bool        resetActiveRemote_ = false;
+    bool        runGateReleased_   = false; //!< RUN line (active-low) ignored until XPB grants start or a high level is observed
     uint32_t    swLastUpdateMs_    = 0;
 
     // string mapping for displaying active state on LCD
     static const char* const kStateNames[11];
+    static_assert(
+        static_cast<uint8_t>(State::EStop) + 1 ==
+        sizeof(kStateNames) / sizeof(kStateNames[0]),
+        "kStateNames must match ClearCoreRTM::State");
     static inline const char * stateToString(State s) {
         return kStateNames[static_cast<uint8_t>(s)];
     }
@@ -387,7 +392,10 @@ private:
                         // Apply the resume position
                         owner_->currentStep_ = (uint16_t)(resumeStep - 1);  // Convert to 0-based index
                         owner_->loopCount_ = owner_->totalLoops_ - (uint32_t)resumeLoop + 1;
-                        
+
+                        // Allow future RUN edges now that XPB has explicitly coordinated resume
+                        owner_->runGateReleased_ = true;   // XPB explicitly allowed coordinated start
+
                         // --- Gating Rules ---
                         // if AUTOSTART==0 or RUN is not LOW, don't preheat nor start.
                         if (autoStart != 1 || !runIsEngaged) {
