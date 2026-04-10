@@ -1,5 +1,9 @@
 .pio
 .vscode
+.venv
 *.pyc
 upload_files/__pycache__/
 ser_term_logs/
+tools/*.log
+tools/protocols/
+test/log/*

@@ -262,6 +262,8 @@ private:
      *          Shows protocol/state on lines 0–1 and RTM/torque views on 2–3.
      */
     void renderNormal_();
+    void refreshStepCountdown_(bool stepOrLoopChanged);
+    void formatStepCountdown_(char *dst, size_t len) const;
     
     // ---------- Protocol model ----------
     struct Step {
@@ -317,6 +319,12 @@ private:
     bool     usbSimHold_ = false;
     uint32_t usbSimHoldUntilMs_ = 0;
     bool usbInjecting_ = false;
+
+    uint8_t   countdownStepSnapshot_{0};
+    uint32_t  countdownLoopSnapshot_{0};
+    uint32_t  stepStartAgeMs_{0};
+    uint32_t  stepTotalMs_{0};
+    uint32_t  stepRemainingMs_{0};
 
     // ---------- Comms adapter (Serial1 TTL) ----------
     /**

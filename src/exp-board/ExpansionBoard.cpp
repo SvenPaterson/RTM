@@ -774,11 +774,9 @@ void ExpansionBoard::renderNormal_() {
         strncpy(buff, protocolName_.c_str(), LCDDriver::kNumCols);
         buff[LCDDriver::kNumCols] = '\0';
     } else {
-        if (runMins_ < 60) {
-            snprintf(buff, sizeof(buff), "%2lu mins", (unsigned long)runMins_);
-        } else {
-            snprintf(buff, sizeof(buff), "%4.1f hrs", (float)runMins_ / 60.0f);
-        }
+        char countdown[16];
+        formatStepCountdown_(countdown, sizeof(countdown));
+        snprintf(buff, sizeof(buff), "T- %s", countdown);
     }
     lcd_.setLineLR(0, buff, ccState_);
 
@@ -807,14 +805,9 @@ void ExpansionBoard::renderNormal_() {
         lcd_.setLineLR(3, left, dwellRight);
     } else {
         // RTM view
-        if (lcdToggle_) {
-            int sp  = (int)lround(heater_.setpoint());
-            int out = heater_.lastOut();
-            snprintf(buff, sizeof(buff), "Heat:%3d\xDF""C OUT:%03d", sp, out);
-        } else {
-            unsigned long ageSec = (unsigned long)(ccSwAgeMs_ / 1000UL);
-            snprintf(buff, sizeof(buff), "SW age:%lus", ageSec);
-        }
+        int sp  = (int)lround(heater_.setpoint());
+        int out = heater_.lastOut();
+        snprintf(buff, sizeof(buff), "Heat:%3d\xDF""C OUT:%03d", sp, out);
         lcd_.setLineLeft(2, buff);
 
         uint16_t sealInt = isnan(latestSealC_) ? 0U : (uint16_t)(latestSealC_ + 0.5f);
@@ -827,6 +820,67 @@ void ExpansionBoard::renderNormal_() {
                     (unsigned)sealInt, (unsigned)sumpInt);
         }
         lcd_.setLineLeft(3, buff);
+    }
+}
+
+void ExpansionBoard::refreshStepCountdown_(bool stepOrLoopChanged) {
+    if (stepOrLoopChanged) {
+        countdownStepSnapshot_ = ccStep_;
+        countdownLoopSnapshot_ = ccLoopCur_;
+        stepStartAgeMs_ = ccSwAgeMs_;
+
+        if (ccStep_ > 0) {
+            uint8_t idx = (ccStep_ > 0) ? static_cast<uint8_t>(ccStep_ - 1) : 0;
+            if (idx < stepCount_) {
+                stepTotalMs_ = steps_[idx].dwellS_ * 1000UL;
+            } else {
+                stepTotalMs_ = 0;
+            }
+        } else {
+            stepTotalMs_ = 0;
+        }
+    }
+
+    if (stepTotalMs_ == 0) {
+        stepRemainingMs_ = 0;
+        return;
+    }
+
+    uint32_t elapsed = (ccSwAgeMs_ >= stepStartAgeMs_) ? (ccSwAgeMs_ - stepStartAgeMs_) : 0;
+    stepRemainingMs_ = (elapsed >= stepTotalMs_) ? 0 : (stepTotalMs_ - elapsed);
+}
+
+void ExpansionBoard::formatStepCountdown_(char *dst, size_t len) const {
+    if (len == 0) {
+        return;
+    }
+
+    if (stepTotalMs_ == 0) {
+        strncpy(dst, ccStep_ ? "--" : "Idle", len);
+        dst[len - 1] = '\0';
+        return;
+    }
+
+    uint32_t msRemaining = stepRemainingMs_;
+    uint32_t secs = (msRemaining + 999U) / 1000U;
+    if (secs == 0U) {
+        strncpy(dst, "0s", len);
+        dst[len - 1] = '\0';
+        return;
+    }
+
+    uint32_t hours = secs / 3600U;
+    uint32_t minutes = (secs % 3600U) / 60U;
+    uint32_t seconds = secs % 60U;
+
+    if (hours > 0U) {
+        snprintf(dst, len, "%luh %02lum %02lus", (unsigned long)hours,
+                 (unsigned long)minutes, (unsigned long)seconds);
+    } else if (minutes > 0U) {
+        snprintf(dst, len, "%lum %02lus", (unsigned long)minutes,
+                 (unsigned long)seconds);
+    } else {
+        snprintf(dst, len, "%lus", (unsigned long)seconds);
     }
 }
 
@@ -916,6 +970,11 @@ bool ExpansionBoard::loadProtocolFromSD_(const char *path) {
     stepCount_ = 0;
     protocolName_ = "NA";
     loopCount_ = 1;
+    countdownStepSnapshot_ = 0;
+    countdownLoopSnapshot_ = 0;
+    stepStartAgeMs_ = 0;
+    stepTotalMs_ = 0;
+    stepRemainingMs_ = 0;
 
     // 1) PROTOCOL_NAME=...
     String line = csv.readStringUntil('\n');
@@ -1007,12 +1066,29 @@ void ExpansionBoard::logProtocol_() const {
   }
 }
 
+
+
 bool ExpansionBoard::uploadProtocolToCC_() {
     if (!stepCount_) {
-        dbgln("[PROTO] No protocol from SD loaded to XPB");
-        protoState_ = ProtoTxState::Failed;
-        //isProtoLoadedOntoCC_ = false;
-        return false;
+        dbgln("[PROTO] No protocol cached; reinitializing SD and reloading");
+        if (!sdInitWithRetry_(3, 50)) {
+            dbgln("[PROTO] SD reinit failed");
+            protoState_ = ProtoTxState::SDFail;
+            successfulProtoLoadFromSD_ = false;
+            return false;
+        }
+
+        if (loadProtocolFromSD_("/protocol.csv")) {
+            successfulProtoLoadFromSD_ = true;
+            protoState_ = ProtoTxState::WaitingReq;
+            dbgln("[PROTO] Reload from SD succeeded");
+            logProtocol_();
+        } else {
+            dbgln("[PROTO] Reload from SD failed");
+            protoState_ = ProtoTxState::Failed;
+            successfulProtoLoadFromSD_ = false;
+            return false;
+        }
     }
     
     dbgln("[PROTO] Starting upload to CC...");
@@ -1193,9 +1269,9 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                 owner_->ccProtoReq_ = false;
                 owner_->protoState_ = ProtoTxState::Complete;
 
-                // PHASH check
+                // PHASH check  (strtoul: toInt() overflows for hashes > INT_MAX)
                 const String sPH = kvGet(data, "PHASH=");
-                const uint32_t rxPhash = sPH.length() ? (uint32_t)sPH.toInt() : 0UL;
+                const uint32_t rxPhash = sPH.length() ? strtoul(sPH.c_str(), nullptr, 10) : 0UL;
 
                 // === cold-boot resume policy ===
                 if (owner_->needResumeAfterProto_
@@ -1306,7 +1382,8 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                     // 4) Notify CC, then reset us (notice; no ACK expected)
                     sendMessage("NOTICE;XPB_RESET=NOW", MessageType::NORMAL);
                     delay(5);
-                    owner_->clearResumeSlots_();
+                    // NOTE: do NOT clearResumeSlots_() here — the resume
+                    // record was just saved at step 1 for the next boot.
                     xpbSoftResetNow();
                 }
             }
@@ -1329,6 +1406,8 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
 
     // ===== Heartbeat from ClearCore =====
     if (data.startsWith("HB;") && owner_) {
+        const uint8_t prevStep = owner_->ccStep_;
+        const uint32_t prevLoop = owner_->ccLoopCur_;
         // Parse HB
         String sSTATE = kvGet(data, "STATE=");
         if (sSTATE == "RUNNING") owner_->everRan_ = true;
@@ -1372,7 +1451,10 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
         }
 
         String sAGE   = kvGet(data, "SW_AGE=");
-        if (sAGE.length()) owner_->ccSwAgeMs_ = (uint32_t)sAGE.toInt();
+        if (sAGE.length()) owner_->ccSwAgeMs_ = strtoul(sAGE.c_str(), nullptr, 10);
+
+        const bool stepChanged = (owner_->ccStep_ != prevStep) || (owner_->ccLoopCur_ != prevLoop);
+        owner_->refreshStepCountdown_(stepChanged);
 
         // One-time "ready" if HB arrived before READY (common on some boots)
         if (!owner_->ccReady_) {

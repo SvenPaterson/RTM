@@ -2,6 +2,16 @@
 
 Re-write of the Rotary Stand code base.
 
+## Documentation Quick Start
+
+- Resume checkpoint and active findings: [CODE_REVIEW.md](CODE_REVIEW.md)
+- Full project handoff map: [docs/PROJECT_HANDOFF.md](docs/PROJECT_HANDOFF.md)
+- TTL sniffer wiring and host control: [docs/ttl_sniffer_debug.md](docs/ttl_sniffer_debug.md)
+- Test harness modes and usage: [test/README](test/README)
+
+Project policy: every functional change and every test-harness change must include related
+documentation updates in the same change set.
+
 ## Project Overview
 
 The RTM (Rotary Test Machine) controls a rotary seal test stand capable of executing user-defined motion and thermal profiles. Test profiles are stored on an SD card, which the controller reads to automatically run sequences with configurable speeds, accelerations, dwell times, temperature targets, and optional data logging back to the SD card. The current prototype uploads firmware and provides diagnostic serial output over USB, while future revisions aim to add more robust field-debug workflows, structured validation suites, and hardened data-handling procedures for production deployment.

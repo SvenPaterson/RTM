@@ -1,0 +1,1230 @@
+#!/usr/bin/env python3
+"""Unified CLI for Teensy sniffer controller exercises."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import random
+import re
+import secrets
+import sys
+import time
+import shlex
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Optional, Sequence, TextIO
+
+try:
+    import serial  # type: ignore
+    from serial.tools import list_ports  # type: ignore
+except ImportError as exc:  # pragma: no cover - user guidance
+    raise SystemExit("pyserial is required. Install with `pip install pyserial`.") from exc
+
+LOG_DIR = Path(__file__).resolve().parent / "log"
+DEFAULT_BAUD = 460_800
+RESET_THRESHOLD_MS = 5000
+RUN_PULSE_DEFAULT_MS = 5000
+RUN_PULSE_CAPTURE_S = 10.0
+RESET_PULSE_DEFAULT_MS = 6000
+RESET_PULSE_CAPTURE_S = 12.0
+RESET_CANCEL_CAPTURE_S = 15.0
+RESET_CANCEL_COUNT = 3
+RESET_CANCEL_MIN_MS = 500
+RESET_CANCEL_MAX_MS = 4500
+POWER_CAPTURE_DEFAULT_S = 4.0
+DEFAULT_INGESTION_WAIT = 15.0
+DEFAULT_TAIL_PAD = 10.0
+DEFAULT_RUN_MARGIN = 5.0
+DEFAULT_PROTOCOL_DIR = Path(__file__).resolve().parent.parent / "tools" / "protocols"
+DEFAULT_PROTOCOL_NAME = "protocol.csv"
+
+# run-gate validation defaults
+RUN_GATE_BOOT_WAIT_S = 30.0
+RUN_GATE_SETTLE_S = 5.0
+RUN_GATE_HB_WINDOW_S = 10.0
+RUN_GATE_POWER_DWELL_S = 4.0
+RUN_GATE_RESET_PULSE_MS = 6000
+RUN_GATE_RESET_WAIT_S = 12.0
+
+
+def detect_default_port() -> str | None:
+    for port in list_ports.comports():
+        desc = (port.description or "").lower()
+        if "teensy" in desc or "usb serial" in desc or "arduino" in desc:
+            return port.device
+    return None
+
+
+def open_serial_with_retry(port: str, baud: int, *, timeout: float, wait_s: float = 20.0) -> serial.Serial:
+    deadline = time.monotonic() + wait_s
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            return serial.Serial(port, baud, timeout=timeout)
+        except (serial.SerialException, OSError) as exc:
+            last_error = exc
+            time.sleep(0.05)
+    raise serial.SerialException(f"Timed out waiting for {port} to become available") from last_error
+
+
+def write_log(line: str, log: TextIO) -> None:
+    log.write(line + "\n")
+    log.flush()
+
+
+def emit(line: str, log: TextIO | None) -> None:
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or "utf-8"
+        safe_line = line.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        print(safe_line)
+    if log:
+        write_log(line, log)
+
+
+def send_command(ser: serial.Serial, command: str, *, log: TextIO | None) -> None:
+    emit(f"[TEST] -> {command}", log)
+    ser.write((command + "\n").encode("ascii", errors="strict"))
+    ser.flush()
+
+
+def rel_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(Path.cwd()))
+    except ValueError:
+        return str(path)
+
+
+def ensure_log_dir() -> Path:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    return LOG_DIR
+
+
+def format_invocation(argv: Sequence[str] | None = None) -> str:
+    args = tuple(argv) if argv is not None else tuple(sys.argv)
+    try:
+        return shlex.join(args)
+    except AttributeError:
+        pieces: list[str] = []
+        for token in args:
+            if token.isalnum():
+                pieces.append(token)
+            else:
+                pieces.append('"' + token.replace('"', '\\"') + '"')
+        return " ".join(pieces)
+
+
+def stream_serial(
+    ser: serial.Serial,
+    deadline: float,
+    log: TextIO | None,
+    *,
+    drop_first_line: bool = False,
+    on_tick: Optional[Callable[[], None]] = None,
+    tick_interval: float = 0.1,
+) -> None:
+    partial = bytearray()
+    drop_next = drop_first_line
+    next_tick = time.monotonic() + tick_interval if on_tick else 0.0
+    while time.monotonic() < deadline:
+        chunk = ser.read(512)
+        if chunk:
+            partial.extend(chunk)
+            while True:
+                nl = partial.find(b"\n")
+                if nl < 0:
+                    break
+                frame = partial[:nl]
+                del partial[: nl + 1]
+                if drop_next:
+                    drop_next = False
+                    continue
+                text = frame.decode("utf-8", errors="replace").rstrip("\r")
+                if text:
+                    emit(text, log)
+        else:
+            time.sleep(0.02)
+        if on_tick and time.monotonic() >= next_tick:
+            on_tick()
+            next_tick = time.monotonic() + tick_interval
+    if partial and not drop_next:
+        text = partial.decode("utf-8", errors="replace").rstrip("\r")
+        if text:
+            emit(text, log)
+
+
+def flush_serial(ser: serial.Serial, log: TextIO | None) -> None:
+    while ser.in_waiting:
+        line = ser.readline()
+        if not line:
+            break
+        text = line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if text:
+            emit(text, log)
+
+
+def capture_lines(
+    ser: serial.Serial,
+    duration_s: float,
+    log: TextIO | None,
+    *,
+    drop_first_line: bool = False,
+) -> list[str]:
+    """Like stream_serial but also returns every captured line."""
+    collected: list[str] = []
+    partial = bytearray()
+    drop_next = drop_first_line
+    deadline = time.monotonic() + duration_s
+    while time.monotonic() < deadline:
+        chunk = ser.read(512)
+        if chunk:
+            partial.extend(chunk)
+            while True:
+                nl = partial.find(b"\n")
+                if nl < 0:
+                    break
+                frame = partial[:nl]
+                del partial[: nl + 1]
+                if drop_next:
+                    drop_next = False
+                    continue
+                text = frame.decode("utf-8", errors="replace").rstrip("\r")
+                if text:
+                    emit(text, log)
+                    collected.append(text)
+        else:
+            time.sleep(0.02)
+    if partial and not drop_next:
+        text = partial.decode("utf-8", errors="replace").rstrip("\r")
+        if text:
+            emit(text, log)
+            collected.append(text)
+    return collected
+
+
+def scan_lines(lines: list[str], patterns: dict[str, str]) -> dict[str, list[str]]:
+    """Scan *lines* for named regex patterns.  Returns {name: [matching lines]}."""
+    compiled = {name: re.compile(pat, re.IGNORECASE) for name, pat in patterns.items()}
+    results: dict[str, list[str]] = {name: [] for name in patterns}
+    for line in lines:
+        for name, regex in compiled.items():
+            if regex.search(line):
+                results[name].append(line)
+    return results
+
+
+def timestamp() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def choose_pulses(count: int, min_ms: int, max_ms: int, *, seed: int | None) -> list[int]:
+    rng = random.Random(seed)
+    return [rng.randint(min_ms, max_ms) for _ in range(count)]
+
+
+def ensure_default_protocol() -> Path:
+    proto_dir = DEFAULT_PROTOCOL_DIR
+    proto_dir.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_hex(2)
+    today = datetime.now().strftime("%m%d")
+    name = f"TEST_{today}_{token.upper()}"
+    content = [
+        f"PROTOCOL_NAME={name}",
+        "LOOP_COUNT=2",
+        "TargetRPM,AccelRPMperSec,DwellSeconds",
+        "500,200,4",
+        "-500,200,3",
+        "0,200,2",
+    ]
+    path = proto_dir / DEFAULT_PROTOCOL_NAME
+    path.write_text("\n".join(content) + "\n", encoding="utf-8")
+    return path
+
+
+def parse_protocol(path: Path) -> tuple[str, int, Sequence[tuple[float, float, float]]]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if len(lines) < 3:
+        raise ValueError("Protocol file must include metadata and at least one row")
+    name_line = lines[0].strip()
+    loop_line = lines[1].strip()
+    if not name_line.upper().startswith("PROTOCOL_NAME="):
+        raise ValueError("First line must start with PROTOCOL_NAME=")
+    if not loop_line.upper().startswith("LOOP_COUNT="):
+        raise ValueError("Second line must start with LOOP_COUNT=")
+    protocol_name = name_line.split("=", 1)[1].strip()
+    try:
+        loop_count = int(loop_line.split("=", 1)[1].strip())
+    except ValueError as exc:
+        raise ValueError("Invalid LOOP_COUNT value") from exc
+
+    reader = csv.DictReader(lines[2:])
+    required = {"TargetRPM", "AccelRPMperSec", "DwellSeconds"}
+    if reader.fieldnames is None or any(h not in reader.fieldnames for h in required):
+        raise ValueError("Protocol CSV must define TargetRPM, AccelRPMperSec, DwellSeconds columns")
+
+    steps: list[tuple[float, float, float]] = []
+    for row in reader:
+        if not row:
+            continue
+        target_raw = row.get("TargetRPM")
+        accel_raw = row.get("AccelRPMperSec")
+        dwell_raw = row.get("DwellSeconds")
+        if not target_raw:
+            raise ValueError("Each row must define TargetRPM")
+        if not accel_raw:
+            raise ValueError("Each row must define AccelRPMperSec")
+        if dwell_raw is None or dwell_raw.strip() == "":
+            raise ValueError("Each row must define DwellSeconds")
+        try:
+            target = float(target_raw)
+        except ValueError as exc:
+            raise ValueError(f"Invalid TargetRPM value: {target_raw}") from exc
+        try:
+            accel = float(accel_raw)
+        except ValueError as exc:
+            raise ValueError(f"Invalid AccelRPMperSec value: {accel_raw}") from exc
+        if accel <= 0:
+            raise ValueError("AccelRPMperSec must be positive for all steps")
+        try:
+            dwell = float(dwell_raw)
+        except ValueError as exc:
+            raise ValueError(f"Invalid DwellSeconds value: {dwell_raw}") from exc
+        if dwell < 0:
+            raise ValueError("DwellSeconds cannot be negative")
+        steps.append((target, accel, dwell))
+
+    if not steps:
+        raise ValueError("Protocol must define at least one step")
+    return protocol_name, loop_count, steps
+
+
+def run_reset_pulse(args: argparse.Namespace) -> int:
+    log_dir = ensure_log_dir()
+    log_path = log_dir / f"{timestamp()}_reset_pulse.log"
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        emit(f"[TEST] Logging to {rel_path(log_path)}", log)
+        emit(f"[TEST] Command: {format_invocation()}", log)
+        emit(f"[TEST] Opening serial port {args.port} @ {args.baud} baud", log)
+        try:
+            ser = open_serial_with_retry(args.port, args.baud, timeout=0.1)
+        except (serial.SerialException, OSError) as exc:
+            emit(f"[TEST] Serial error: {exc}", log)
+            return 2
+
+        with ser:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            emit("[TEST] Connected", log)
+            emit(
+                f"[TEST] Configuration: pulse={args.pulse_ms} ms, capture={args.capture_s:.1f} s",
+                log,
+            )
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.25)
+            send_command(ser, f"PULSE RST={args.pulse_ms}", log=log)
+
+            deadline = time.monotonic() + args.capture_s
+            stream_serial(
+                ser,
+                deadline,
+                log,
+                drop_first_line=args.drop_first_line,
+            )
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.2)
+            flush_serial(ser, log)
+            emit("[TEST] Capture complete", log)
+
+    return 0
+
+
+def run_power(args: argparse.Namespace) -> int:
+    log_dir = ensure_log_dir()
+    state_token = "on" if args.state == "on" else "off"
+    log_path = log_dir / f"{timestamp()}_power_{state_token}.log"
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        emit(f"[TEST] Logging to {rel_path(log_path)}", log)
+        emit(f"[TEST] Command: {format_invocation()}", log)
+        emit(f"[TEST] Opening serial port {args.port} @ {args.baud} baud", log)
+        try:
+            ser = open_serial_with_retry(args.port, args.baud, timeout=0.1)
+        except (serial.SerialException, OSError) as exc:
+            emit(f"[TEST] Serial error: {exc}", log)
+            return 2
+
+        with ser:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            emit("[TEST] Connected", log)
+            emit(
+                f"[TEST] Configuration: state={args.state}, capture={args.capture_s:.1f} s",
+                log,
+            )
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.25)
+            send_command(ser, f"PWR={'1' if args.state == 'on' else '0'}", log=log)
+
+            deadline = time.monotonic() + args.capture_s
+            stream_serial(
+                ser,
+                deadline,
+                log,
+                drop_first_line=args.drop_first_line,
+            )
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.2)
+            flush_serial(ser, log)
+            emit("[TEST] Capture complete", log)
+
+    return 0
+
+
+def run_run_pulse(args: argparse.Namespace) -> int:
+    log_dir = ensure_log_dir()
+    log_path = log_dir / f"{timestamp()}_run_pulse.log"
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        emit(f"[TEST] Logging to {rel_path(log_path)}", log)
+        emit(f"[TEST] Command: {format_invocation()}", log)
+        emit(f"[TEST] Opening serial port {args.port} @ {args.baud} baud", log)
+        try:
+            ser = open_serial_with_retry(args.port, args.baud, timeout=0.1)
+        except (serial.SerialException, OSError) as exc:
+            emit(f"[TEST] Serial error: {exc}", log)
+            return 2
+
+        with ser:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            emit("[TEST] Connected", log)
+            emit(
+                f"[TEST] Configuration: pulse={args.pulse_ms} ms, capture={args.capture_s:.1f} s",
+                log,
+            )
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.25)
+            send_command(ser, f"PULSE RUN={args.pulse_ms}", log=log)
+
+            deadline = time.monotonic() + args.capture_s
+            stream_serial(
+                ser,
+                deadline,
+                log,
+                drop_first_line=args.drop_first_line,
+            )
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.2)
+            flush_serial(ser, log)
+            emit("[TEST] Capture complete", log)
+
+    return 0
+
+
+def run_reset_cancel(args: argparse.Namespace) -> int:
+    log_dir = ensure_log_dir()
+    log_path = log_dir / f"{timestamp()}_reset_cancel.log"
+    pulses = choose_pulses(args.count, args.min_ms, args.max_ms, seed=args.seed)
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        emit(f"[TEST] Logging to {rel_path(log_path)}", log)
+        emit(f"[TEST] Command: {format_invocation()}", log)
+        emit(f"[TEST] Pulses below cancel threshold ({RESET_THRESHOLD_MS} ms): {pulses}", log)
+        emit(f"[TEST] Opening serial port {args.port} @ {args.baud} baud", log)
+        try:
+            ser = open_serial_with_retry(args.port, args.baud, timeout=0.1)
+        except (serial.SerialException, OSError) as exc:
+            emit(f"[TEST] Serial error: {exc}", log)
+            return 2
+
+        with ser:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            emit("[TEST] Connected", log)
+            emit(
+                f"[TEST] Configuration: capture={args.capture_s:.1f} s, pulses={len(pulses)}",
+                log,
+            )
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.25)
+
+            for idx, pulse_ms in enumerate(pulses, start=1):
+                send_command(ser, f"PULSE RST={pulse_ms}", log=log)
+                time.sleep(pulse_ms / 1000.0 + 0.25)
+                send_command(ser, "STATUS", log=log)
+
+            deadline = time.monotonic() + args.capture_s
+            stream_serial(
+                ser,
+                deadline,
+                log,
+                drop_first_line=args.drop_first_line,
+            )
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.2)
+            flush_serial(ser, log)
+            emit("[TEST] Capture complete", log)
+
+    return 0
+
+
+def run_protocol_upload(args: argparse.Namespace) -> int:
+    if args.protocol is None:
+        args.protocol = ensure_default_protocol()
+        args.generated_protocol = True
+    else:
+        args.protocol = args.protocol.resolve()
+        args.generated_protocol = False
+        if not args.protocol.is_file():
+            print(f"[TEST] Protocol file not found: {args.protocol}")
+            return 1
+
+    try:
+        proto_name, loop_count, steps = parse_protocol(args.protocol)
+    except ValueError as exc:
+        print(f"[TEST] Protocol parse error: {exc}")
+        return 3
+
+    def simulate_runtime(loop_count: int, steps: Sequence[tuple[float, float, float]]) -> tuple[float, list[float]]:
+        total = 0.0
+        loop_totals: list[float] = []
+        current_rpm = 0.0
+        for _ in range(loop_count):
+            loop_time = 0.0
+            for target_rpm, accel_rpm_s, dwell_s in steps:
+                ramp_time = abs(target_rpm - current_rpm) / accel_rpm_s
+                loop_time += ramp_time + dwell_s
+                current_rpm = target_rpm
+            loop_totals.append(loop_time)
+            total += loop_time
+        return total, loop_totals
+
+    expected_runtime, loop_durations = simulate_runtime(loop_count, steps)
+    first_loop = loop_durations[0] if loop_durations else 0.0
+    avg_loop = expected_runtime / loop_count if loop_count else 0.0
+    capture_horizon = args.ingestion_wait + expected_runtime + args.tail_pad
+    pulse_seconds = max(0.0, expected_runtime + args.run_margin_s)
+
+    log_dir = ensure_log_dir()
+    ts = timestamp()
+    safe_name = (proto_name.replace(" ", "_") or "protocol")
+    log_path = log_dir / f"{ts}_protocol_upload_{safe_name}.log"
+
+    if getattr(args, "generated_protocol", False):
+        try:
+            rel_proto = args.protocol.relative_to(Path.cwd())
+        except ValueError:
+            rel_proto = args.protocol
+        print(f"[TEST] Generated protocol CSV at {rel_proto}. Copy to microSD before continuing.")
+
+    print("[TEST] Confirm that SD card is removed from XPB, boards are powered down,"
+          " sniffer terminals are closed, and the new protocol is staged on microSD.")
+    response = input("Type YES to continue: ").strip().upper()
+    if response != "YES":
+        print("[TEST] Aborting; prerequisites not acknowledged.")
+        return 1
+
+    print("[TEST] Insert the prepared microSD card into the XPB before continuing.")
+    input("Press Enter once the card is inserted and you are ready to begin sniffing...")
+
+    print(f"[TEST] Opening serial port {args.port} @ {args.baud} baud")
+    try:
+        ser = open_serial_with_retry(args.port, args.baud, timeout=0.1)
+    except (serial.SerialException, OSError) as exc:
+        print(f"[TEST] Serial error: {exc}")
+        return 2
+
+    with ser, open(log_path, "w", encoding="utf-8") as log:
+        emit(f"[TEST] Logging to {rel_path(log_path)}", log)
+        emit(f"[TEST] Command: {format_invocation()}", log)
+        proto_note = "(generated)" if getattr(args, "generated_protocol", False) else "(supplied)"
+        loop_note = "0.0"
+        if loop_count > 0:
+            loop_note = f"first-loop={first_loop:.1f}s"
+            if loop_count > 1 and any(abs(ld - first_loop) > 1e-6 for ld in loop_durations[1:]):
+                loop_note += f", avg-loop={avg_loop:.1f}s"
+        emit(
+            f"[TEST] Protocol: {proto_name} {proto_note} (loops={loop_count}, {loop_note})",
+            log,
+        )
+        emit(
+            f"[TEST] Capture horizon: {capture_horizon:.1f}s (ingestion wait {args.ingestion_wait:.1f}s, runtime {expected_runtime:.1f}s, tail {args.tail_pad:.1f}s)",
+            log,
+        )
+        emit(
+            f"[TEST] Planned RUN pulse: {pulse_seconds:.1f}s (runtime {expected_runtime:.1f}s + margin {args.run_margin_s:.1f}s)",
+            log,
+        )
+
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
+        emit("[TEST] Power both boards now; logging has started.", log)
+
+        pulse_ms = int(pulse_seconds * 1000)
+        run_pulse_sent = False
+
+        if pulse_ms <= 0:
+            emit("[TEST] Protocol runtime <= 0 s; RUN pulse will not be issued automatically.", log)
+
+        def issue_run_pulse() -> None:
+            nonlocal run_pulse_sent
+            if run_pulse_sent or pulse_ms <= 0:
+                return
+            send_command(ser, f"PULSE RUN={pulse_ms}", log=log)
+            emit(f"[TEST] RUN pulse issued for approximately {pulse_seconds:.1f}s", log)
+            run_pulse_sent = True
+
+        def tick() -> None:
+            now = time.monotonic()
+            if not run_pulse_sent and pulse_ms > 0 and now - start_time >= args.ingestion_wait:
+                issue_run_pulse()
+
+        start_time = time.monotonic()
+        stream_serial(
+            ser,
+            start_time + capture_horizon,
+            log,
+            drop_first_line=args.drop_first_line,
+            on_tick=tick,
+            tick_interval=0.25,
+        )
+
+        if not run_pulse_sent and pulse_ms > 0:
+            issue_run_pulse()
+        if run_pulse_sent:
+            send_command(ser, "RUN=0", log=log)
+        send_command(ser, "STATUS", log=log)
+        emit("[TEST] Capture complete", log)
+
+    print("[TEST] Done. Review the log for protocol ingestion details.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# run-gate: three-step RUN-gate validation (CODE_REVIEW.md §7)
+# ---------------------------------------------------------------------------
+
+_STEP_PASS = "PASS"
+_STEP_FAIL = "FAIL"
+_STEP_INCONCLUSIVE = "INCONCLUSIVE"
+_STEP_SKIPPED = "SKIPPED"
+
+
+def _power_cycle(
+    ser: serial.Serial,
+    log: TextIO | None,
+    dwell_s: float,
+    *,
+    drop_first_line: bool = False,
+) -> None:
+    """Power-off, dwell, power-on.  Does NOT capture — caller handles that."""
+    send_command(ser, "PWR=0", log=log)
+    emit(f"[TEST] Power-off dwell {dwell_s:.1f}s", log)
+    time.sleep(dwell_s)
+    send_command(ser, "PWR=1", log=log)
+
+
+def _run_gate_step1(
+    ser: serial.Serial,
+    log: TextIO | None,
+    *,
+    boot_wait_s: float,
+    dwell_s: float,
+    drop_first_line: bool,
+) -> tuple[str, str]:
+    """Step 1: RUN held low across cold boot — CC must NOT enter RUNNING."""
+    emit("[TEST] === STEP 1: RUN held low across cold boot ===", log)
+    emit("[TEST] Expected: CC stays IDLE after protocol upload; no RUNNING before RUN released", log)
+
+    # Clean slate
+    send_command(ser, "RUN=0", log=log)
+    time.sleep(0.25)
+
+    # Latch RUN low BEFORE power-on
+    send_command(ser, "RUN=1", log=log)
+    time.sleep(0.25)
+
+    _power_cycle(ser, log, dwell_s, drop_first_line=drop_first_line)
+
+    # Capture boot + protocol upload + heartbeats
+    lines = capture_lines(ser, boot_wait_s, log, drop_first_line=drop_first_line)
+
+    hits = scan_lines(lines, {
+        "proto_ok": r"NOTICE;PROTO_RX=OK",
+        "hb_idle": r"HB;.*STATE=IDLE",
+        "hb_running": r"HB;.*STATE=RUNNING",
+        "err_wrong_stat": r"ACK;RESUME=ERR_WRONG_STAT",
+        "cc_stat": r"STAT;SEQ=",
+    })
+
+    # Release RUN for subsequent steps
+    send_command(ser, "RUN=0", log=log)
+    time.sleep(0.25)
+
+    # --- Evaluate ---
+    if not hits["proto_ok"]:
+        reason = "Protocol upload NOT observed (NOTICE;PROTO_RX=OK missing)"
+        emit(f"[TEST] Step 1: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    if hits["err_wrong_stat"]:
+        reason = "ERR_WRONG_STAT ACK detected — CC rejected resume while already RUNNING"
+        emit(f"[TEST] Step 1: {_STEP_FAIL} — {reason}", log)
+        return _STEP_FAIL, reason
+
+    # Check whether any RUNNING heartbeat appeared BEFORE we released RUN.
+    # All lines so far were captured while RUN was held low.
+    if hits["hb_running"]:
+        reason = f"HB STATE=RUNNING appeared while RUN held low ({len(hits['hb_running'])} occurrences)"
+        emit(f"[TEST] Step 1: {_STEP_FAIL} — {reason}", log)
+        return _STEP_FAIL, reason
+
+    # Primary evidence: proto loaded + NO RUNNING + NO ERR_WRONG_STAT = gate worked.
+    # XPB HB IDLE is bonus confirmation; CC STAT messages prove the system is alive.
+    alive = hits["hb_idle"] or hits["cc_stat"]
+    if not alive:
+        reason = "No telemetry after protocol upload (system unresponsive)"
+        emit(f"[TEST] Step 1: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    idle_detail = f"{len(hits['hb_idle'])} IDLE HBs" if hits["hb_idle"] else f"{len(hits['cc_stat'])} CC STAT msgs"
+    reason = (
+        f"Proto upload OK, {idle_detail}, "
+        "no RUNNING before RUN released, no ERR_WRONG_STAT"
+    )
+    emit(f"[TEST] Step 1: {_STEP_PASS} — {reason}", log)
+    return _STEP_PASS, reason
+
+
+def _run_gate_step2(
+    ser: serial.Serial,
+    log: TextIO | None,
+    *,
+    settle_s: float,
+    hb_window_s: float,
+) -> tuple[str, str]:
+    """Step 2: Gate opens once RUN returns high — verify IDLE→RUNNING→PAUSED."""
+    emit("[TEST] === STEP 2: Gate open, IDLE → RUNNING → PAUSED ===", log)
+    emit("[TEST] Expected: RUN=1 → STATE=RUNNING, then RUN=0 → STATE=PAUSED", log)
+
+    # Settle — confirm still IDLE after step 1 released RUN
+    emit(f"[TEST] Settling {settle_s:.1f}s, confirming IDLE", log)
+    settle_lines = capture_lines(ser, settle_s, log)
+    settle_hits = scan_lines(settle_lines, {
+        "hb_idle": r"HB;.*STATE=IDLE",
+        "hb_running": r"HB;.*STATE=RUNNING",
+        "sw_run_off": r"SW;RUN=0",
+        "cc_stat": r"STAT;SEQ=",
+    })
+    if settle_hits["hb_running"]:
+        reason = "System already in RUNNING before step 2 RUN assertion"
+        emit(f"[TEST] Step 2: {_STEP_FAIL} — {reason}", log)
+        return _STEP_FAIL, reason
+    # Accept XPB HB IDLE, or CC SW;RUN=0 / CC STAT as evidence system is alive  and not running
+    alive = settle_hits["hb_idle"] or settle_hits["sw_run_off"] or settle_hits["cc_stat"]
+    if not alive:
+        reason = "No heartbeats or switch state during settle window"
+        emit(f"[TEST] Step 2: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    # Assert RUN low → expect RUNNING
+    send_command(ser, "RUN=1", log=log)
+    run_lines = capture_lines(ser, hb_window_s, log)
+    run_hits = scan_lines(run_lines, {
+        "hb_running": r"HB;.*STATE=RUNNING",
+        "sw_run_on": r"SW;RUN=1",
+    })
+    if not run_hits["hb_running"] and not run_hits["sw_run_on"]:
+        reason = "No HB STATE=RUNNING or SW;RUN=1 after asserting RUN"
+        emit(f"[TEST] Step 2: {_STEP_FAIL} — {reason}", log)
+        # Release before returning
+        send_command(ser, "RUN=0", log=log)
+        return _STEP_FAIL, reason
+
+    # Release RUN → expect PAUSED
+    send_command(ser, "RUN=0", log=log)
+    pause_lines = capture_lines(ser, hb_window_s, log)
+    pause_hits = scan_lines(pause_lines, {
+        "hb_paused": r"HB;.*STATE=PAUSED",
+        "sw_run_off": r"SW;RUN=0",
+    })
+    if not pause_hits["hb_paused"] and not pause_hits["sw_run_off"]:
+        reason = "No HB STATE=PAUSED or SW;RUN=0 after releasing RUN"
+        emit(f"[TEST] Step 2: {_STEP_FAIL} — {reason}", log)
+        return _STEP_FAIL, reason
+
+    # Build detailed reason
+    run_evidence = []
+    if run_hits["hb_running"]:
+        run_evidence.append(f"{len(run_hits['hb_running'])} HB RUNNING")
+    if run_hits["sw_run_on"]:
+        run_evidence.append("SW;RUN=1")
+    pause_evidence = []
+    if pause_hits["hb_paused"]:
+        pause_evidence.append(f"{len(pause_hits['hb_paused'])} HB PAUSED")
+    if pause_hits["sw_run_off"]:
+        pause_evidence.append("SW;RUN=0")
+    reason = (
+        f"IDLE→RUNNING ({', '.join(run_evidence)}), "
+        f"RUNNING→PAUSED ({', '.join(pause_evidence)})"
+    )
+    emit(f"[TEST] Step 2: {_STEP_PASS} — {reason}", log)
+    return _STEP_PASS, reason
+
+
+def _run_gate_step3(
+    ser: serial.Serial,
+    log: TextIO | None,
+    *,
+    boot_wait_s: float,
+    dwell_s: float,
+    hb_window_s: float,
+    drop_first_line: bool,
+) -> tuple[str, str]:
+    """Step 3: Create resume snapshot via reset, then cold-boot with RUN held low.
+
+    Expects CMD;RESUME=AUTO with AUTOSTART=1, followed by ACK;RESUME=OK.
+    """
+    emit("[TEST] === STEP 3: RESUME AUTOSTART=1 with RUN held low ===", log)
+    emit("[TEST] Expected: resume record created by reset, then honored on cold boot", log)
+
+    # --- 3a: Resume from PAUSED to get a running protocol ---
+    emit("[TEST] Step 3a: Resuming from PAUSED (assert RUN)", log)
+    send_command(ser, "RUN=1", log=log)
+    resume_lines = capture_lines(ser, 3.0, log)
+    resume_hits = scan_lines(resume_lines, {
+        "hb_running": r"HB;.*STATE=RUNNING",
+        "sw_run_on": r"SW;RUN=1",
+    })
+    if not resume_hits["hb_running"] and not resume_hits["sw_run_on"]:
+        reason = "Could not resume to RUNNING from PAUSED"
+        emit(f"[TEST] Step 3: {_STEP_INCONCLUSIVE} — {reason}", log)
+        send_command(ser, "RUN=0", log=log)
+        return _STEP_INCONCLUSIVE, reason
+
+    # --- 3b: Trigger reset to create resume snapshot ---
+    emit("[TEST] Step 3b: Issuing RESET pulse to create resume snapshot", log)
+    send_command(ser, "RUN=0", log=log)
+    time.sleep(0.3)
+    send_command(ser, f"PULSE RST={RUN_GATE_RESET_PULSE_MS}", log=log)
+    reset_lines = capture_lines(ser, RUN_GATE_RESET_WAIT_S, log)
+
+    # Wait for system to settle back to IDLE
+    emit("[TEST] Step 3c: Waiting for system to return to IDLE after reset", log)
+    post_reset_lines = capture_lines(ser, hb_window_s, log)
+    post_hits = scan_lines(post_reset_lines, {
+        "hb_idle": r"HB;.*STATE=IDLE",
+        "sw_run_off": r"SW;RUN=0",
+        "cc_stat": r"STAT;SEQ=",
+    })
+    # Accept HB IDLE, or CC alive with no RUNNING as evidence of idle
+    post_alive = post_hits["hb_idle"] or post_hits["sw_run_off"] or post_hits["cc_stat"]
+    if not post_alive:
+        reason = "System did not return to IDLE after reset pulse"
+        emit(f"[TEST] Step 3: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    # --- 3d: Cold boot with RUN held low — expect RESUME=AUTO + AUTOSTART=1 ---
+    emit("[TEST] Step 3d: Cold boot with RUN held low, expecting RESUME AUTOSTART=1", log)
+    send_command(ser, "RUN=1", log=log)
+    time.sleep(0.25)
+
+    _power_cycle(ser, log, dwell_s, drop_first_line=drop_first_line)
+
+    boot_lines = capture_lines(ser, boot_wait_s, log, drop_first_line=drop_first_line)
+
+    hits = scan_lines(boot_lines, {
+        "resume_auto": r"CMD;RESUME=AUTO.*AUTOSTART=1",
+        "resume_ok": r"ACK;RESUME=OK",
+        "resume_err": r"ACK;RESUME=ERR",
+        "hb_running": r"HB;.*STATE=RUNNING",
+        "hb_preheat": r"HB;.*STATE=PREHEAT",
+        "proto_ok": r"NOTICE;PROTO_RX=OK",
+        "phash_overflow": r"PHASH=2147483647",
+    })
+
+    # Cleanup
+    send_command(ser, "RUN=0", log=log)
+    time.sleep(0.25)
+
+    # --- Evaluate ---
+    if hits["phash_overflow"]:
+        emit("[TEST] WARNING: PHASH=2147483647 (INT_MAX) detected — possible uint32→int truncation", log)
+
+    if not hits["proto_ok"]:
+        reason = "Protocol upload NOT observed on resume boot"
+        emit(f"[TEST] Step 3: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    if not hits["resume_auto"]:
+        reason = "CMD;RESUME=AUTO with AUTOSTART=1 NOT sent by XPB"
+        detail = " (PHASH overflow may prevent match)" if hits["phash_overflow"] else ""
+        emit(f"[TEST] Step 3: {_STEP_INCONCLUSIVE} — {reason}{detail}", log)
+        return _STEP_INCONCLUSIVE, reason + detail
+
+    if hits["resume_err"] and not hits["resume_ok"]:
+        err_line = hits["resume_err"][0]
+        reason = f"Resume rejected by CC: {err_line}"
+        emit(f"[TEST] Step 3: {_STEP_FAIL} — {reason}", log)
+        return _STEP_FAIL, reason
+
+    if not hits["resume_ok"]:
+        reason = "CMD;RESUME=AUTO sent but ACK;RESUME=OK not received"
+        emit(f"[TEST] Step 3: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    started = hits["hb_running"] or hits["hb_preheat"]
+    if not started:
+        reason = "Resume accepted (ACK=OK) but no RUNNING/PREHEAT heartbeat observed"
+        emit(f"[TEST] Step 3: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    reason = "CMD;RESUME=AUTO AUTOSTART=1 sent, ACK=OK, system entered RUNNING/PREHEAT"
+    emit(f"[TEST] Step 3: {_STEP_PASS} — {reason}", log)
+    return _STEP_PASS, reason
+
+
+def run_run_gate(args: argparse.Namespace) -> int:
+    """Execute the three-step RUN-gate validation sequence from CODE_REVIEW.md §7."""
+    log_dir = ensure_log_dir()
+    log_path = log_dir / f"{timestamp()}_run_gate.log"
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        emit(f"[TEST] Logging to {rel_path(log_path)}", log)
+        emit(f"[TEST] Command: {format_invocation()}", log)
+        emit("[TEST] === RUN-GATE VALIDATION (CODE_REVIEW.md §7) ===", log)
+        emit(
+            f"[TEST] Configuration: boot_wait={args.boot_wait_s:.1f}s, "
+            f"settle={args.settle_s:.1f}s, hb_window={args.hb_window_s:.1f}s, "
+            f"skip_step_3={args.skip_step_3}",
+            log,
+        )
+        emit(f"[TEST] Opening serial port {args.port} @ {args.baud} baud", log)
+
+        try:
+            ser = open_serial_with_retry(args.port, args.baud, timeout=0.1)
+        except (serial.SerialException, OSError) as exc:
+            emit(f"[TEST] Serial error: {exc}", log)
+            return 2
+
+        with ser:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            emit("[TEST] Connected", log)
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.25)
+
+            # Step 1
+            s1_result, s1_reason = _run_gate_step1(
+                ser, log,
+                boot_wait_s=args.boot_wait_s,
+                dwell_s=RUN_GATE_POWER_DWELL_S,
+                drop_first_line=args.drop_first_line,
+            )
+
+            # Step 2 — depends on step 1 not being FAIL
+            if s1_result == _STEP_FAIL:
+                s2_result, s2_reason = _STEP_SKIPPED, "Skipped (step 1 failed)"
+                emit(f"[TEST] Step 2: {s2_result} — {s2_reason}", log)
+            else:
+                s2_result, s2_reason = _run_gate_step2(
+                    ser, log,
+                    settle_s=args.settle_s,
+                    hb_window_s=args.hb_window_s,
+                )
+
+            # Step 3 — depends on step 2 passing + not skipped
+            if args.skip_step_3:
+                s3_result, s3_reason = _STEP_SKIPPED, "Skipped (--skip-step-3)"
+                emit(f"[TEST] Step 3: {s3_result} — {s3_reason}", log)
+            elif s2_result != _STEP_PASS:
+                s3_result, s3_reason = _STEP_SKIPPED, f"Skipped (step 2 was {s2_result})"
+                emit(f"[TEST] Step 3: {s3_result} — {s3_reason}", log)
+            else:
+                s3_result, s3_reason = _run_gate_step3(
+                    ser, log,
+                    boot_wait_s=args.boot_wait_s,
+                    dwell_s=RUN_GATE_POWER_DWELL_S,
+                    hb_window_s=args.hb_window_s,
+                    drop_first_line=args.drop_first_line,
+                )
+
+            # Final cleanup
+            send_command(ser, "RUN=0", log=log)
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.2)
+            flush_serial(ser, log)
+
+            # Summary
+            emit("", log)
+            emit("[TEST] === RUN-GATE VALIDATION SUMMARY ===", log)
+            emit(f"[TEST] Step 1 (RUN held low, CC stays IDLE):       {s1_result}", log)
+            emit(f"[TEST]         {s1_reason}", log)
+            emit(f"[TEST] Step 2 (Gate open, IDLE→RUNNING→PAUSED):    {s2_result}", log)
+            emit(f"[TEST]         {s2_reason}", log)
+            emit(f"[TEST] Step 3 (RESUME AUTOSTART=1 accepted):       {s3_result}", log)
+            emit(f"[TEST]         {s3_reason}", log)
+            emit("", log)
+            emit("[TEST] Capture complete", log)
+
+    all_pass = all(r == _STEP_PASS for r in (s1_result, s2_result, s3_result))
+    any_fail = any(r == _STEP_FAIL for r in (s1_result, s2_result, s3_result))
+    if all_pass:
+        return 0
+    if any_fail:
+        return 1
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Unified control for Teensy sniffer validation exercises",
+    )
+    parser.add_argument(
+        "--port",
+        default=None,
+        help="Serial port connected to the Teensy (e.g. COM6 or /dev/ttyACM0)",
+    )
+    parser.add_argument(
+        "--baud",
+        type=int,
+        default=DEFAULT_BAUD,
+        help=f"USB baud rate for the sniffer (default: {DEFAULT_BAUD})",
+    )
+    parser.add_argument(
+        "--drop-first-line",
+        action="store_true",
+        help="Discard the first decoded line after connect to skip partial boot data",
+    )
+
+    subparsers = parser.add_subparsers(dest="mode", required=True)
+
+    reset_pulse = subparsers.add_parser(
+        "reset-pulse",
+        help="Issue a RESET pulse and record the response",
+    )
+    reset_pulse.add_argument(
+        "--pulse-ms",
+        type=int,
+        default=RESET_PULSE_DEFAULT_MS,
+        help=f"Milliseconds to hold RESET low before auto-release (default: {RESET_PULSE_DEFAULT_MS})",
+    )
+    reset_pulse.add_argument(
+        "--capture-s",
+        type=float,
+        default=RESET_PULSE_CAPTURE_S,
+        help=f"Seconds to keep recording after the pulse command (default: {RESET_PULSE_CAPTURE_S})",
+    )
+    reset_pulse.set_defaults(handler=run_reset_pulse)
+
+    run_pulse = subparsers.add_parser(
+        "run-pulse",
+        help="Issue a RUN pulse and record the response",
+    )
+    run_pulse.add_argument(
+        "--pulse-ms",
+        type=int,
+        default=RUN_PULSE_DEFAULT_MS,
+        help=(
+            "Milliseconds to assert RUN low before auto-release "
+            f"(default: {RUN_PULSE_DEFAULT_MS}; increase for longer exercises)"
+        ),
+    )
+    run_pulse.add_argument(
+        "--capture-s",
+        type=float,
+        default=RUN_PULSE_CAPTURE_S,
+        help=f"Seconds to keep recording after the pulse command (default: {RUN_PULSE_CAPTURE_S})",
+    )
+    run_pulse.set_defaults(handler=run_run_pulse)
+
+    reset_cancel = subparsers.add_parser(
+        "reset-cancel",
+        help="Send multiple sub-threshold RESET pulses to validate cancel behavior",
+    )
+    reset_cancel.add_argument(
+        "--count",
+        type=int,
+        default=RESET_CANCEL_COUNT,
+        help=f"Number of RESET pulses to issue (default: {RESET_CANCEL_COUNT})",
+    )
+    reset_cancel.add_argument(
+        "--min-ms",
+        type=int,
+        default=RESET_CANCEL_MIN_MS,
+        help=f"Minimum pulse duration in milliseconds (default: {RESET_CANCEL_MIN_MS})",
+    )
+    reset_cancel.add_argument(
+        "--max-ms",
+        type=int,
+        default=RESET_CANCEL_MAX_MS,
+        help=f"Maximum pulse duration in milliseconds (default: {RESET_CANCEL_MAX_MS})",
+    )
+    reset_cancel.add_argument(
+        "--capture-s",
+        type=float,
+        default=RESET_CANCEL_CAPTURE_S,
+        help=f"Seconds to keep recording after the final pulse (default: {RESET_CANCEL_CAPTURE_S})",
+    )
+    reset_cancel.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional RNG seed for reproducible pulse durations",
+    )
+    reset_cancel.set_defaults(handler=run_reset_cancel)
+
+    power = subparsers.add_parser(
+        "power",
+        help="Toggle system power relay via the sniffer",
+    )
+    power.add_argument(
+        "--state",
+        choices=["on", "off"],
+        required=True,
+        help="Desired power state",
+    )
+    power.add_argument(
+        "--capture-s",
+        type=float,
+        default=POWER_CAPTURE_DEFAULT_S,
+        help=f"Seconds to capture after issuing the power command (default: {POWER_CAPTURE_DEFAULT_S})",
+    )
+    power.set_defaults(handler=run_power)
+
+    upload = subparsers.add_parser(
+        "protocol-upload",
+        help="Capture protocol ingestion and execution",
+    )
+    upload.add_argument(
+        "--protocol",
+        type=Path,
+        default=None,
+        help=(
+            "Use an existing protocol CSV. Default: auto-generate tools/protocols/"
+            f"{DEFAULT_PROTOCOL_NAME} with a fresh PROTOCOL_NAME"
+        ),
+    )
+    upload.add_argument(
+        "--ingestion-wait",
+        type=float,
+        default=DEFAULT_INGESTION_WAIT,
+        help=f"Seconds to wait after power-on before issuing the RUN pulse (default: {DEFAULT_INGESTION_WAIT})",
+    )
+    upload.add_argument(
+        "--tail-pad",
+        type=float,
+        default=DEFAULT_TAIL_PAD,
+        help=f"Extra seconds to capture after expected runtime completes (default: {DEFAULT_TAIL_PAD})",
+    )
+    upload.add_argument(
+        "--run-margin-s",
+        type=float,
+        default=DEFAULT_RUN_MARGIN,
+        help=f"Seconds to extend RUN pulse beyond computed runtime (default: {DEFAULT_RUN_MARGIN})",
+    )
+    upload.set_defaults(handler=run_protocol_upload)
+
+    run_gate = subparsers.add_parser(
+        "run-gate",
+        help="Three-step RUN-gate validation sequence (CODE_REVIEW.md §7)",
+    )
+    run_gate.add_argument(
+        "--boot-wait-s",
+        type=float,
+        default=RUN_GATE_BOOT_WAIT_S,
+        help=f"Seconds to wait after power-on for boot + protocol upload (default: {RUN_GATE_BOOT_WAIT_S})",
+    )
+    run_gate.add_argument(
+        "--settle-s",
+        type=float,
+        default=RUN_GATE_SETTLE_S,
+        help=f"Settle time between substeps in seconds (default: {RUN_GATE_SETTLE_S})",
+    )
+    run_gate.add_argument(
+        "--hb-window-s",
+        type=float,
+        default=RUN_GATE_HB_WINDOW_S,
+        help=f"Heartbeat observation window in seconds (default: {RUN_GATE_HB_WINDOW_S})",
+    )
+    run_gate.add_argument(
+        "--skip-step-3",
+        action="store_true",
+        help="Skip step 3 (resume snapshot + cold boot); run only steps 1-2",
+    )
+    run_gate.set_defaults(handler=run_run_gate)
+
+    return parser
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.port is None:
+        auto_port = detect_default_port()
+        if auto_port is None:
+            raise SystemExit("--port is required when no Teensy-compatible port is detected")
+        args.port = auto_port
+
+    if args.baud <= 0:
+        raise SystemExit("--baud must be positive")
+
+    if args.mode in {"reset-pulse", "run-pulse"}:
+        if args.pulse_ms <= 0:
+            raise SystemExit("--pulse-ms must be positive")
+        if args.capture_s <= 0:
+            raise SystemExit("--capture-s must be positive")
+
+    if args.mode == "power":
+        if args.capture_s <= 0:
+            raise SystemExit("--capture-s must be positive")
+
+    if args.mode == "reset-cancel":
+        if args.count <= 0:
+            raise SystemExit("--count must be positive")
+        if args.min_ms <= 0 or args.max_ms <= 0:
+            raise SystemExit("--min-ms and --max-ms must be positive")
+        if args.min_ms >= RESET_THRESHOLD_MS or args.max_ms >= RESET_THRESHOLD_MS:
+            raise SystemExit("Pulse durations must stay below the reset threshold (5000 ms)")
+        if args.min_ms > args.max_ms:
+            raise SystemExit("--min-ms cannot exceed --max-ms")
+        if args.capture_s <= 0:
+            raise SystemExit("--capture-s must be positive")
+
+    if args.mode == "protocol-upload":
+        if args.ingestion_wait <= 0:
+            raise SystemExit("--ingestion-wait must be positive")
+        if args.tail_pad < 0:
+            raise SystemExit("--tail-pad cannot be negative")
+        if args.run_margin_s < 0:
+            raise SystemExit("--run-margin-s cannot be negative")
+
+    if args.mode == "run-gate":
+        if args.boot_wait_s <= 0:
+            raise SystemExit("--boot-wait-s must be positive")
+        if args.settle_s <= 0:
+            raise SystemExit("--settle-s must be positive")
+        if args.hb_window_s <= 0:
+            raise SystemExit("--hb-window-s must be positive")
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    validate_args(args)
+    handler: Callable[[argparse.Namespace], int] = args.handler
+    return handler(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

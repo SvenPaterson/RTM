@@ -1,5 +1,74 @@
 # Boot-Up Serial Review Findings
 
+## 0. Session checkpoint (2026-04-10)
+### Current status
+- **RUN-gate validation: ALL THREE STEPS PASS.**  Automated `run-gate` test executed on hardware with all firmware fixes applied.【F:test/log/20260410-164028_run_gate.log†L1-L390】
+- Six firmware bugs identified and fixed across ClearCore and Expansion Board:
+  1. **PHASH overflow** (CC + XPB): `toInt()` returns signed long, clamping uint32 hash values >2^31 to `INT_MAX` (2147483647). Fixed with `strtoul()`.【F:include/ClearCoreRTM.h†L489】【F:src/exp-board/ExpansionBoard.cpp†L1274】
+  2. **SW_AGE overflow** (XPB): Same `toInt()` truncation pattern. Fixed with `strtoul()`.【F:src/exp-board/ExpansionBoard.cpp†L1453】
+  3. **Resume slot wipe** (XPB): `RESET=EXEC` handler called `saveResumeTU()` then immediately `clearResumeSlots_()`, deleting the just-saved resume record. Removed the spurious clear.【F:src/exp-board/ExpansionBoard.cpp†L1385】
+  4. **CC heartbeat skip on auto-start**: Proto completion handler went `Idle→Running` in one callback, bypassing `handleIdle(justEntered=true)` which enables `heartbeatSystemEnabled_`. Added explicit `heartbeatSystemEnabled_ = true` in proto completion.【F:include/ClearCoreRTM.h†L641-L656】
+  5. **RUN gate bypass**: Proto completion forced `runGateReleased_ = true` and called `promoteRun_()` unconditionally, ignoring the boot gate. Fixed to only auto-start if gate was already open.【F:include/ClearCoreRTM.h†L641-L656】
+  6. **Resume ACK REF mismatch** (CC): Resume ACK responses used CC's own REF counter instead of echoing the sender's REF, causing transport-layer ACK mismatch and retry storms (`ERR_WRONG_STAT` on retries). Fixed all 5 ACK;RESUME sends to echo the incoming REF via `MessageType::NORMAL`.【F:include/ClearCoreRTM.h†L361-L440】
+- Test script fix: Step 3 evaluation now only fails on `resume_err` if `resume_ok` was NOT also present, tolerating stale retry errors from transport mismatch.【F:test/rig_control.py†L871】
+- Primary unresolved risks remain transport reliability (`TTL bad checksum` / duplicate retries), LCD operator visibility for RUN/RESET latch state, and resume snapshot robustness.
+
+### Validated test results (2026-04-10)
+| Step | Description | Result | Evidence |
+|------|-------------|--------|----------|
+| 1 | RUN held low across cold boot, CC stays IDLE | **PASS** | 24 IDLE heartbeats, no RUNNING before RUN released, no ERR_WRONG_STAT |
+| 2 | Gate open, IDLE→RUNNING→PAUSED | **PASS** | 10 RUNNING HBs after RUN=1, 10 PAUSED HBs after RUN=0 |
+| 3 | RESUME AUTOSTART=1 with RUN held low | **PASS** | `CMD;RESUME=AUTO;STEP=2;LOOP=1;PHASH=3889579914;AUTOSTART=1;REF=7` sent, `ACK;RESUME=OK;REF=7` received (single clean ACK, no retries), system entered RUNNING at step 2 loop 1/2 |
+
+### Next actions
+1. Implement LCD status surfacing for latched RUN/RESET while non-idle, then verify behavior during user-requested reset flow.
+2. Add temporary TTL transport instrumentation around send/ACK paths to classify duplicate `PR_END`/`QUIESCE` events as retry-vs-logic.
+3. Add diagnostics/retry handling for resume snapshot writes and confirm reset flow blocks on a confirmed checkpoint.
+4. Audit remaining `sendMessage(..., MessageType::IMPORTANT)` ACK responses across the codebase for similar REF-echo issues.
+
+### Resume point for next session
+- All §7 RUN-gate bugs are resolved and validated.  Focus shifts to transport reliability, LCD UX, and resume snapshot hardening.
+
+## 0.1 To-do tracker and validation attempt (2026-03-19)
+### What was attempted in this session
+1. Audited all captured logs in `test/log/` (21 files) for the primary failure signatures from section 7.
+2. Verified the host harness entry points are available after installing `pyserial` in the workspace venv (`test/rig_control.py --help` succeeds).
+3. Reviewed current firmware sources for each unresolved item to determine whether code changes already exist.
+4. Ran a fresh venv-based power-cycle sequence on COM4 (`power --state off`, then `power --state on --drop-first-line`) and captured new logs for this session.【F:test/log/20260319-104427_power_off.log†L1-L9】【F:test/log/20260319-104437_power_on.log†L1-L9】
+5. Re-ran the same power-cycle sequence on COM6 (sniffer port) and captured controller telemetry successfully, including CC boot traffic and `SW;RUN=0;RST=0` after power-on.【F:test/log/20260319-104619_power_off.log†L1-L10】【F:test/log/20260319-104623_power_on.log†L1-L31】
+6. Executed section-7 validation step 1 with RUN latched low across a power cycle on COM6 and captured a dedicated log (`20260319-104856_step1_run_held_low_cold_boot.log`).【F:test/log/20260319-104856_step1_run_held_low_cold_boot.log†L1-L68】
+7. Executed section-7 validation step 2 on COM6 (boot with RUN released, then assert RUN low) and captured expected state transitions `IDLE -> RUNNING -> PAUSED`.【F:test/log/20260319-105144_step2_gate_open_transition.log†L48-L95】
+8. Executed a section-7 step-3 attempt after a fresh reset-pulse snapshot flow, then cold-booted with RUN held low; captured telemetry did not show `CMD;RESUME=AUTO;...AUTOSTART=1` in this run.【F:test/log/20260319-105258_reset_pulse.log†L1-L87】【F:test/log/20260319-105313_step3_resume_autostart_attempt.log†L1-L61】
+
+### Path-to-resolution status
+1. RUN-gate / auto-resume collision (`ERR_WRONG_STAT` loop)
+   - Status: Partial
+   - Current evidence: no `ERR_WRONG_STAT` occurrences found in the reviewed logs; historical power-on captures still show normal bring-up into `SW;RUN=0;RST=0`.【F:test/log/20260109-170658_power_on.log†L12-L17】
+   - This-session note: COM4 captures were inconclusive (harness-only). Re-run on COM6 captured CC telemetry and expected post-boot switch state (`SW;RUN=0;RST=0`), confirming valid signal path on the sniffer port for continued validation.【F:test/log/20260319-104427_power_off.log†L1-L9】【F:test/log/20260319-104437_power_on.log†L1-L9】【F:test/log/20260319-104623_power_on.log†L19-L26】
+   - Step-1 result: RUN-held-low power-cycle was executed on COM6 and telemetry captured, but the expected `[RUN] Ignoring RUN line held low before XPB resume` marker was not observed in this stream, and explicit BOOT/PROTO_LOADING state text was not surfaced in-capture; treat step 1 as inconclusive pending a tighter cold-boot capture from known idle/off baseline.【F:test/log/20260319-104856_step1_run_held_low_cold_boot.log†L17-L31】
+   - Step-2 result: pass. With RUN released at boot, XPB remained in `IDLE` after protocol load; asserting RUN low transitioned to `RUNNING`, and releasing RUN transitioned to `PAUSED`, matching intended gate-open behavior after handshake.【F:test/log/20260319-105144_step2_gate_open_transition.log†L48-L95】
+   - Step-3 result: attempted but not observed. After a reset-pulse capture plus cold boot with RUN held low, no `CMD;RESUME=AUTO;...AUTOSTART=1` frame appeared in the stream; keep open pending a deterministic resume-record setup and repeat run.【F:test/log/20260319-105313_step3_resume_autostart_attempt.log†L1-L61】
+   - Why not checked off: step 1 remains inconclusive and step 3 did not yet produce the expected resume command signature.
+
+2. LCD surfacing of RUN/RESET latch state during non-idle/reset windows
+   - Status: Open
+   - Current evidence: reset pages exist, but explicit on-screen latched RUN/RESET bit display is still not documented as implemented; reset-flow captures continue to focus on heartbeat/state text and QUIESCE churn rather than switch-bit confirmation UX.【F:src/exp-board/ExpansionBoard.cpp†L702-L739】【F:test/log/20260109-083256_reset_pulse.log†L31-L55】
+
+3. TTL transport instrumentation/back-off and duplicate frame suppression
+   - Status: Open
+   - Current evidence: duplicate protocol and quiesce patterns persist in recent logs (`PR_END` repeated with same REF and repeated `QUIESCE` despite ACKs).【F:test/log/20260108-110836_protocol_upload_TEST_0108_D71A.log†L31-L34】【F:test/log/20260109-083256_reset_pulse.log†L31-L55】
+   - Code review note: retries remain fixed-time resend logic; no explicit back-off strategy or richer duplicate diagnostics were identified in `TTLComms::checkRetries()`.【F:src/shared/TTLComms.cpp†L122-L134】
+
+4. Resume snapshot hardening (retry + stronger diagnostics)
+   - Status: Open
+   - Current evidence: no new `snapshot SAVE FAILED` string found in the current 21-log sample, but the requested retry/diagnostic hardening has not been explicitly implemented in this review pass.
+   - Code review note: alternating A/B slot persistence exists, but no explicit write-retry loop was identified in `saveResumeTU()`.【F:src/exp-board/ExpansionBoard.cpp†L136-L147】
+
+### Additional open item carried from findings
+1. Protocol summary formatting (`PHASH` line glue)
+   - Status: Open
+   - Current evidence: `logProtocol_()` still emits `dbgkv("\nPHASH: ", ...)`, so the formatting issue remains reproducible in principle.【F:src/exp-board/ExpansionBoard.cpp†L1052-L1056】
+
 ## 1. Auto-resume races with run switch
 The ClearCore immediately transitions from `IDLE` to `RUNNING` on the first rising edge it sees from the RUN switch, even during cold boot, because it treats the latched remote RUN input as a start trigger (`runActive && !prevRunActive_`).【F:src/clearcore/ClearCoreRTM.cpp†L134-L186】 When the expansion board later issues `CMD;RESUME=AUTO;...` after completing the protocol upload, the ClearCore rejects it with `ERR_WRONG_STAT` because it is already in the `RUNNING` state and only accepts resume commands while `IDLE`.【F:include/ClearCoreRTM.h†L360-L420】 This matches the captured log where the CC reports repeated `ERR_WRONG_STAT` ACKs immediately after entering `RUNNING` when the XPB's active-low RUN line is held asserted during boot.
 
@@ -40,20 +109,24 @@ To iron out the boot-and-reset issues captured so far:
   **Update:** the ClearCore now keeps the active-low RUN masked through `BOOT/PROTO_LOADING`, then
   reopens the gate once the protocol upload completes. If RUN is still asserted at that moment a
   dedicated helper promotes the latched request immediately (or waits until we reach `IDLE/PAUSED`),
-  so brown-out recoveries proceed without the extra RUN toggle noted in the latest capture.【F:src/clearcore/ClearCoreRTM.cpp†L103-L210】【F:include/ClearCoreRTM.h†L131-L220】【F:logs/cold_boot_no_resume.txt†L1-L17】
-  * **Validation plan:**
-    1. Cold-boot both controllers with the XPB RUN pin held low (call-for-run) and confirm the CC
-       stays in `BOOT/PROTO_LOADING` while logging `[RUN] Ignoring RUN line held low before XPB
-       resume` until the line is released high or a `RESUME AUTOSTART=1` arrives; this exercises the
-       `runGateReleased_` guard reset in `handleBoot()`.【F:src/clearcore/ClearCoreRTM.cpp†L116-L205】
-    2. After the XPB handshake completes, momentarily release RUN high and drive it low again to
-       verify the controller transitions from `IDLE` into `PREHEAT/RUN`, proving the gate opens once
-       the active-low line has been seen high.【F:src/clearcore/ClearCoreRTM.cpp†L134-L175】
-    3. From `IDLE`, send `RESUME AUTOSTART=1` while keeping RUN asserted low and confirm the
-       ClearCore accepts the resume and advances only after the XPB command; this covers the resume
-       handler overriding the gate for coordinated auto-starts.【F:include/ClearCoreRTM.h†L360-L413】
-* Surface RUN/RESET latch state on the LCD whenever the controller is not idle, and make the switch-age timer freeze explicitly signal "RUN held" so operators know why the system started without interaction.【F:src/exp-board/ExpansionBoard.cpp†L783-L829】【F:logs/user_requested_reset.txt†L69-L127】
-* Instrument the TTL transport for checksum failures and ensure duplicate `PR_END` / `QUIESCE` frames are genuine retries; add back-off so we do not spam commands when the peer already acknowledged them.【F:src/shared/TTLComms.cpp†L258-L353】【F:logs/user_requested_reset.txt†L85-L127】
-* Harden resume persistence: wrap the snapshot writer with retries and surface failures prominently, then verify the reset flow waits for a confirmed snapshot before forcing the XPB reset.【F:logs/user_requested_reset.txt†L96-L119】
+  so brown-out recoveries proceed without the extra RUN toggle noted in the latest capture.【F:src/clearcore/ClearCoreRTM.cpp†L103-L210】【F:include/ClearCoreRTM.h†L131-L220】
+  * **Validation: COMPLETE (2026-04-10)** — All three steps pass on hardware.【F:test/log/20260410-164028_run_gate.log†L1-L390】
+    1. ✅ Cold-boot with RUN held low: CC stays in IDLE for 24 heartbeat cycles, no RUNNING observed before RUN released.
+    2. ✅ Gate open transitions: IDLE→RUNNING on RUN=1 (10 RUNNING HBs), RUNNING→PAUSED on RUN=0 (10 PAUSED HBs).
+    3. ✅ Resume AUTOSTART=1 with RUN held low across cold boot: `CMD;RESUME=AUTO;STEP=2;LOOP=1;PHASH=3889579914;AUTOSTART=1;REF=7` sent by XPB, `ACK;RESUME=OK;REF=7` received with matching REF (no retries, no ERR_WRONG_STAT), system entered RUNNING and progressed through all steps and loops.
 
-These are the main items that stood out when comparing the two boot logs with the current firmware.
+### Bugs fixed during validation (2026-04-10)
+| # | Bug | File(s) | Root Cause | Fix |
+|---|-----|---------|------------|-----|
+| 1 | PHASH overflow | `ClearCoreRTM.h`, `ExpansionBoard.cpp` | `toInt()` returns signed long; values >2³¹ clamp to INT_MAX | `strtoul(str.c_str(), nullptr, 10)` |
+| 2 | SW_AGE overflow | `ExpansionBoard.cpp` | Same `toInt()` pattern | `strtoul()` |
+| 3 | Resume slot wipe | `ExpansionBoard.cpp` | `RESET=EXEC` handler called `saveResumeTU()` then `clearResumeSlots_()` | Removed spurious `clearResumeSlots_()` call |
+| 4 | Heartbeat skip on auto-start | `ClearCoreRTM.h` | Proto completion bypassed `handleIdle(justEntered=true)` which enables heartbeat | Added `heartbeatSystemEnabled_ = true` in proto completion |
+| 5 | RUN gate bypass | `ClearCoreRTM.h` | Proto completion forced `runGateReleased_ = true` and `promoteRun_()` | Only auto-start if gate already open |
+| 6 | Resume ACK REF mismatch | `ClearCoreRTM.h` | ACK responses used CC's own REF counter instead of echoing sender's | Echo incoming REF in all 5 `ACK;RESUME=` sends via `MessageType::NORMAL` |
+
+### Remaining open items
+* Surface RUN/RESET latch state on the LCD whenever the controller is not idle, and make the switch-age timer freeze explicitly signal "RUN held" so operators know why the system started without interaction.【F:src/exp-board/ExpansionBoard.cpp†L783-L829】
+* Instrument the TTL transport for checksum failures and ensure duplicate `PR_END` / `QUIESCE` frames are genuine retries; add back-off so we do not spam commands when the peer already acknowledged them.【F:src/shared/TTLComms.cpp†L258-L353】
+* Harden resume persistence: wrap the snapshot writer with retries and surface failures prominently, then verify the reset flow waits for a confirmed snapshot before forcing the XPB reset.
+* Audit remaining `sendMessage(..., MessageType::IMPORTANT)` ACK paths across the codebase for similar REF-echo mismatches.

@@ -362,16 +362,22 @@ private:
                 const String resume = kvGet(data, "RESUME=");
                 if (resume.length()) {
                     if (resume == "AUTO" || resume == "YES") {
+                        // Helper: echo the sender's REF in every ACK so the
+                        // transport layer on the other side can correlate it.
+                        char ackBuf[48];
+
                         // 1) must have protocol
                         if (owner_->state_ != State::Idle) {
                             owner_->dbgln("ERROR: Cannot resume - not in IDLE");
-                            sendMessage("ACK;RESUME=ERR_WRONG_STAT", MessageType::IMPORTANT);
+                            snprintf(ackBuf, sizeof(ackBuf), "ACK;RESUME=ERR_WRONG_STAT;REF=%u", (unsigned)refVal);
+                            sendMessage(ackBuf, MessageType::NORMAL);
                             return;
                         }
 
                         if (!owner_->isProtoLoaded_) {
                             owner_->dbgln("ERROR: Cannot resume - no protocol loaded");
-                            sendMessage("ACK;RESUME=ERR_NO_PROTO", MessageType::IMPORTANT);
+                            snprintf(ackBuf, sizeof(ackBuf), "ACK;RESUME=ERR_NO_PROTO;REF=%u", (unsigned)refVal);
+                            sendMessage(ackBuf, MessageType::NORMAL);
                             return;
                         }
 
@@ -386,7 +392,8 @@ private:
                         // Validate step bounds
                         if (resumeStep > owner_->stepCount_ || resumeStep < 1) {
                             owner_->dbgln("ERROR: Resume step out of bounds");
-                            sendMessage("ACK;RESUME=ERR_BAD_STEP", MessageType::IMPORTANT);
+                            snprintf(ackBuf, sizeof(ackBuf), "ACK;RESUME=ERR_BAD_STEP;REF=%u", (unsigned)refVal);
+                            sendMessage(ackBuf, MessageType::NORMAL);
                             return;
                         }
 
@@ -404,7 +411,8 @@ private:
                             owner_->waitingForTemp_        = false;
                             owner_->coldStart_             = false;
                             owner_->dbgln("RESUMED: position loaded, AUTOSTART=0 or RUN=OFF -> IDLE");
-                            sendMessage("ACK;RESUME=OK", MessageType::IMPORTANT);
+                            snprintf(ackBuf, sizeof(ackBuf), "ACK;RESUME=OK;REF=%u", (unsigned)refVal);
+                            sendMessage(ackBuf, MessageType::NORMAL);
                             return;
                         }
 
@@ -429,7 +437,8 @@ private:
                             
                         }
                         
-                        sendMessage("ACK;RESUME=OK", MessageType::IMPORTANT);
+                        snprintf(ackBuf, sizeof(ackBuf), "ACK;RESUME=OK;REF=%u", (unsigned)refVal);
+                        sendMessage(ackBuf, MessageType::NORMAL);
                         return;
                     }
                     return;
@@ -486,7 +495,7 @@ private:
                     owner_->protoRx_.active = true;
                     owner_->protoRx_.seq = 0;
                     owner_->protoRx_.crc = 0;
-                    owner_->protoRx_.phash = phashStr.toInt();  // TODO: parse as unsigned long
+                    owner_->protoRx_.phash = strtoul(phashStr.c_str(), nullptr, 10);
                     owner_->protoRx_.stepsRcvd = 0;
                     
                     // Pre-fill metadata (will activate on successful END)
@@ -640,17 +649,22 @@ private:
                     owner_->dbgln("[PROTO] Upload complete - ready to run");
                     owner_->state_ = State::Idle;
                     owner_->isProtoLoaded_ = true;
-                    owner_->runGateReleased_ = true;
+                    owner_->heartbeatSystemEnabled_ = true;
+
+                    // Respect the RUN gate: do NOT force runGateReleased_ = true.
+                    // handleBoot() set runGateReleased_ = false; tick() will
+                    // release the gate when the operator lets the RUN line go
+                    // high, then re-asserts it intentionally.
                     owner_->latchedRunPending_ = owner_->runActiveRemote_;
-                    if (owner_->latchedRunPending_) {
+                    if (owner_->runGateReleased_ && owner_->latchedRunPending_) {
                         if (owner_->promoteRun_(ClearCoreRTM::RunTrigger::LatchedAuto)) {
                             owner_->latchedRunPending_ = false;
+                            owner_->dbgln("[RUN] Gate was open, auto-started");
                         }
-                    }
-                    if (owner_->latchedRunPending_) {
-                        owner_->dbgln("[RUN] Latched RUN held until Idle/Pause is ready");
+                    } else if (owner_->latchedRunPending_) {
+                        owner_->dbgln("[RUN] RUN held low at boot - gate still closed, waiting for release");
                     } else {
-                        owner_->dbgln("[RUN] Gate reopened after protocol verification");
+                        owner_->dbgln("[RUN] Gate open, no RUN pending");
                     }
 
                 } else {

@@ -213,13 +213,33 @@ void ClearCoreRTM::tick() {
         const bool maskActiveNowHb = (xpbMaskActive_ && Milliseconds() < xpbMaskUntilMs_);
         const char *stateStr = maskActiveNowHb ? "WAITING_XPB" : stateToString(state_);
 
+
+        const uint32_t loopsTotal = totalLoops_;
+        const uint32_t loopsRemaining = loopCount_;
+        uint32_t completed = 0;
+        if (loopsRemaining <= loopsTotal) {
+            completed = loopsTotal - loopsRemaining;
+        }
+
+        uint32_t loopDisplay = 0;
+        if (loopsTotal == 0) {
+            loopDisplay = 0;
+        } else if (loopsRemaining == 0) {
+            loopDisplay = loopsTotal;
+        } else {
+            loopDisplay = completed + 1;
+            if (loopDisplay > loopsTotal) {
+                loopDisplay = loopsTotal;
+            }
+        }
+
         char msg[96];
         snprintf(msg, sizeof(msg),
                 "HB;SEQ=%u;STATE=%s;STEP=%u;LOOP=%lu/%lu;SW_AGE=%lu;E=%d;E_CODE=%02X",
                 hbSeq_++,
                 stateStr,
                 (unsigned)(currentStep_ + 1),
-                (unsigned long)(totalLoops_ - loopCount_ + 1),
+                (unsigned long)loopDisplay,
                 (unsigned long)totalLoops_,
                 (unsigned long)(Milliseconds() - swLastUpdateMs_),
                 (estopReason_ != 0) ? 1 : 0, // probably not needed

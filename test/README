@@ -1,11 +1,78 @@
 
-This directory is intended for PlatformIO Test Runner and project tests.
+Test Harness Overview
+=====================
 
-Unit Testing is a software testing method by which individual units of
-source code, sets of one or more MCU program modules together with associated
-control data, usage procedures, and operating procedures, are tested to
-determine whether they are fit for use. Unit testing finds problems early
-in the development cycle.
+The scripts in this folder exercise the Teensy-based sniffer rig that proxies
+RUN/RESET control lines and captures telemetry between the ClearCore (CC) and
+Expansion Board (XPB). Use the unified CLI to drive each scenario:
 
-More information about PlatformIO Unit Testing:
-- https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+	python test/rig_control.py --help
+
+Common Options
+--------------
+
+* ``--port``: Serial port for the Teensy (auto-detected when possible).
+* ``--baud``: USB CDC baud rate (default 460800).
+* ``--drop-first-line``: Skip the first decoded frame if startup noise is an issue.
+
+COM target verification (required)
+----------------------------------
+
+Before any hardware run, confirm which serial port is the active sniffer. COM numbers can shift after
+re-enumeration, USB hub changes, or power switching.
+
+Example check:
+
+```
+C:/Users/Stephen.Garden/RTM/.venv/Scripts/python.exe -c "from serial.tools import list_ports; [print(f'{p.device} | {p.description} | {p.hwid}') for p in list_ports.comports()]"
+```
+
+Use the detected sniffer COM port explicitly with ``--port`` for all test commands.
+
+Available Modes
+---------------
+
+* ``reset-pulse``: Assert RESET low for a programmable duration and log the recovery.
+* ``run-pulse``: Toggle RUN low to start a drive cycle and capture CC/XBP heartbeats.
+* ``reset-cancel``: Fire multiple sub-threshold RESET pulses to confirm cancel behavior.
+* ``power --state on|off``: Toggle the sniffer-controlled board power relay for hard reset / cold boot validation.
+* ``protocol-upload``: Walk through SD card staging, protocol ingestion, and automatic runtime validation.
+* ``run-gate``: Automated three-step RUN-gate validation from CODE_REVIEW.md §7 — verifies boot masking, gate release, and resume auto-start.
+
+RUN-gate validation sequence
+----------------------------
+
+Validates the ClearCore RUN-gate firmware by running three sequential checks:
+
+1. **Step 1:** Cold-boot with RUN held low — CC must stay IDLE (gate masks the latched line).
+2. **Step 2:** Release RUN, then re-assert — CC transitions IDLE→RUNNING→PAUSED.
+3. **Step 3:** Create a resume snapshot via reset, cold-boot with RUN low — XPB sends
+   ``CMD;RESUME=AUTO;AUTOSTART=1`` and CC accepts it.
+
+Pass/fail is determined from observable TTL telemetry (``HB;STATE=``, ``CMD;RESUME=``,
+``ACK;RESUME=``, ``NOTICE;PROTO_RX=OK``).  Use ``--skip-step-3`` for a quick steps 1-2 run.
+
+Example:
+
+```
+python test/rig_control.py run-gate --port COM6
+python test/rig_control.py run-gate --port COM6 --skip-step-3
+python test/rig_control.py run-gate --port COM6 --boot-wait-s 40 --hb-window-s 15
+```
+
+Hard reset sequence (power cycle)
+---------------------------------
+
+Use the power mode to perform a true board hard reset and capture boot traffic:
+
+```
+python test/rig_control.py power --state off --capture-s 4
+python test/rig_control.py power --state on --capture-s 8 --drop-first-line
+```
+
+For complete project resume context, see [docs/PROJECT_HANDOFF.md](../docs/PROJECT_HANDOFF.md)
+and [CODE_REVIEW.md](../CODE_REVIEW.md).
+
+Legacy entry points such as ``reset_pulse_test.py`` now forward to the CLI above,
+so existing shortcuts continue to work while new scenarios can be added as
+additional subcommands.
