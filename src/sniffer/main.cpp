@@ -23,8 +23,8 @@ constexpr uint32_t kStandbyBlinkMs = 500;  // slow blink: waiting for host conne
 constexpr uint32_t kActiveBlinkMs  = 75;  // fast blink: actively sniffing
 constexpr uint32_t kIdleTimeoutMs  = 2000; // switch to slow if no traffic
 
-constexpr uint8_t kCcToXpbRxPin = 0;
-constexpr uint8_t kXpbToCcRxPin = 7;
+constexpr uint8_t kCcToXpbRxPin = 7;
+constexpr uint8_t kXpbToCcRxPin = 0;
 
 const char kHexDigits[] = "0123456789ABCDEF";
 
@@ -69,8 +69,8 @@ struct ChannelState {
     uint32_t lastStampMs = 0;
 };
 
-ChannelState gCcChannel(Serial1, "CC");
-ChannelState gXpbChannel(Serial2, "XPB");
+ChannelState gCcChannel(Serial2, "CC->XPB");
+ChannelState gXpbChannel(Serial1, "XPB->CC");
 
 bool IsPrintableAscii(uint8_t value) {
     return (value >= 0x20 && value <= 0x7E) || value == '\t';
@@ -495,9 +495,9 @@ void setup() {
     // Active: faster blink while sniffing
     gLedIntervalMs = kActiveBlinkMs;
 
-    Serial.print(F("[INFO] CC sniff baud="));
+    Serial.print(F("[INFO] CC->XPB sniff baud="));
     Serial.print(kTtlBaud);
-    Serial.print(F(", XPB sniff baud="));
+    Serial.print(F(", XPB->CC sniff baud="));
     Serial.print(kTtlBaud);
     Serial.print(F(", USB="));
     Serial.println(kUsbBaud);
@@ -509,10 +509,10 @@ void setup() {
     }
 
     if (!gCcChannel.syncedNewline) {
-        Serial.println(F("[WARN] CC channel sync timed out; first line may be partial"));
+        Serial.println(F("[WARN] CC->XPB channel sync timed out; first line may be partial"));
     }
     if (!gXpbChannel.syncedNewline) {
-        Serial.println(F("[WARN] XPB channel sync timed out; first line may be partial"));
+        Serial.println(F("[WARN] XPB->CC channel sync timed out; first line may be partial"));
     }
 }
 

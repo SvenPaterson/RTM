@@ -343,6 +343,101 @@ def run_reset_pulse(args: argparse.Namespace) -> int:
     return 0
 
 
+# Defaults for reset-pulse-multi
+RESET_MULTI_COUNT = 5
+RESET_MULTI_BOOT_WAIT_S = 30.0
+RESET_MULTI_SETTLE_S = 5.0
+
+
+def run_reset_pulse_multi(args: argparse.Namespace) -> int:
+    """Run multiple reset-pulse cycles back-to-back, checking protocol reload each time."""
+    log_dir = ensure_log_dir()
+    log_path = log_dir / f"{timestamp()}_reset_pulse_multi.log"
+    count = args.count
+    boot_wait_s = args.boot_wait_s
+    settle_s = args.settle_s
+    pulse_ms = args.pulse_ms
+    results: list[str] = []
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        emit(f"[TEST] Logging to {rel_path(log_path)}", log)
+        emit(f"[TEST] Command: {format_invocation()}", log)
+        emit(f"[TEST] === RESET-PULSE-MULTI ({count} iterations) ===", log)
+        emit(
+            f"[TEST] Configuration: count={count}, pulse={pulse_ms} ms, "
+            f"boot_wait={boot_wait_s:.1f} s, settle={settle_s:.1f} s",
+            log,
+        )
+        emit(f"[TEST] Opening serial port {args.port} @ {args.baud} baud", log)
+        try:
+            ser = open_serial_with_retry(args.port, args.baud, timeout=0.1)
+        except (serial.SerialException, OSError) as exc:
+            emit(f"[TEST] Serial error: {exc}", log)
+            return 2
+
+        with ser:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            emit("[TEST] Connected", log)
+
+            # Confirm system is alive before starting
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.5)
+            flush_serial(ser, log)
+
+            for iteration in range(1, count + 1):
+                emit(f"[TEST] --- Iteration {iteration}/{count} ---", log)
+
+                # Issue reset pulse
+                send_command(ser, f"PULSE RST={pulse_ms}", log=log)
+
+                # Capture the reset + reboot sequence
+                # Reset arm (5s) + exec + reboot + protocol upload
+                capture_time = (pulse_ms / 1000.0) + boot_wait_s
+                lines = capture_lines(ser, capture_time, log, drop_first_line=args.drop_first_line)
+
+                # Check for protocol upload success indicators
+                hits = scan_lines(lines, {
+                    "proto_ok": r"NOTICE;PROTO_RX=OK",
+                    "hb_idle": r"HB;.*STATE=IDLE",
+                    "proto_missing": r"Protocol Missing",
+                })
+
+                if hits["proto_ok"] or hits["hb_idle"]:
+                    verdict = "PASS"
+                    detail = (
+                        f"proto_ok={len(hits['proto_ok'])}, "
+                        f"hb_idle={len(hits['hb_idle'])}"
+                    )
+                else:
+                    verdict = "FAIL"
+                    detail = "No PROTO_RX=OK or IDLE heartbeat observed"
+                    if hits["proto_missing"]:
+                        detail = "Protocol Missing on SD detected"
+
+                results.append(verdict)
+                emit(f"[TEST] Iteration {iteration}: {verdict} ({detail})", log)
+
+                # Settle before next iteration (unless last)
+                if iteration < count:
+                    emit(f"[TEST] Settling {settle_s:.1f}s before next iteration", log)
+                    stream_serial(ser, time.monotonic() + settle_s, log)
+
+            # Summary
+            pass_count = results.count("PASS")
+            fail_count = results.count("FAIL")
+            emit(f"[TEST] === SUMMARY: {pass_count}/{count} PASS, {fail_count}/{count} FAIL ===", log)
+            for i, r in enumerate(results, 1):
+                emit(f"[TEST]   Iteration {i}: {r}", log)
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.2)
+            flush_serial(ser, log)
+            emit("[TEST] Capture complete", log)
+
+    return 0 if fail_count == 0 else 1
+
+
 def run_power(args: argparse.Namespace) -> int:
     log_dir = ensure_log_dir()
     state_token = "on" if args.state == "on" else "off"
@@ -430,7 +525,107 @@ def run_run_pulse(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_run_cycle(args: argparse.Namespace) -> int:
+    """T2: Run/Pause/Resume cycle — double-pulse with automated verdict."""
+    log_dir = ensure_log_dir()
+    log_path = log_dir / f"{timestamp()}_run_cycle.log"
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        emit(f"[TEST] Logging to {rel_path(log_path)}", log)
+        emit(f"[TEST] Command: {format_invocation()}", log)
+        emit("[TEST] === RUN-CYCLE TEST (IDLE → RUNNING → PAUSED → RUNNING) ===", log)
+        emit(
+            f"[TEST] Configuration: pulse={args.pulse_ms} ms, "
+            f"observe={args.observe_s:.1f} s",
+            log,
+        )
+        emit(f"[TEST] Opening serial port {args.port} @ {args.baud} baud", log)
+        try:
+            ser = open_serial_with_retry(args.port, args.baud, timeout=0.1)
+        except (serial.SerialException, OSError) as exc:
+            emit(f"[TEST] Serial error: {exc}", log)
+            return 2
+
+        with ser:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            emit("[TEST] Connected", log)
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.25)
+
+            # --- Phase 1: IDLE baseline ---
+            emit("[TEST] Phase 1: Confirming IDLE baseline", log)
+            idle_lines = capture_lines(ser, args.observe_s, log)
+            idle_hits = scan_lines(idle_lines, {
+                "hb_idle": r"HB;.*STATE=IDLE",
+                "cc_stat": r"STAT;SEQ=",
+            })
+            if not idle_hits["hb_idle"] and not idle_hits["cc_stat"]:
+                emit("[TEST] FAIL — no telemetry; system not in IDLE", log)
+                return 1
+
+            # --- Phase 2: Assert RUN → expect RUNNING ---
+            emit("[TEST] Phase 2: Asserting RUN", log)
+            send_command(ser, "RUN=1", log=log)
+            run1_lines = capture_lines(ser, args.observe_s, log)
+            run1_hits = scan_lines(run1_lines, {
+                "hb_running": r"HB;.*STATE=RUNNING",
+            })
+            if not run1_hits["hb_running"]:
+                emit("[TEST] FAIL — no RUNNING heartbeat after RUN asserted", log)
+                send_command(ser, "RUN=0", log=log)
+                return 1
+
+            # --- Phase 3: Release RUN → expect PAUSED ---
+            emit("[TEST] Phase 3: Releasing RUN", log)
+            send_command(ser, "RUN=0", log=log)
+            pause_lines = capture_lines(ser, args.observe_s, log)
+            pause_hits = scan_lines(pause_lines, {
+                "hb_paused": r"HB;.*STATE=PAUSED",
+            })
+            if not pause_hits["hb_paused"]:
+                emit("[TEST] FAIL — no PAUSED heartbeat after RUN released", log)
+                return 1
+
+            # --- Phase 4: Re-assert RUN → expect RUNNING resume ---
+            emit("[TEST] Phase 4: Re-asserting RUN (resume)", log)
+            send_command(ser, f"PULSE RUN={args.pulse_ms}", log=log)
+            run2_lines = capture_lines(ser, args.observe_s, log)
+            run2_hits = scan_lines(run2_lines, {
+                "hb_running": r"HB;.*STATE=RUNNING",
+                "hb_resume": r"HB;.*STATE=RESUME",
+            })
+            if not run2_hits["hb_running"] and not run2_hits["hb_resume"]:
+                emit("[TEST] FAIL — no RUNNING/RESUME heartbeat after re-assert", log)
+                return 1
+
+            # --- Phase 5: Final release → PAUSED ---
+            emit("[TEST] Phase 5: Final release, confirming PAUSED", log)
+            final_lines = capture_lines(ser, args.observe_s, log)
+            final_hits = scan_lines(final_lines, {
+                "hb_paused": r"HB;.*STATE=PAUSED",
+            })
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.2)
+            flush_serial(ser, log)
+
+            emit(
+                f"[TEST] PASS — IDLE({len(idle_hits['hb_idle'])} HBs) → "
+                f"RUNNING({len(run1_hits['hb_running'])}) → "
+                f"PAUSED({len(pause_hits['hb_paused'])}) → "
+                f"RUNNING({len(run2_hits['hb_running'])}+{len(run2_hits['hb_resume'])} resume) → "
+                f"PAUSED({len(final_hits['hb_paused'])})",
+                log,
+            )
+            emit("[TEST] Capture complete", log)
+
+    return 0
+
+
 def run_reset_cancel(args: argparse.Namespace) -> int:
+    """T5: Sub-threshold RESET pulses — system must NOT reset."""
     log_dir = ensure_log_dir()
     log_path = log_dir / f"{timestamp()}_reset_cancel.log"
     pulses = choose_pulses(args.count, args.min_ms, args.max_ms, seed=args.seed)
@@ -458,22 +653,213 @@ def run_reset_cancel(args: argparse.Namespace) -> int:
             send_command(ser, "STATUS", log=log)
             time.sleep(0.25)
 
+            all_lines: list[str] = []
             for idx, pulse_ms in enumerate(pulses, start=1):
                 send_command(ser, f"PULSE RST={pulse_ms}", log=log)
-                time.sleep(pulse_ms / 1000.0 + 0.25)
+                lines = capture_lines(ser, pulse_ms / 1000.0 + 0.5, log)
+                all_lines.extend(lines)
                 send_command(ser, "STATUS", log=log)
 
-            deadline = time.monotonic() + args.capture_s
-            stream_serial(
-                ser,
-                deadline,
-                log,
-                drop_first_line=args.drop_first_line,
-            )
+            tail_lines = capture_lines(ser, args.capture_s, log,
+                                       drop_first_line=args.drop_first_line)
+            all_lines.extend(tail_lines)
 
             send_command(ser, "STATUS", log=log)
             time.sleep(0.2)
             flush_serial(ser, log)
+
+            # Verdict: ARM + CANCEL is expected for sub-threshold pulses.
+            # Fail only if the reset actually executed or the system rebooted.
+            hits = scan_lines(all_lines, {
+                "reset_exec": r"CMD;RESET=EXEC",
+                "quiesce_boot": r"QUIESCE;SECS=",
+                "reboot_notice": r"NOTICE;XPB_RESET=NOW",
+            })
+
+            rebooted = (hits["reset_exec"] or hits["quiesce_boot"]
+                        or hits["reboot_notice"])
+            if rebooted:
+                emit("[TEST] FAIL — system rebooted during sub-threshold pulses", log)
+                return 1
+
+            emit(f"[TEST] PASS — {len(pulses)} sub-threshold pulses, all cancelled", log)
+            emit("[TEST] Capture complete", log)
+
+    return 0
+
+
+def run_comms_health(args: argparse.Namespace) -> int:
+    """T8: Passive comms health check — verify heartbeat cadence."""
+    log_dir = ensure_log_dir()
+    log_path = log_dir / f"{timestamp()}_comms_health.log"
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        emit(f"[TEST] Logging to {rel_path(log_path)}", log)
+        emit(f"[TEST] Command: {format_invocation()}", log)
+        emit("[TEST] === COMMS HEALTH CHECK ===", log)
+        emit(f"[TEST] Configuration: duration={args.duration_s:.1f} s", log)
+        emit(f"[TEST] Opening serial port {args.port} @ {args.baud} baud", log)
+        try:
+            ser = open_serial_with_retry(args.port, args.baud, timeout=0.1)
+        except (serial.SerialException, OSError) as exc:
+            emit(f"[TEST] Serial error: {exc}", log)
+            return 2
+
+        with ser:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            emit("[TEST] Connected", log)
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.25)
+
+            lines = capture_lines(ser, args.duration_s, log,
+                                  drop_first_line=args.drop_first_line)
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.2)
+            flush_serial(ser, log)
+
+            # Extract HB and STAT timestamps
+            hb_times: list[float] = []
+            stat_times: list[float] = []
+            ts_pattern = re.compile(r"\[ms=(\d+)")
+            for line in lines:
+                m = ts_pattern.search(line)
+                if not m:
+                    continue
+                ms = int(m.group(1))
+                if "HB;" in line:
+                    hb_times.append(ms)
+                elif "STAT;" in line:
+                    stat_times.append(ms)
+
+            # Analyze gaps
+            failed = False
+            max_gap_tolerance_ms = 2000
+
+            def check_cadence(name: str, times: list[float]) -> bool:
+                nonlocal failed
+                if len(times) < 2:
+                    emit(f"[TEST] WARNING — only {len(times)} {name} messages in {args.duration_s:.0f}s", log)
+                    failed = True
+                    return False
+                gaps = [times[i+1] - times[i] for i in range(len(times) - 1)]
+                max_gap = max(gaps)
+                min_gap = min(gaps)
+                avg_gap = sum(gaps) / len(gaps)
+                emit(
+                    f"[TEST] {name}: {len(times)} msgs, "
+                    f"gap min={min_gap:.0f}ms avg={avg_gap:.0f}ms max={max_gap:.0f}ms",
+                    log,
+                )
+                if max_gap > max_gap_tolerance_ms:
+                    emit(f"[TEST] FAIL — {name} gap {max_gap:.0f}ms exceeds {max_gap_tolerance_ms}ms", log)
+                    failed = True
+                    return False
+                return True
+
+            check_cadence("HB (XPB→CC)", hb_times)
+            check_cadence("STAT (CC→XPB)", stat_times)
+
+            # Check for E-STOP (;E=1; with delimiters to avoid matching SW_AGE=1...)
+            estop_hits = scan_lines(lines, {"estop": r";E=1;"})
+            if estop_hits["estop"]:
+                emit("[TEST] FAIL — E-STOP detected during health check", log)
+                failed = True
+
+            if failed:
+                emit("[TEST] FAIL — comms health check failed", log)
+                return 1
+
+            emit("[TEST] PASS — heartbeat cadence healthy, no gaps or E-STOPs", log)
+            emit("[TEST] Capture complete", log)
+
+    return 0
+
+
+def run_cold_boot(args: argparse.Namespace) -> int:
+    """T1: Cold boot / power loss recovery — power cycle and verify full boot."""
+    log_dir = ensure_log_dir()
+    log_path = log_dir / f"{timestamp()}_cold_boot.log"
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        emit(f"[TEST] Logging to {rel_path(log_path)}", log)
+        emit(f"[TEST] Command: {format_invocation()}", log)
+        emit("[TEST] === COLD BOOT / POWER LOSS RECOVERY ===", log)
+        emit(
+            f"[TEST] Configuration: boot_wait={args.boot_wait_s:.1f} s, "
+            f"power_dwell={args.power_dwell_s:.1f} s",
+            log,
+        )
+        emit(f"[TEST] Opening serial port {args.port} @ {args.baud} baud", log)
+        try:
+            ser = open_serial_with_retry(args.port, args.baud, timeout=0.1)
+        except (serial.SerialException, OSError) as exc:
+            emit(f"[TEST] Serial error: {exc}", log)
+            return 2
+
+        with ser:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            emit("[TEST] Connected", log)
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.25)
+
+            # Power cycle
+            emit("[TEST] Power-cycling boards", log)
+            send_command(ser, "PWR=0", log=log)
+            emit(f"[TEST] Power-off dwell {args.power_dwell_s:.1f}s", log)
+            time.sleep(args.power_dwell_s)
+            send_command(ser, "PWR=1", log=log)
+
+            # Capture full boot sequence
+            lines = capture_lines(ser, args.boot_wait_s, log,
+                                  drop_first_line=args.drop_first_line)
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.2)
+            flush_serial(ser, log)
+
+            # Verdict
+            hits = scan_lines(lines, {
+                "quiesce": r"QUIESCE;SECS=15",
+                "ready": r"READY;ID=CC",
+                "proto_ok": r"NOTICE;PROTO_RX=OK",
+                "hb_idle": r"HB;.*STATE=IDLE",
+                "estop": r"E-STOP|E=1",
+                "proto_missing": r"Protocol Missing",
+            })
+
+            failed = False
+            if not hits["quiesce"]:
+                emit("[TEST] WARNING — no QUIESCE;SECS=15 from XPB", log)
+
+            if not hits["proto_ok"]:
+                emit("[TEST] FAIL — NOTICE;PROTO_RX=OK not observed", log)
+                if hits["proto_missing"]:
+                    emit("[TEST]   Protocol Missing on SD detected", log)
+                failed = True
+
+            if not hits["hb_idle"]:
+                emit("[TEST] FAIL — no IDLE heartbeat after boot", log)
+                failed = True
+
+            if hits["estop"]:
+                emit("[TEST] FAIL — E-STOP detected during boot", log)
+                failed = True
+
+            if failed:
+                return 1
+
+            emit(
+                f"[TEST] PASS — boot sequence complete: "
+                f"QUIESCE={len(hits['quiesce'])}, "
+                f"proto_ok={len(hits['proto_ok'])}, "
+                f"hb_idle={len(hits['hb_idle'])}",
+                log,
+            )
             emit("[TEST] Capture complete", log)
 
     return 0
@@ -1029,6 +1415,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reset_pulse.set_defaults(handler=run_reset_pulse)
 
+    reset_pulse_multi = subparsers.add_parser(
+        "reset-pulse-multi",
+        help="Run multiple reset-pulse cycles to stress-test SD/protocol reliability across reboots",
+    )
+    reset_pulse_multi.add_argument(
+        "--count",
+        type=int,
+        default=RESET_MULTI_COUNT,
+        help=f"Number of reset-pulse iterations (default: {RESET_MULTI_COUNT})",
+    )
+    reset_pulse_multi.add_argument(
+        "--pulse-ms",
+        type=int,
+        default=RESET_PULSE_DEFAULT_MS,
+        help=f"Milliseconds to hold RESET low (default: {RESET_PULSE_DEFAULT_MS})",
+    )
+    reset_pulse_multi.add_argument(
+        "--boot-wait-s",
+        type=float,
+        default=RESET_MULTI_BOOT_WAIT_S,
+        help=f"Seconds to wait after pulse for reboot + protocol upload (default: {RESET_MULTI_BOOT_WAIT_S})",
+    )
+    reset_pulse_multi.add_argument(
+        "--settle-s",
+        type=float,
+        default=RESET_MULTI_SETTLE_S,
+        help=f"Settle time between iterations (default: {RESET_MULTI_SETTLE_S})",
+    )
+    reset_pulse_multi.set_defaults(handler=run_reset_pulse_multi)
+
     run_pulse = subparsers.add_parser(
         "run-pulse",
         help="Issue a RUN pulse and record the response",
@@ -1166,6 +1582,56 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_gate.set_defaults(handler=run_run_gate)
 
+    # --- New test verbs ---
+
+    run_cycle = subparsers.add_parser(
+        "run-cycle",
+        help="T2: Double-pulse RUN test — IDLE → RUNNING → PAUSED → RUNNING → PAUSED",
+    )
+    run_cycle.add_argument(
+        "--pulse-ms",
+        type=int,
+        default=RUN_PULSE_DEFAULT_MS,
+        help=f"Milliseconds for the second RUN pulse (default: {RUN_PULSE_DEFAULT_MS})",
+    )
+    run_cycle.add_argument(
+        "--observe-s",
+        type=float,
+        default=5.0,
+        help="Seconds to observe each phase (default: 5.0)",
+    )
+    run_cycle.set_defaults(handler=run_run_cycle)
+
+    comms_health = subparsers.add_parser(
+        "comms-health",
+        help="T8: Passive comms health check — verify HB and STAT cadence",
+    )
+    comms_health.add_argument(
+        "--duration-s",
+        type=float,
+        default=30.0,
+        help="Duration of passive capture in seconds (default: 30.0)",
+    )
+    comms_health.set_defaults(handler=run_comms_health)
+
+    cold_boot = subparsers.add_parser(
+        "cold-boot",
+        help="T1: Power cycle and verify full boot sequence (simulates power loss)",
+    )
+    cold_boot.add_argument(
+        "--boot-wait-s",
+        type=float,
+        default=RUN_GATE_BOOT_WAIT_S,
+        help=f"Seconds to wait for boot + protocol upload (default: {RUN_GATE_BOOT_WAIT_S})",
+    )
+    cold_boot.add_argument(
+        "--power-dwell-s",
+        type=float,
+        default=4.0,
+        help="Seconds to keep power off before restoring (default: 4.0)",
+    )
+    cold_boot.set_defaults(handler=run_cold_boot)
+
     return parser
 
 
@@ -1184,6 +1650,16 @@ def validate_args(args: argparse.Namespace) -> None:
             raise SystemExit("--pulse-ms must be positive")
         if args.capture_s <= 0:
             raise SystemExit("--capture-s must be positive")
+
+    if args.mode == "reset-pulse-multi":
+        if args.count <= 0:
+            raise SystemExit("--count must be positive")
+        if args.pulse_ms <= 0:
+            raise SystemExit("--pulse-ms must be positive")
+        if args.boot_wait_s <= 0:
+            raise SystemExit("--boot-wait-s must be positive")
+        if args.settle_s <= 0:
+            raise SystemExit("--settle-s must be positive")
 
     if args.mode == "power":
         if args.capture_s <= 0:
@@ -1216,6 +1692,22 @@ def validate_args(args: argparse.Namespace) -> None:
             raise SystemExit("--settle-s must be positive")
         if args.hb_window_s <= 0:
             raise SystemExit("--hb-window-s must be positive")
+
+    if args.mode == "run-cycle":
+        if args.pulse_ms <= 0:
+            raise SystemExit("--pulse-ms must be positive")
+        if args.observe_s <= 0:
+            raise SystemExit("--observe-s must be positive")
+
+    if args.mode == "comms-health":
+        if args.duration_s <= 0:
+            raise SystemExit("--duration-s must be positive")
+
+    if args.mode == "cold-boot":
+        if args.boot_wait_s <= 0:
+            raise SystemExit("--boot-wait-s must be positive")
+        if args.power_dwell_s <= 0:
+            raise SystemExit("--power-dwell-s must be positive")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

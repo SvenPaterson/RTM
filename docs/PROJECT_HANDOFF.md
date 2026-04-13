@@ -13,6 +13,7 @@ work in this repository.
   - TTL framing and retries: [src/shared/TTLComms.cpp](../src/shared/TTLComms.cpp)
 - Test harness
   - Unified CLI: [test/rig_control.py](../test/rig_control.py)
+  - Suite runner: [test/run_suite.py](../test/run_suite.py) — `--quick` (T2/T5/T8) or `--full` (adds T1/T4/T6)
   - Compatibility wrappers: [test/run_pulse_test.py](../test/run_pulse_test.py), [test/reset_pulse_test.py](../test/reset_pulse_test.py), [test/reset_cancel_test.py](../test/reset_cancel_test.py), [test/protocol_upload_test.py](../test/protocol_upload_test.py)
   - RUN-gate validation: `python test/rig_control.py run-gate --port COM7` (three-step automated test from CODE_REVIEW.md §7, **all 3 steps PASS** as of 2026-04-13)
   - Captured logs: [test/log/](../test/log/)

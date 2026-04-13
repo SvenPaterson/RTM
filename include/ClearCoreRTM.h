@@ -664,6 +664,7 @@ private:
                     } else if (owner_->latchedRunPending_) {
                         owner_->dbgln("[RUN] RUN held low at boot - gate still closed, waiting for release");
                     } else {
+                        owner_->runGateReleased_ = true;
                         owner_->dbgln("[RUN] Gate open, no RUN pending");
                     }
 

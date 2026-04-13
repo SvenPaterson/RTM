@@ -250,12 +250,13 @@ bool ExpansionBoard::begin() {
     ttlComms_.setRxUsbLogging(true, "CC"); // toggle by sending LOG=0 / LOG=1
     delay(200);
     dbgln("Connecting with CC..");
-    // Ask CC to suppress stale-STAT E-STOP while XPB finishes boot work
-    ttlComms_.sendCommand("QUIESCE;SECS=10");
+    // Ask CC to suppress stale-STAT E-STOP while XPB finishes boot work.
+    // CC may take up to 5s for USB serial wait + boot init, so use 15s.
+    ttlComms_.sendCommand("QUIESCE;SECS=15");
 
     // --- SPI bus & SD first (prevents other devices from holding MISO) ---
     spiQuiesceAll_();
-    bool sdOk = sdInitWithRetry_();  // prints "SD ready" or one FAIL summary
+    bool sdOk = sdInitWithRetry_();  // default: 5 tries, 40ms backoff
 
     // --- E-STOP UI mask on boot and after intentional XPB reset ---
     if ((int32_t)(millis() - estopUiMaskUntilMs_) >= 0) {
@@ -512,6 +513,24 @@ void ExpansionBoard::tick() {
         snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d;TEMP=%d", 
                  hbSeq_++, out, tempC);
         ttlComms_.sendMessage(line, MessageType::INFO);
+    }
+
+    // --- Non-blocking SD recovery (runs only when boot SD init failed) ---
+    if (!successfulProtoLoadFromSD_ && stepCount_ == 0 && sdRecoveryTmr_ >= 2000) {
+        sdRecoveryTmr_ = 0;
+        dbgln("[SD] Recovery attempt...");
+        spiQuiesceAll_();
+        if (SD.begin(SD_CS_)) {
+            dbgln("[SD] Recovery: card init OK");
+            if (loadProtocolFromSD_("/protocol.csv")) {
+                successfulProtoLoadFromSD_ = true;
+                protoState_ = ProtoTxState::WaitingReq;
+                ccProtoReq_ = false;  // allow next REQ:PROTO to trigger upload
+                dbgln("[SD] Recovery: protocol loaded");
+            } else {
+                dbgln("[SD] Recovery: CSV parse failed");
+            }
+        }
     }
 
     // --- Protocol timeouts ---
@@ -1079,25 +1098,10 @@ void ExpansionBoard::logProtocol_() const {
 
 bool ExpansionBoard::uploadProtocolToCC_() {
     if (!stepCount_) {
-        dbgln("[PROTO] No protocol cached; reinitializing SD and reloading");
-        if (!sdInitWithRetry_(3, 50)) {
-            dbgln("[PROTO] SD reinit failed");
-            protoState_ = ProtoTxState::SDFail;
-            successfulProtoLoadFromSD_ = false;
-            return false;
-        }
-
-        if (loadProtocolFromSD_("/protocol.csv")) {
-            successfulProtoLoadFromSD_ = true;
-            protoState_ = ProtoTxState::WaitingReq;
-            dbgln("[PROTO] Reload from SD succeeded");
-            logProtocol_();
-        } else {
-            dbgln("[PROTO] Reload from SD failed");
-            protoState_ = ProtoTxState::Failed;
-            successfulProtoLoadFromSD_ = false;
-            return false;
-        }
+        // No protocol in RAM.  Don't block here — tick() handles
+        // periodic SD recovery so the next REQ:PROTO will succeed.
+        dbgln("[PROTO] No protocol cached — waiting for SD recovery");
+        return false;
     }
     
     dbgln("[PROTO] Starting upload to CC...");
@@ -1262,9 +1266,14 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
 
         if (owner_ && !owner_->ccProtoReq_) {
             owner_->ccProtoReq_ = true;
-            owner_->uploadProtocolToCC_();
-            owner_->bootPhase_ = BootPhase::TxInProgress;
-            owner_->protoSince_ = 0;
+            if (!owner_->uploadProtocolToCC_()) {
+                // Upload failed (SD reinit or CSV parse failure).
+                // Reset gate so the next REQ:PROTO triggers a retry.
+                owner_->ccProtoReq_ = false;
+            } else {
+                owner_->bootPhase_ = BootPhase::TxInProgress;
+                owner_->protoSince_ = 0;
+            }
         }
         return;
     }
@@ -1401,9 +1410,15 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                     // 3) Mark intentional XPB reset, give SD a moment
                     bool fOK = writeResetFlagTU();
                     owner_->dbgln(fOK ? "[RESET] flag write OK" : "[RESET] flag write FAIL");
-                    delay(12);
+                    delay(50);  // 50ms settle — SD internal controller needs time after writes
 
-                    // 4) Notify CC, then reset us (notice; no ACK expected)
+                    // 4) Show reboot splash, notify CC, then reset
+                    owner_->lcd_.clearScreen();
+                    owner_->lcd_.setLineCenter(1, "SYSTEM");
+                    owner_->lcd_.setLineCenter(2, "REBOOTING...");
+                    owner_->lcd_.flush();
+                    delay(250);
+                    
                     sendMessage("NOTICE;XPB_RESET=NOW", MessageType::NORMAL);
                     delay(5);
                     // NOTE: do NOT clearResumeSlots_() here — the resume

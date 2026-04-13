@@ -301,6 +301,7 @@ private:
     const char* statusStringForUi_();
 
     ProtoTxState protoState_ = ProtoTxState::Idle;
+    elapsedMillis sdRecoveryTmr_{0};   // non-blocking SD retry cadence
     elapsedMillis protoSince_{0};      
     uint16_t     lastProtoRef_ = 0;
     uint8_t      protoStepSent_ = 0;
