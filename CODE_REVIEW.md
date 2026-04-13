@@ -1,33 +1,39 @@
 # Boot-Up Serial Review Findings
 
-## 0. Session checkpoint (2026-04-10)
+## 0. Session checkpoint (2026-04-13)
 ### Current status
-- **RUN-gate validation: ALL THREE STEPS PASS.**  Automated `run-gate` test executed on hardware with all firmware fixes applied.【F:test/log/20260410-164028_run_gate.log†L1-L390】
-- Six firmware bugs identified and fixed across ClearCore and Expansion Board:
+- **RUN-gate validation: ALL THREE STEPS PASS.**  Validated on hardware after reset-pulse + run-gate sequence (stale-resume regression confirmed fixed).【F:test/log/20260413-100750_run_gate.log†L1-L280】
+- Eight firmware bugs identified and fixed across ClearCore and Expansion Board:
   1. **PHASH overflow** (CC + XPB): `toInt()` returns signed long, clamping uint32 hash values >2^31 to `INT_MAX` (2147483647). Fixed with `strtoul()`.【F:include/ClearCoreRTM.h†L489】【F:src/exp-board/ExpansionBoard.cpp†L1274】
   2. **SW_AGE overflow** (XPB): Same `toInt()` truncation pattern. Fixed with `strtoul()`.【F:src/exp-board/ExpansionBoard.cpp†L1453】
   3. **Resume slot wipe** (XPB): `RESET=EXEC` handler called `saveResumeTU()` then immediately `clearResumeSlots_()`, deleting the just-saved resume record. Removed the spurious clear.【F:src/exp-board/ExpansionBoard.cpp†L1385】
   4. **CC heartbeat skip on auto-start**: Proto completion handler went `Idle→Running` in one callback, bypassing `handleIdle(justEntered=true)` which enables `heartbeatSystemEnabled_`. Added explicit `heartbeatSystemEnabled_ = true` in proto completion.【F:include/ClearCoreRTM.h†L641-L656】
   5. **RUN gate bypass**: Proto completion forced `runGateReleased_ = true` and called `promoteRun_()` unconditionally, ignoring the boot gate. Fixed to only auto-start if gate was already open.【F:include/ClearCoreRTM.h†L641-L656】
   6. **Resume ACK REF mismatch** (CC): Resume ACK responses used CC's own REF counter instead of echoing the sender's REF, causing transport-layer ACK mismatch and retry storms (`ERR_WRONG_STAT` on retries). Fixed all 5 ACK;RESUME sends to echo the incoming REF via `MessageType::NORMAL`.【F:include/ClearCoreRTM.h†L361-L440】
+  7. **Stale resume after COMPLETED** (XPB): Resume slots were never cleared when protocol completed normally. On next boot with RUN held low, CC found stale AUTOSTART=1 data and auto-started from the old resume point, bypassing the RUN gate. Fixed: XPB now calls `clearResumeTU()` and resets `everRan_` when CC heartbeat reports `STATE=COMPLETED`.【F:src/exp-board/ExpansionBoard.cpp†L1429-L1437】
+  8. **RESET=EXEC saves stale resume** (XPB): RESET=EXEC unconditionally saved resume data even when protocol was already COMPLETED or had never run, leaving stale step/loop values on SD for the next boot. Fixed: save is now gated on `everRan_`; when skipped, any stale resume files are also cleared via `clearResumeTU()`.【F:src/exp-board/ExpansionBoard.cpp†L1356-L1378】
 - Test script fix: Step 3 evaluation now only fails on `resume_err` if `resume_ok` was NOT also present, tolerating stale retry errors from transport mismatch.【F:test/rig_control.py†L871】
-- Primary unresolved risks remain transport reliability (`TTL bad checksum` / duplicate retries), LCD operator visibility for RUN/RESET latch state, and resume snapshot robustness.
+- Snapshot hardening implemented: `saveResumeTU` and `writeResetFlagTU` have retry loops; `RESET=EXEC` handler aborts on save failure; periodic save logs failures.
+- Primary unresolved risks remain transport reliability (`TTL bad checksum` / duplicate retries) and LCD operator visibility for RUN/RESET latch state.
 
-### Validated test results (2026-04-10)
+### Validated test results (2026-04-13)
 | Step | Description | Result | Evidence |
 |------|-------------|--------|----------|
-| 1 | RUN held low across cold boot, CC stays IDLE | **PASS** | 24 IDLE heartbeats, no RUNNING before RUN released, no ERR_WRONG_STAT |
-| 2 | Gate open, IDLE→RUNNING→PAUSED | **PASS** | 10 RUNNING HBs after RUN=1, 10 PAUSED HBs after RUN=0 |
-| 3 | RESUME AUTOSTART=1 with RUN held low | **PASS** | `CMD;RESUME=AUTO;STEP=2;LOOP=1;PHASH=3889579914;AUTOSTART=1;REF=7` sent, `ACK;RESUME=OK;REF=7` received (single clean ACK, no retries), system entered RUNNING at step 2 loop 1/2 |
+| 1 | RUN held low across cold boot, CC stays IDLE | **PASS** | 23 IDLE HBs, no RUNNING before RUN released, no `CMD;RESUME=AUTO` |
+| 2 | Gate open, IDLE→RUNNING→PAUSED | **PASS** | 10 RUNNING HBs after RUN=1, 9 PAUSED HBs after RUN=0 |
+| 3 | RESUME AUTOSTART=1 with RUN held low | **PASS** | Reset during RUNNING saved snapshot; cold boot with RUN held → `CMD;RESUME=AUTO;STEP=2;LOOP=1;AUTOSTART=1` → `ACK;RESUME=OK;REF=7` → RUNNING at step 2 loop 1/2 |
+
+Preceded by reset-pulse test confirming RESET=EXEC no longer saves stale resume when protocol is completed.【F:test/log/20260413-100706_reset_pulse.log†L1-L60】
 
 ### Next actions
-1. Implement LCD status surfacing for latched RUN/RESET while non-idle, then verify behavior during user-requested reset flow.
+1. Implement LCD status surfacing for latched RUN/RESET while non-idle.
 2. Add temporary TTL transport instrumentation around send/ACK paths to classify duplicate `PR_END`/`QUIESCE` events as retry-vs-logic.
-3. Add diagnostics/retry handling for resume snapshot writes and confirm reset flow blocks on a confirmed checkpoint.
-4. Audit remaining `sendMessage(..., MessageType::IMPORTANT)` ACK responses across the codebase for similar REF-echo issues.
+
+### Completed audits
+- **ACK REF-echo audit (2026-04-10):** All ACK responses in both CC (`ClearCoreRTM.h`) and XPB (`ExpansionBoard.cpp`) now correctly echo the sender's REF and use non-retry message types (`INFO` or `NORMAL`). The 5 resume ACKs fixed earlier in this session were the only instances of the bug. Protocol upload ACKs (`PR_BEG`, `PR_DAT`, `PR_END`), QUIESCE ACKs, and `REQ:PROTO` ACKs were already correct. The repeated QUIESCE bursts seen in test logs are genuine transport retries from TTL checksum drops, not REF-echo mismatches.
 
 ### Resume point for next session
-- All §7 RUN-gate bugs are resolved and validated.  Focus shifts to transport reliability, LCD UX, and resume snapshot hardening.
+- All §7 RUN-gate bugs are resolved and validated (8 bugs total).  Focus shifts to LCD UX and transport reliability.
 
 ## 0.1 To-do tracker and validation attempt (2026-03-19)
 ### What was attempted in this session
@@ -60,9 +66,8 @@
    - Code review note: retries remain fixed-time resend logic; no explicit back-off strategy or richer duplicate diagnostics were identified in `TTLComms::checkRetries()`.【F:src/shared/TTLComms.cpp†L122-L134】
 
 4. Resume snapshot hardening (retry + stronger diagnostics)
-   - Status: Open
-   - Current evidence: no new `snapshot SAVE FAILED` string found in the current 21-log sample, but the requested retry/diagnostic hardening has not been explicitly implemented in this review pass.
-   - Code review note: alternating A/B slot persistence exists, but no explicit write-retry loop was identified in `saveResumeTU()`.【F:src/exp-board/ExpansionBoard.cpp†L136-L147】
+   - Status: **Complete** — validated 2026-04-13
+   - Retry logic added to `saveResumeTU(maxRetries)` and `writeResetFlagTU(maxRetries)`. RESET=EXEC aborts if snapshot save fails; skips save entirely when `everRan_` is false (protocol completed or never ran) and clears stale files. Periodic save logs failures. Resume slots cleared on protocol COMPLETED state.【F:src/exp-board/ExpansionBoard.cpp†L136-L147】【F:src/exp-board/ExpansionBoard.cpp†L1356-L1378】【F:src/exp-board/ExpansionBoard.cpp†L1429-L1437】
 
 ### Additional open item carried from findings
 1. Protocol summary formatting (`PHASH` line glue)
@@ -129,4 +134,4 @@ To iron out the boot-and-reset issues captured so far:
 * Surface RUN/RESET latch state on the LCD whenever the controller is not idle, and make the switch-age timer freeze explicitly signal "RUN held" so operators know why the system started without interaction.【F:src/exp-board/ExpansionBoard.cpp†L783-L829】
 * Instrument the TTL transport for checksum failures and ensure duplicate `PR_END` / `QUIESCE` frames are genuine retries; add back-off so we do not spam commands when the peer already acknowledged them.【F:src/shared/TTLComms.cpp†L258-L353】
 * Harden resume persistence: wrap the snapshot writer with retries and surface failures prominently, then verify the reset flow waits for a confirmed snapshot before forcing the XPB reset.
-* Audit remaining `sendMessage(..., MessageType::IMPORTANT)` ACK paths across the codebase for similar REF-echo mismatches.
+* ~~Audit remaining `sendMessage(..., MessageType::IMPORTANT)` ACK paths for REF-echo mismatches~~ — **Done (2026-04-10).** All clean; only the 5 resume ACKs had the bug.

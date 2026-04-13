@@ -14,19 +14,20 @@ work in this repository.
 - Test harness
   - Unified CLI: [test/rig_control.py](../test/rig_control.py)
   - Compatibility wrappers: [test/run_pulse_test.py](../test/run_pulse_test.py), [test/reset_pulse_test.py](../test/reset_pulse_test.py), [test/reset_cancel_test.py](../test/reset_cancel_test.py), [test/protocol_upload_test.py](../test/protocol_upload_test.py)
-  - RUN-gate validation: `python test/rig_control.py run-gate --port COM7` (three-step automated test from CODE_REVIEW.md §7, **all 3 steps PASS** as of 2026-04-10)
+  - RUN-gate validation: `python test/rig_control.py run-gate --port COM7` (three-step automated test from CODE_REVIEW.md §7, **all 3 steps PASS** as of 2026-04-13)
   - Captured logs: [test/log/](../test/log/)
 - Debug tooling
   - Live stream capture utility: [tools/ttl_stream_capture.py](../tools/ttl_stream_capture.py)
   - Tool dependencies: [tools/requirements.txt](../tools/requirements.txt)
 
 ## Current state checkpoint
-- **RUN-gate validation: PASS (all 3 steps)** — validated 2026-04-10 with firmware fixes applied to both boards.
-- Six firmware bugs fixed (PHASH/SW_AGE overflow, resume slot wipe, heartbeat skip, RUN gate bypass, resume ACK REF mismatch). See CODE_REVIEW.md §0 and §7 for details.
+- **RUN-gate validation: PASS (all 3 steps)** — validated 2026-04-13 with all firmware fixes, including stale-resume hardening (bugs #7 and #8).
+- Eight firmware bugs fixed (PHASH/SW_AGE overflow, resume slot wipe, heartbeat skip, RUN gate bypass, resume ACK REF mismatch, stale resume after COMPLETED, RESET=EXEC stale save). See CODE_REVIEW.md §0 for details.
+- Resume snapshot hardening complete: retry loops, abort-on-failure, COMPLETED clear, and `everRan_` guard on RESET=EXEC.
 - Investigation status and active findings are tracked in
   [CODE_REVIEW.md](../CODE_REVIEW.md).
 - The latest resume checkpoint is section 0 in [CODE_REVIEW.md](../CODE_REVIEW.md).
-- Remaining open items: LCD latch state UX, TTL transport instrumentation, resume snapshot hardening.
+- Remaining open items: LCD latch state UX, TTL transport instrumentation.
 
 ## Build and upload commands
 Run from repository root. COM ports: COM8 = ClearCore, COM9 = Expansion Board (Nano Every), COM7 = Sniffer (Teensy).

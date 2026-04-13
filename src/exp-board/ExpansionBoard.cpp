@@ -133,7 +133,8 @@ namespace {  // anonymous namespace: TU-private helpers for Resume logic
      * @return true on success.
      * @details Increments a sequence number and chooses the older slot to overwrite.
      */
-    bool saveResumeTU(uint32_t phash, uint16_t step, uint16_t loopCur, uint16_t loopTot) {
+    bool saveResumeTU(uint32_t phash, uint16_t step, uint16_t loopCur, uint16_t loopTot,
+                       uint8_t maxRetries = 1) {
         ResumeRec a{}, b{};
         bool ha = readSlot(kSlotA, a), hb = readSlot(kSlotB, b);
 
@@ -145,7 +146,12 @@ namespace {  // anonymous namespace: TU-private helpers for Resume logic
         const bool writeB = (ha && (!hb || a.seq <= b.seq));
         const char *finalPath = writeB ? kSlotB : kSlotA;
         const char *tmpPath   = writeB ? kTmpB  : kTmpA;
-        return writeSlot(finalPath, tmpPath, rec);
+
+        for (uint8_t attempt = 0; attempt <= maxRetries; ++attempt) {
+            if (writeSlot(finalPath, tmpPath, rec)) return true;
+            if (attempt < maxRetries) delay(10);
+        }
+        return false;
     }
 
     /**
@@ -192,15 +198,18 @@ namespace {  // anonymous namespace: TU-private helpers for Resume logic
      * @return true on success, false if SD write failed.
      * @details The content is irrelevant; existence is the signal.
      */
-    bool writeResetFlagTU() {
-        File f = SD.open(kXpbResetFlag, FILE_WRITE);
-        if (!f) return false;
-        uint32_t tag = 0x21505842u; // "!XPB"
-        bool ok = (f.write(reinterpret_cast<const uint8_t*>(&tag), sizeof(tag)) == sizeof(tag));
-        f.flush();
-        f.close();
-        delay(12);  // allow the card to commit the sector after soft reset
-        return ok;
+    bool writeResetFlagTU(uint8_t maxRetries = 2) {
+        for (uint8_t attempt = 0; attempt <= maxRetries; ++attempt) {
+            File f = SD.open(kXpbResetFlag, FILE_WRITE);
+            if (!f) { if (attempt < maxRetries) delay(10); continue; }
+            uint32_t tag = 0x21505842u; // "!XPB"
+            bool ok = (f.write(reinterpret_cast<const uint8_t*>(&tag), sizeof(tag)) == sizeof(tag));
+            f.flush();
+            f.close();
+            if (ok) { delay(12); return true; }
+            if (attempt < maxRetries) delay(10);
+        }
+        return false;
     }
 
 
@@ -1345,13 +1354,28 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                     owner_->resetUiActive_ = false;
                 }
                 else if (reset == "EXEC") {
-                    // 1) Persist resume snapshot
+                    // 1) Persist resume snapshot only if protocol was actively
+                    //    running (everRan_).  After COMPLETED, everRan_ is
+                    //    false and there is nothing useful to resume.
                     const uint16_t stepSnap    = owner_->ccStep_;
                     const uint16_t loopCurSnap = (uint16_t)owner_->ccLoopCur_;
                     const uint16_t loopTotSnap = (uint16_t)owner_->ccLoopTot_;
                     const uint32_t ph          = owner_->progHash_;
-                    bool ok = saveResumeTU(ph, stepSnap, loopCurSnap, loopTotSnap);
-                    owner_->dbgln(ok ? "[RESUME] snapshot saved" : "[RESUME] snapshot SAVE FAILED");
+
+                    if (owner_->everRan_) {
+                        bool ok = saveResumeTU(ph, stepSnap, loopCurSnap, loopTotSnap, 2);
+                        owner_->dbgln(ok ? "[RESUME] snapshot saved" : "[RESUME] snapshot SAVE FAILED after 3 attempts");
+                        if (!ok) {
+                            // Abort reset: cannot safely reset without a confirmed checkpoint
+                            owner_->dbgln("[RESET] ABORTED — no valid resume snapshot");
+                            owner_->resetUiActive_ = false;
+                            return;
+                        }
+                    } else {
+                        owner_->dbgln("[RESET] skipping resume save (protocol not active)");
+                        // Also clear any stale resume files from prior runs
+                        clearResumeTU();
+                    }
 
                     // 2) Ask CC to mask XPB-stale for ~10s (bounded to 3..15s on CC)
                     {
@@ -1411,6 +1435,14 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
         // Parse HB
         String sSTATE = kvGet(data, "STATE=");
         if (sSTATE == "RUNNING") owner_->everRan_ = true;
+        if (sSTATE == "COMPLETED" && owner_->everRan_) {
+            // Protocol finished normally — clear stale resume data so the
+            // next boot won't auto-resume a completed run.
+            clearResumeTU();
+            owner_->haveStoredResume_ = false;
+            owner_->everRan_          = false;
+            owner_->dbgln("[RESUME] cleared (protocol COMPLETED)");
+        }
         if (sSTATE.length()) sSTATE.toCharArray(owner_->ccState_, sizeof(owner_->ccState_));
 
         // E_CODE-based estop
@@ -1487,7 +1519,9 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
         if (owner_->everRan_ && (stepNow != lastStep || loopNow != lastLoop)) {
             lastStep = stepNow; lastLoop = loopNow;
             const uint32_t ph = owner_->storedPhash_ ? owner_->storedPhash_ : owner_->progHash_;
-            (void)saveResumeTU(ph, stepNow, loopNow, (uint16_t)owner_->ccLoopTot_);
+            if (!saveResumeTU(ph, stepNow, loopNow, (uint16_t)owner_->ccLoopTot_)) {
+                owner_->dbgln("[RESUME] periodic save FAILED");
+            }
         }
 
         return;
