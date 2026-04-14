@@ -87,6 +87,26 @@ void ClearCoreRTM::tick() {
     ttlComms_.checkForMessages();
     ttlComms_.checkRetries();
 
+    // --- HLFB speed feedback (2 PPR edge timing) ---
+    {
+        const uint32_t nowUs = Microseconds();
+        if (motor.HlfbHasRisen()) {
+            if (hlfbFirstEdge_) {
+                hlfbFirstEdge_ = false;
+            } else {
+                const uint32_t periodUs = nowUs - hlfbLastEdgeUs_;
+                if (periodUs > 0) {
+                    int16_t rpm = (int16_t)(60000000UL / ((uint32_t)periodUs * kHlfbPPR));
+                    measuredRpm_ = (currentSpeed_ < 0) ? -rpm : rpm;
+                }
+            }
+            hlfbLastEdgeUs_ = nowUs;
+        } else if ((nowUs - hlfbLastEdgeUs_) > kHlfbStaleUs) {
+            measuredRpm_   = 0;
+            hlfbFirstEdge_ = true;
+        }
+    }
+
     // --- Comms health & stale guard ---
     const bool maskActiveNow = (xpbMaskActive_ && Milliseconds() < xpbMaskUntilMs_);
     if (commsHealthy_ && 
@@ -208,7 +228,7 @@ void ClearCoreRTM::tick() {
             break;
     }
 
-    if (heartbeatTmr_ >= 1000 && heartbeatSystemEnabled_) {
+    if (heartbeatTmr_ >= 250 && heartbeatSystemEnabled_) {
         heartbeatTmr_ = 0;
         const bool maskActiveNowHb = (xpbMaskActive_ && Milliseconds() < xpbMaskUntilMs_);
         const char *stateStr = maskActiveNowHb ? "WAITING_XPB" : stateToString(state_);
@@ -235,7 +255,7 @@ void ClearCoreRTM::tick() {
 
         char msg[96];
         snprintf(msg, sizeof(msg),
-                "HB;SEQ=%u;STATE=%s;STEP=%u;LOOP=%lu/%lu;SW_AGE=%lu;E=%d;E_CODE=%02X",
+                "HB;SEQ=%u;STATE=%s;STEP=%u;LOOP=%lu/%lu;SW_AGE=%lu;E=%d;E_CODE=%02X;RPM=%d",
                 hbSeq_++,
                 stateStr,
                 (unsigned)(currentStep_ + 1),
@@ -243,7 +263,8 @@ void ClearCoreRTM::tick() {
                 (unsigned long)totalLoops_,
                 (unsigned long)(Milliseconds() - swLastUpdateMs_),
                 (estopReason_ != 0) ? 1 : 0, // probably not needed
-                (unsigned)estopReason_);
+                (unsigned)estopReason_,
+                (int)measuredRpm_);
         ttlComms_.sendMessage(msg, MessageType::INFO);
         ttlComms_.checkForMessages();
 

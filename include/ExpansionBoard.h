@@ -109,6 +109,7 @@ private:
     uint8_t  ccStep_ = 0;
     uint32_t ccLoopCur_ = 0, ccLoopTot_ = 0;
     uint32_t ccSwAgeMs_ = 0;
+    int16_t  ccRpm_ = 0;
     bool     ccEstop_ = false; // probably not needed
     uint8_t  ccEstopCode_ = 0;   // raw E_CODE bitmask from CC
     uint16_t ccHbSeqPrev_ = 0, ccHbSeq_ = 0;

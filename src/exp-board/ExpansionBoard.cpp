@@ -834,8 +834,9 @@ void ExpansionBoard::renderNormal_() {
     } else {
         // RTM view
         int sp  = (int)lround(heater_.setpoint());
-        int out = heater_.lastOut();
-        snprintf(buff, sizeof(buff), "Heat:%3d\xDF""C OUT:%03d", sp, out);
+        // int out = heater_.lastOut();
+        // snprintf(buff, sizeof(buff), "Heat:%3d\xDF""C OUT:%03d", sp, out);
+        snprintf(buff, sizeof(buff), "Heat:%3d\xDF""C RPM:%4d", sp, (int)ccRpm_);
         lcd_.setLineLeft(2, buff);
 
         uint16_t sealInt = isnan(latestSealC_) ? 0U : (uint16_t)(latestSealC_ + 0.5f);
@@ -1509,6 +1510,9 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
 
         String sAGE   = kvGet(data, "SW_AGE=");
         if (sAGE.length()) owner_->ccSwAgeMs_ = strtoul(sAGE.c_str(), nullptr, 10);
+
+        String sRPM   = kvGet(data, "RPM=");
+        if (sRPM.length()) owner_->ccRpm_ = (int16_t)sRPM.toInt();
 
         const bool stepChanged = (owner_->ccStep_ != prevStep) || (owner_->ccLoopCur_ != prevLoop);
         owner_->refreshStepCountdown_(stepChanged);
