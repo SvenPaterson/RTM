@@ -26,8 +26,7 @@
 Preceded by reset-pulse test confirming RESET=EXEC no longer saves stale resume when protocol is completed.【F:test/log/20260413-100706_reset_pulse.log†L1-L60】
 
 ### Next actions
-1. Implement LCD status surfacing for latched RUN/RESET while non-idle.
-2. Add temporary TTL transport instrumentation around send/ACK paths to classify duplicate `PR_END`/`QUIESCE` events as retry-vs-logic.
+1. Add temporary TTL transport instrumentation around send/ACK paths to classify duplicate `PR_END`/`QUIESCE` events as retry-vs-logic.
 
 ### Completed audits
 - **ACK REF-echo audit (2026-04-10):** All ACK responses in both CC (`ClearCoreRTM.h`) and XPB (`ExpansionBoard.cpp`) now correctly echo the sender's REF and use non-retry message types (`INFO` or `NORMAL`). The 5 resume ACKs fixed earlier in this session were the only instances of the bug. Protocol upload ACKs (`PR_BEG`, `PR_DAT`, `PR_END`), QUIESCE ACKs, and `REQ:PROTO` ACKs were already correct. The repeated QUIESCE bursts seen in test logs are genuine transport retries from TTL checksum drops, not REF-echo mismatches.
@@ -131,7 +130,6 @@ To iron out the boot-and-reset issues captured so far:
 | 6 | Resume ACK REF mismatch | `ClearCoreRTM.h` | ACK responses used CC's own REF counter instead of echoing sender's | Echo incoming REF in all 5 `ACK;RESUME=` sends via `MessageType::NORMAL` |
 
 ### Remaining open items
-* Surface RUN/RESET latch state on the LCD whenever the controller is not idle, and make the switch-age timer freeze explicitly signal "RUN held" so operators know why the system started without interaction.【F:src/exp-board/ExpansionBoard.cpp†L783-L829】
 * Instrument the TTL transport for checksum failures and ensure duplicate `PR_END` / `QUIESCE` frames are genuine retries; add back-off so we do not spam commands when the peer already acknowledged them.【F:src/shared/TTLComms.cpp†L258-L353】
 * Harden resume persistence: wrap the snapshot writer with retries and surface failures prominently, then verify the reset flow waits for a confirmed snapshot before forcing the XPB reset.
 * ~~Audit remaining `sendMessage(..., MessageType::IMPORTANT)` ACK paths for REF-echo mismatches~~ — **Done (2026-04-10).** All clean; only the 5 resume ACKs had the bug.

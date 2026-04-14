@@ -401,10 +401,20 @@ private:
                         owner_->currentStep_ = (uint16_t)(resumeStep - 1);  // Convert to 0-based index
                         owner_->loopCount_ = owner_->totalLoops_ - (uint32_t)resumeLoop + 1;
 
-                        // Allow future RUN edges now that XPB has explicitly coordinated resume
-                        owner_->runGateReleased_ = true;   // XPB explicitly allowed coordinated start
-
                         // --- Gating Rules ---
+                        // Respect the boot gate (CODE_REVIEW.md §7): if the
+                        // operator held RUN low across power-on, don't
+                        // force-release the gate.  Load the position and
+                        // latch the run so it starts once the operator
+                        // intentionally toggles the switch.
+                        if (!owner_->runGateReleased_ && autoStart == 1 && runIsEngaged) {
+                            owner_->latchedRunPending_ = true;
+                            owner_->dbgln("[RESUME] Gate closed — position loaded, waiting for RUN toggle");
+                            snprintf(ackBuf, sizeof(ackBuf), "ACK;RESUME=OK;REF=%u", (unsigned)refVal);
+                            sendMessage(ackBuf, MessageType::NORMAL);
+                            return;
+                        }
+
                         // if AUTOSTART==0 or RUN is not LOW, don't preheat nor start.
                         if (autoStart != 1 || !runIsEngaged) {
                             owner_->autoStartAfterPreheat_ = false;

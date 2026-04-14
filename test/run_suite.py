@@ -6,10 +6,14 @@ Drives the individual rig_control.py verbs in sequence, collects verdicts,
 and prints a summary table.  Supports --quick (fast subset) and --full
 (all automated tests including cold-boot).
 
+Auto-detects ClearCore, Expansion Board, and Sniffer by USB VID:PID.
+Use --port to override the ClearCore port if needed.
+
 Usage:
-    python test/run_suite.py --port COM7
-    python test/run_suite.py --port COM7 --quick
-    python test/run_suite.py --port COM7 --full
+    python test/run_suite.py
+    python test/run_suite.py --quick
+    python test/run_suite.py --full
+    python test/run_suite.py --port COM8 --full
 """
 
 import argparse
@@ -17,6 +21,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
+
+import serial.tools.list_ports
 
 # ---------------------------------------------------------------------------
 # Test definitions — (id, name, verb + extra args)
@@ -48,6 +55,47 @@ RIG_CONTROL = str(Path(__file__).resolve().parent / "rig_control.py")
 POWER_OFF_DWELL_S = 3        # seconds to hold power off
 BOOT_SETTLE_S     = 25       # seconds for QUIESCE + protocol load
 
+# ---------------------------------------------------------------------------
+# USB VID:PID fingerprints for auto-detection
+# ---------------------------------------------------------------------------
+BOARD_FINGERPRINTS = {
+    "clearcore": (0x2890, 0x8022),   # Teknic ClearCore
+    "xpb":       (0x2341, 0x0058),   # Arduino Nano Every (Expansion Board)
+    "sniffer":   (0x16C0, 0x0483),   # Teensy 4.0 (TTL Sniffer)
+}
+
+
+def detect_ports() -> Optional[dict[str, str]]:
+    """Auto-detect COM ports for all three boards by USB VID:PID.
+
+    Returns a dict {"clearcore": "COMx", "xpb": "COMy", "sniffer": "COMz"}
+    or None if any board is missing.
+    """
+    ports = serial.tools.list_ports.comports()
+    vid_pid_map: dict[tuple[int, int], str] = {}
+    for p in ports:
+        if p.vid is not None and p.pid is not None:
+            vid_pid_map[(p.vid, p.pid)] = p.device
+
+    found: dict[str, str] = {}
+    missing: list[str] = []
+    for name, (vid, pid) in BOARD_FINGERPRINTS.items():
+        port = vid_pid_map.get((vid, pid))
+        if port:
+            found[name] = port
+        else:
+            missing.append(name)
+
+    if missing:
+        print("  ✗ Board detection FAILED — missing boards:")
+        for name in missing:
+            vid, pid = BOARD_FINGERPRINTS[name]
+            print(f"      {name}: VID:PID={vid:#06x}:{pid:#06x} not found")
+        print(f"  Detected ports: {found}" if found else "  No boards detected.")
+        return None
+
+    return found
+
 
 def establish_known_state(common_args: list[str]) -> bool:
     """Power-cycle the rig to start from a clean, known state.
@@ -70,13 +118,24 @@ def establish_known_state(common_args: list[str]) -> bool:
 
     # Power ON and let the system boot fully
     cmd_on = [sys.executable, RIG_CONTROL] + common_args + [
-        "--drop-first-line",
         "power", "--state", "on", "--capture-s", str(BOOT_SETTLE_S),
     ]
     print(f"\n  CMD: {' '.join(cmd_on)}")
-    rc = subprocess.run(cmd_on, timeout=BOOT_SETTLE_S + 30).returncode
-    if rc != 0:
-        print(f"  ✗ Power-on failed (exit {rc})")
+    result = subprocess.run(cmd_on, timeout=BOOT_SETTLE_S + 30,
+                            capture_output=True, text=True)
+    # Echo captured output so operator can see it
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.returncode != 0:
+        print(f"  ✗ Power-on failed (exit {result.returncode})")
+        return False
+
+    # Verify protocol loaded — abort suite immediately if SD/protocol missing
+    boot_output = result.stdout or ""
+    if "Protocol Missing" in boot_output or "PROTO_RX=OK" not in boot_output:
+        print("\n  ✗ PROTOCOL NOT LOADED — SD card missing or protocol file not found.")
+        print("    Insert SD card with a valid protocol CSV and retry.")
+        print("    Aborting test suite.")
         return False
 
     print("\n  ✓ Rig is in known state (powered, booted, protocol loaded)")
@@ -126,7 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--port", type=str, default=None,
-        help="Sniffer serial port (passed through to rig_control).",
+        help="Sniffer serial port override (auto-detected by default).",
     )
     parser.add_argument(
         "--baud", type=int, default=None,
@@ -143,10 +202,26 @@ def main() -> int:
     if not args.quick and not args.full:
         args.quick = True
 
+    # ---- Board detection ----
+    print("=" * 60)
+    print("  BOARD DETECTION")
+    print("=" * 60)
+    boards = detect_ports()
+    if boards is None:
+        print("\n  ✗ Cannot proceed — plug in all three boards and retry.")
+        return 1
+
+    for name, port in boards.items():
+        print(f"  ✓  {name:<12s} → {port}")
+
+    # Use explicit --port if given, otherwise auto-detected sniffer (Teensy)
+    # rig_control.py sends commands via the sniffer, which relays to ClearCore
+    cmd_port = args.port if args.port else boards["sniffer"]
+    print(f"\n  Using sniffer on {cmd_port} for test commands")
+    print("=" * 60)
+
     # Build common args forwarded to every rig_control invocation.
-    common: list[str] = []
-    if args.port:
-        common += ["--port", args.port]
+    common: list[str] = ["--port", cmd_port, "--drop-first-line"]
     if args.baud:
         common += ["--baud", str(args.baud)]
 

@@ -160,7 +160,7 @@ private:
      * @details Re-asserts CS-high and SPI.begin() on each try to recover from soft-resets.
      *          Uses dbg* for status; never blocks for long.
      */
-    bool sdInitWithRetry_(uint8_t tries = 5, uint16_t backoffMs = 40);
+    bool sdInitWithRetry_(uint8_t tries = 10, uint16_t backoffMs = 100);
 
     /**
      * @brief Load protocol CSV from SD and populate steps_.
@@ -197,7 +197,10 @@ private:
     uint16_t storedStep_{0}, storedLoopCur_{0}, storedLoopTot_{0};
 
     // ---------- Sensors ----------
-    Adafruit_MAX31855 tc1_{TC1_CS_}, tc2_{TC2_CS_};
+    Adafruit_MAX31855 tc1_{TC1_CS_};
+#ifdef USE_TC2
+    Adafruit_MAX31855 tc2_{TC2_CS_};
+#endif
     uint16_t      kDataIntervalMs_ = 100;
     elapsedMillis dataTmr_;
     double        latestSealC_ = NAN;
@@ -276,7 +279,7 @@ private:
     Step     steps_[kMaxProtocolSteps_];
     uint8_t  stepCount_   {0};
     uint32_t loopCount_   {1};
-    String   protocolName_{"Test Code"};
+    char     protocolName_[21] = "Test Code";
     uint32_t progHash_    {0};
     uint32_t totalLoops_  {1};
     bool     targetMet_   {false};

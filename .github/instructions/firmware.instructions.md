@@ -20,6 +20,11 @@ Applies to embedded firmware under src and include.
 - Update [README.md](../../README.md) and [docs/PROJECT_HANDOFF.md](../../docs/PROJECT_HANDOFF.md) when architecture, workflows, or operator procedures change.
 - Update [CODE_REVIEW.md](../../CODE_REVIEW.md) when new findings, mitigations, or validation evidence are produced.
 
+## Upload / flash policy
+- **NEVER** attempt to upload or flash firmware to any board (ClearCore, Expansion Board, Sniffer) from the terminal or via PlatformIO CLI (`pio run --target upload`). Always let the user perform uploads manually through the PlatformIO IDE task runner.
+- **NEVER** open a serial monitor or DeviceMonitor on any COM port. Holding a COM port can brick a Nano Every and prevent re-enumeration.
+- Build (`pio run -e <env>`) is permitted; upload and monitor are not.
+
 ## Validation expectations
 - Include concrete bench validation steps for RUN, RESET, and boot/resume interactions when relevant.
 - If tests were not run on hardware, state that clearly and identify the highest-risk unvalidated path.

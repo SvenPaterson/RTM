@@ -318,9 +318,9 @@ void ClearCoreRTM::handleBoot(bool resetActive, bool justEntered_) {
         protoRequestTmr_ = 0;
 
         if (!isProtoLoaded_) {
-            dbgln("BOOT: Requesting protocol from XPB...");
-            ttlComms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
-
+            // Don't send REQ:PROTO immediately — give XPB time to
+            // boot + init SD after a soft reset before we start asking.
+            // The 5-second timer below will fire the first request.
             protocolName_ = "Awaiting Upload";
             stepCount_ = 0;
             loopCount_ = 1;

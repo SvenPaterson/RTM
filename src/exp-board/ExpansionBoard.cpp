@@ -4,16 +4,6 @@
 
 #define XPB_INJECT_FROM_USB 0
 
-// In ExpansionBoard.h (or .cpp top) add:
-uint16_t nextRef_ = 1;
-struct Ack {
-    bool ok=false;
-    uint16_t ref=0;
-    String verb;   // "PR_BEG", "OK", "PR_END", "PROTO_RX"
-    String code;   // "OK", "BUSY", "BAD_SEQ", ...
-};
-volatile Ack lastAck_;  // updated inside TTL rx handler
-
 void xpbSoftResetNow() {
     #if defined(__AVR_ATmega4809__) || defined(ARDUINO_AVR_NANO_EVERY)
     // megaAVR-0 (Nano Every): use software reset register
@@ -256,7 +246,9 @@ bool ExpansionBoard::begin() {
 
     // --- SPI bus & SD first (prevents other devices from holding MISO) ---
     spiQuiesceAll_();
-    bool sdOk = sdInitWithRetry_();  // default: 5 tries, 40ms backoff
+    dbgln("[XPB] Starting SD init (cold boot)");
+    bool sdOk = sdInitWithRetry_();  // default: 10 tries, 100ms backoff (header)
+    dbgln(sdOk ? "[XPB] SD init OK (cold boot)" : "[XPB] SD init FAIL (cold boot)");
 
     // --- E-STOP UI mask on boot and after intentional XPB reset ---
     if ((int32_t)(millis() - estopUiMaskUntilMs_) >= 0) {
@@ -518,9 +510,12 @@ void ExpansionBoard::tick() {
     // --- Non-blocking SD recovery (runs only when boot SD init failed) ---
     if (!successfulProtoLoadFromSD_ && stepCount_ == 0 && sdRecoveryTmr_ >= 2000) {
         sdRecoveryTmr_ = 0;
-        dbgln("[SD] Recovery attempt...");
+        dbgln("[SD] Recovery attempt (soft reset)...");
         spiQuiesceAll_();
-        if (SD.begin(SD_CS_)) {
+        dbgln("[XPB] Starting SD init (soft reset)");
+        bool sdOk = sdInitWithRetry_(3, 40); // much faster for soft reset recovery
+        dbgln(sdOk ? "[XPB] SD init OK (soft reset)" : "[XPB] SD init FAIL (soft reset)");
+        if (sdOk) {
             dbgln("[SD] Recovery: card init OK");
             if (loadProtocolFromSD_("/protocol.csv")) {
                 successfulProtoLoadFromSD_ = true;
@@ -651,7 +646,11 @@ void ExpansionBoard::updateData() {
     dataTmr_ = 0;
 
     latestSealC_ = readTC(tc1_, "TC1");
-    latestSumpC_ = 120; //readTC(tc2_, "TC2"); // PLACEHOLDER
+#ifdef USE_TC2
+    latestSumpC_ = readTC(tc2_, "TC2");
+#else
+    latestSumpC_ = 120;
+#endif
 }
 
 /**
@@ -677,7 +676,7 @@ void ExpansionBoard::renderUi_(UiPage page) {
                 case BootPhase::SDLoaded: {
                     // Protocol name on line 1, short hint on 2
                     char nameBuf[LCDDriver::kNumCols+1];
-                    strncpy(nameBuf, protocolName_.c_str(), LCDDriver::kNumCols);
+                    strncpy(nameBuf, protocolName_, LCDDriver::kNumCols);
                     nameBuf[LCDDriver::kNumCols] = '\0';
                     lcd_.setLineLR(1, "PROTOCOL:", nameBuf);
                     lcd_.setLineCenter(2, "Waiting for CC to");
@@ -719,7 +718,8 @@ void ExpansionBoard::renderUi_(UiPage page) {
             break;
 
         case UiPage::ProtoMissingSD:
-            lcd_.setLineCenter(2, "Protocol Missing on SD!");
+            lcd_.setLineCenter(1, "Protocol Missing");
+            lcd_.setLineCenter(2, "on SD Card!");
             break;
 
         case UiPage::ProtoTxFail:
@@ -799,7 +799,7 @@ void ExpansionBoard::renderNormal_() {
 
     // Line 0: left = protocol name OR runtime; right = CC state
     if (lcdToggle_) {
-        strncpy(buff, protocolName_.c_str(), LCDDriver::kNumCols);
+        strncpy(buff, protocolName_, LCDDriver::kNumCols);
         buff[LCDDriver::kNumCols] = '\0';
     } else {
         char countdown[16];
@@ -962,6 +962,11 @@ void ExpansionBoard::spiQuiesceAll_() {
 bool ExpansionBoard::sdInitWithRetry_(uint8_t tries, uint16_t backoffMs) {
     for (uint8_t i = 1; i <= tries; ++i) {
         spiQuiesceAll_();
+        delay(10);  // let CS lines settle
+        // 80 dummy clocks (10 × 8 bits) with all CS HIGH resets the
+        // SD card's internal SPI state machine after a dirty MCU reset
+        // while the card stayed powered.
+        for (uint8_t j = 0; j < 10; ++j) SPI.transfer(0xFF);
         if (SD.begin(SD_CS_)) { dbgln("SD ready"); return true; }
         dbgkv("[SD] init attempt ", (unsigned long)i);
         delay(backoffMs);
@@ -996,7 +1001,8 @@ bool ExpansionBoard::loadProtocolFromSD_(const char *path) {
     };
 
     stepCount_ = 0;
-    protocolName_ = "NA";
+    strncpy(protocolName_, "NA", sizeof(protocolName_) - 1);
+    protocolName_[sizeof(protocolName_) - 1] = '\0';
     loopCount_ = 1;
     countdownStepSnapshot_ = 0;
     countdownLoopSnapshot_ = 0;
@@ -1008,7 +1014,8 @@ bool ExpansionBoard::loadProtocolFromSD_(const char *path) {
     String line = csv.readStringUntil('\n');
     if (!line.startsWith("PROTOCOL_NAME=")) { csv.close(); return false; }
     String nameVal = line.substring(strlen("PROTOCOL_NAME=")); stripCommas(nameVal);
-    protocolName_ = nameVal;
+    strncpy(protocolName_, nameVal.c_str(), sizeof(protocolName_) - 1);
+    protocolName_[sizeof(protocolName_) - 1] = '\0';
 
     // 2) LOOP_COUNT=...
     line = csv.readStringUntil('\n');
@@ -1051,7 +1058,7 @@ bool ExpansionBoard::loadProtocolFromSD_(const char *path) {
 
   // 5) Compute PHASH
   uint32_t h = 0;
-  h = crc32_update_(h, (const uint8_t*)protocolName_.c_str(), protocolName_.length());
+  h = crc32_update_(h, (const uint8_t*)protocolName_, strlen(protocolName_));
   h = crc32_update_(h, (const uint8_t*)&loopCount_, sizeof(loopCount_));
   h = crc32_update_(h, (const uint8_t*)&stepCount_, sizeof(stepCount_));
   for (uint8_t i=0;i<stepCount_;++i)
@@ -1077,7 +1084,7 @@ void ExpansionBoard::clearResumeSlots_() {
  */
 void ExpansionBoard::logProtocol_() const {
   dbgln("==== Protocol (XPB) ====");
-  dbgkv("\nName: ", protocolName_.c_str());
+  dbgkv("\nName: ", protocolName_);
   dbgkv("\nLoops: ", (unsigned long)loopCount_);
   dbgkv("\nSteps: ", (unsigned long)stepCount_);
   dbgkv("\nPHASH: ", (unsigned long)progHash_);
@@ -1110,7 +1117,7 @@ bool ExpansionBoard::uploadProtocolToCC_() {
     // 1. Send PR_BEG
     char msg[96];
     snprintf(msg, sizeof(msg), "PR_BEG;NAME=%s;LOOPS=%lu;STEPS=%u;PHASH=%lu",
-             protocolName_.c_str(), 
+             protocolName_, 
              (unsigned long)loopCount_, 
              (unsigned)stepCount_, 
              (unsigned long)progHash_);
@@ -1418,9 +1425,12 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                     owner_->lcd_.setLineCenter(2, "REBOOTING...");
                     owner_->lcd_.flush();
                     delay(250);
-                    
+
                     sendMessage("NOTICE;XPB_RESET=NOW", MessageType::NORMAL);
                     delay(5);
+                    // Cleanly release SD so SPI bus is idle before reset
+                    SD.end();
+                    SPI.end();
                     // NOTE: do NOT clearResumeSlots_() here — the resume
                     // record was just saved at step 1 for the next boot.
                     xpbSoftResetNow();

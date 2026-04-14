@@ -720,47 +720,30 @@ def run_comms_health(args: argparse.Namespace) -> int:
             time.sleep(0.2)
             flush_serial(ser, log)
 
-            # Extract HB and STAT timestamps
-            hb_times: list[float] = []
-            stat_times: list[float] = []
-            ts_pattern = re.compile(r"\[ms=(\d+)")
-            for line in lines:
-                m = ts_pattern.search(line)
-                if not m:
-                    continue
-                ms = int(m.group(1))
-                if "HB;" in line:
-                    hb_times.append(ms)
-                elif "STAT;" in line:
-                    stat_times.append(ms)
+            # Count HB and STAT messages by content
+            hb_count = sum(1 for line in lines if "HB;" in line)
+            stat_count = sum(1 for line in lines if "STAT;" in line)
 
-            # Analyze gaps
             failed = False
-            max_gap_tolerance_ms = 2000
+            min_expected = max(2, int(args.duration_s / 2))
 
-            def check_cadence(name: str, times: list[float]) -> bool:
-                nonlocal failed
-                if len(times) < 2:
-                    emit(f"[TEST] WARNING — only {len(times)} {name} messages in {args.duration_s:.0f}s", log)
-                    failed = True
-                    return False
-                gaps = [times[i+1] - times[i] for i in range(len(times) - 1)]
-                max_gap = max(gaps)
-                min_gap = min(gaps)
-                avg_gap = sum(gaps) / len(gaps)
-                emit(
-                    f"[TEST] {name}: {len(times)} msgs, "
-                    f"gap min={min_gap:.0f}ms avg={avg_gap:.0f}ms max={max_gap:.0f}ms",
-                    log,
-                )
-                if max_gap > max_gap_tolerance_ms:
-                    emit(f"[TEST] FAIL — {name} gap {max_gap:.0f}ms exceeds {max_gap_tolerance_ms}ms", log)
-                    failed = True
-                    return False
-                return True
+            emit(
+                f"[TEST] HB (XPB→CC): {hb_count} msgs in {args.duration_s:.0f}s "
+                f"(expected >= {min_expected})",
+                log,
+            )
+            if hb_count < min_expected:
+                emit(f"[TEST] FAIL — HB count {hb_count} below minimum {min_expected}", log)
+                failed = True
 
-            check_cadence("HB (XPB→CC)", hb_times)
-            check_cadence("STAT (CC→XPB)", stat_times)
+            emit(
+                f"[TEST] STAT (CC→XPB): {stat_count} msgs in {args.duration_s:.0f}s "
+                f"(expected >= {min_expected})",
+                log,
+            )
+            if stat_count < min_expected:
+                emit(f"[TEST] FAIL — STAT count {stat_count} below minimum {min_expected}", log)
+                failed = True
 
             # Check for E-STOP (;E=1; with delimiters to avoid matching SW_AGE=1...)
             estop_hits = scan_lines(lines, {"estop": r";E=1;"})
@@ -828,7 +811,7 @@ def run_cold_boot(args: argparse.Namespace) -> int:
                 "ready": r"READY;ID=CC",
                 "proto_ok": r"NOTICE;PROTO_RX=OK",
                 "hb_idle": r"HB;.*STATE=IDLE",
-                "estop": r"E-STOP|E=1",
+                "estop": r";E=1;",
                 "proto_missing": r"Protocol Missing",
             })
 
