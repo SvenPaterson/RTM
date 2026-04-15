@@ -28,7 +28,7 @@ RESET_THRESHOLD_MS = 5000
 RUN_PULSE_DEFAULT_MS = 5000
 RUN_PULSE_CAPTURE_S = 10.0
 RESET_PULSE_DEFAULT_MS = 6000
-RESET_PULSE_CAPTURE_S = 12.0
+RESET_PULSE_CAPTURE_S = 35.0
 RESET_CANCEL_CAPTURE_S = 15.0
 RESET_CANCEL_COUNT = 3
 RESET_CANCEL_MIN_MS = 500
@@ -73,11 +73,31 @@ def open_serial_with_retry(port: str, baud: int, *, timeout: float, wait_s: floa
             ser.reset_output_buffer()
             time.sleep(0.5)  # let Teensy USB CDC settle after connect
             ser.reset_input_buffer()
-            return ser
+            # Verify the sniffer is actually responsive before returning.
+            # Teensy USB CDC can accept the OS-level open but drop the first
+            # few bytes while the pipe finishes initialising.
+            if _wait_for_sniffer_ready(ser):
+                return ser
+            ser.close()
         except (serial.SerialException, OSError) as exc:
             last_error = exc
             time.sleep(0.05)
     raise serial.SerialException(f"Timed out waiting for {port} to become available") from last_error
+
+
+def _wait_for_sniffer_ready(ser: serial.Serial, retries: int = 3, timeout_s: float = 1.0) -> bool:
+    """Send STATUS and wait for [CTRL] echo to confirm USB CDC is live."""
+    for _ in range(retries):
+        ser.reset_input_buffer()
+        ser.write(b"STATUS\n")
+        ser.flush()
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            raw = ser.readline()
+            if raw and b"[CTRL]" in raw:
+                return True
+        time.sleep(0.1)
+    return False
 
 
 def write_log(line: str, log: TextIO) -> None:
@@ -339,20 +359,32 @@ def run_reset_pulse(args: argparse.Namespace) -> int:
             time.sleep(0.25)
             send_command(ser, f"PULSE RST={args.pulse_ms}", log=log)
 
-            deadline = time.monotonic() + args.capture_s
-            stream_serial(
+            lines = capture_lines(
                 ser,
-                deadline,
+                args.capture_s,
                 log,
                 drop_first_line=args.drop_first_line,
             )
 
+            # Verify the system recovered after the reset
+            hits = scan_lines(lines, {
+                "proto_ok": r"NOTICE;PROTO_RX=OK",
+                "hb_idle": r"HB;.*STATE=IDLE",
+            })
+
             send_command(ser, "STATUS", log=log)
             time.sleep(0.2)
             flush_serial(ser, log)
+
+            if hits["proto_ok"] or hits["hb_idle"]:
+                emit("[TEST] PASS — system recovered after reset pulse", log)
+                emit("[TEST] Capture complete", log)
+                return 0
+
+            emit("[TEST] FAIL — system did not recover within capture window", log)
             emit("[TEST] Capture complete", log)
 
-    return 0
+    return 1
 
 
 # Defaults for reset-pulse-multi

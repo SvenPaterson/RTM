@@ -257,7 +257,6 @@ bool ExpansionBoard::begin() {
     }
     if (consumeResetFlagTU()) {
         estopUiMaskUntilMs_ = millis() + 8000UL;
-        suppressResumePrompt_ = true;                   
         dbgln("[UI] E-STOP mask active (post-XPB reset)");
     }
 
@@ -388,7 +387,7 @@ void ExpansionBoard::tick() {
     linkState_ = ccAnySeen_ ? LinkState::Alive : LinkState::NoLink;
 
     // ----- USB injection / commands -----
-    #ifdef XPB_INJECT_FROM_USB
+    #if XPB_INJECT_FROM_USB
     {
         static String usbLine; // accumulates a full line
         while (Serial && Serial.available() > 0) {
@@ -568,13 +567,6 @@ void ExpansionBoard::tick() {
             page = UiPage::Normal;
         }
     }
-    else if (bootPhase_ == BootPhase::ResumeBrief) {
-        page = UiPage::Boot;
-        if (bootMsgSince_ > kBootResumeShowMs) {
-            bootPhase_ = BootPhase::Done;
-            page = UiPage::Normal;
-        }
-    }
     else if (ccEstop_) {
         // Prefer "Resetting" during (a) our post-XPB-reset mask window, or
         // (b) when CC HBs have gone stale (>1s) during an E-STOP reboot.
@@ -699,16 +691,6 @@ void ExpansionBoard::renderUi_(UiPage page) {
                     break;
                 }
 
-                case BootPhase::ResumeBrief: {
-                    char buf[LCDDriver::kNumCols+1];
-                    snprintf(buf, sizeof(buf), "Step %u  Loop %u",
-                            (unsigned)storedStep_, (unsigned)storedLoopCur_);
-                    lcd_.setLineLeft(0, "RESUMING:");
-                    lcd_.setLineLeft(1, "EXISTING TEST:");
-                    lcd_.setLineCenter(2, buf);
-                    break;
-                }
-
                 case BootPhase::Done:
                 default:
                     // Should not land here for long; router will move to Normal
@@ -760,13 +742,6 @@ void ExpansionBoard::renderUi_(UiPage page) {
             lcd_.setLineCenter(3, "center to cancel.");
             break;
 
-        case UiPage::ResumePrompt:
-            lcd_.setLineCenter(0, "Resume previous test?");
-            lcd_.setLineCenter(1, "RUN = Resume");
-            lcd_.setLineCenter(2, "RESET = Start over");
-            lcd_.setLineCenter(3, "");
-            break;
-
         case UiPage::Normal:
         default:
             renderNormal_();   // draws all normal info (no flush here)
@@ -779,7 +754,6 @@ void ExpansionBoard::renderUi_(UiPage page) {
             page == UiPage::Resetting      ? "Resetting"   :
             page == UiPage::LostComms      ? "LostComms"   :
             page == UiPage::EStop          ? "EStop"       :
-            page == UiPage::ResumePrompt   ? "Resume?"     :
             page == UiPage::ResetCountdown ? "ResetCount"  :
                                              "Normal";
         char pg[16]; snprintf(pg, sizeof(pg), "[UI]%s", name);
@@ -1084,13 +1058,13 @@ void ExpansionBoard::clearResumeSlots_() {
  * @copydetails ExpansionBoard::logProtocol_()
  */
 void ExpansionBoard::logProtocol_() const {
+#if XPB_DEBUG
   dbgln("==== Protocol (XPB) ====");
   dbgkv("\nName: ", protocolName_);
   dbgkv("\nLoops: ", (unsigned long)loopCount_);
   dbgkv("\nSteps: ", (unsigned long)stepCount_);
   dbgkv("\nPHASH: ", (unsigned long)progHash_);
   for (uint8_t i=0;i<stepCount_;++i) {
-    // Convert back to human RPM/RPMs for print
     static constexpr uint16_t kStepsPerRev = 3200;
     long rpm   = steps_[i].rpmTarget_;
     long accel = steps_[i].rpmAccel_;
@@ -1100,6 +1074,7 @@ void ExpansionBoard::logProtocol_() const {
     snprintf(buf, sizeof(buf), "Step %2u: %6ld RPM  %4ld RPM/s  %3us %3udegC", i+1, rpm, accel, dwell, temp);
     dbgln(buf);
   }
+#endif
 }
 
 
@@ -1156,41 +1131,6 @@ bool ExpansionBoard::uploadProtocolToCC_() {
     //ttlComms_.checkForMessages();
 
     return true;
-}
-
-const char* ExpansionBoard::statusStringForUi_() {
-  // Link first
-  if (!ccReady_ || linkState_ == LinkState::NoLink) return "Connecting";
-
-  // Hard faults
-  if (ccEstop_) {
-    if ((int32_t)(millis() - estopUiMaskUntilMs_) < 0 || (ccHbSeen_ && ccHbAgeTmr_ > 1000U))
-      return "Resetting";    // reboot grace window
-    return "E-STOP";
-  }
-
-  // Protocol pipeline
-  switch (protoState_) {
-    case ProtoTxState::WaitingReq:  return "Waiting for CC";
-    case ProtoTxState::BegSent:     return "Uploading (init)";
-    case ProtoTxState::Sending: {
-      static char buf[16];
-      uint8_t pct = stepCount_ ? (uint8_t)((protoStepSent_*100UL)/stepCount_) : 0;
-      snprintf(buf, sizeof(buf), "Uploading %u%%", pct);
-      return buf;
-    }
-    case ProtoTxState::EndSent:     return "Uploading (final)";
-    case ProtoTxState::AwaitResult: return "Verifying";
-    case ProtoTxState::Failed:      return "Proto FAIL";
-    case ProtoTxState::Timeout:     return "Proto TIMEOUT";
-    case ProtoTxState::Complete:    break; // fall through to runtime states
-    case ProtoTxState::Idle:        break;
-  }
-
-  // Runtime niceties. Prefer our own flags; only *then* show CC's STATE text.
-  if (resetUiActive_) return "Resetting";
-  if (ccHbSeen_ && ccHbAgeTmr_ > 3000U) return "Link Lost";
-  return ccState_[0] ? ccState_ : "Idle";
 }
 
 /**
@@ -1320,10 +1260,9 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                         sendCommand(line, MessageType::CRITICAL);
                         owner_->dbgln("[RESUME] Sent (RUN switch engaged)");
                     } else {
-                        // Do not resume. Go to brief boot note then normal idle.
+                        // Do not resume. Skip straight to idle.
                         owner_->dbgln("[RESUME] Held (RUN switch OFF) -> Idling");
-                        owner_->bootPhase_    = BootPhase::ResumeBrief;
-                        owner_->bootMsgSince_ = 0;
+                        owner_->bootPhase_    = BootPhase::Done;
                     }
                 } else {
                     owner_->dbgln("[RESUME] No valid resume (PHASH mismatch or none)");

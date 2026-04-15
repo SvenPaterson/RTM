@@ -545,7 +545,9 @@ void ClearCoreRTM::handlePaused(bool runActive, bool justEntered_) {
 }
 
 void ClearCoreRTM::handleReset(bool resetActive, bool justEntered_) {
-    if (!resetActive) {
+    if (!resetActive && resetPhase_ != ResetPhase::ExecSent) {
+        // Cancel only if we haven't already told XPB to reboot.
+        // Once ExecSent, XPB is committed to rebooting and CC must follow.
         ttlComms_.sendCommand("CMD;RESET=CANCEL", MessageType::IMPORTANT);
         motor.EnableRequest(true);
         if (state_ != preReset_) {

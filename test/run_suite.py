@@ -6,24 +6,21 @@ Drives the individual rig_control.py verbs in sequence, collects verdicts,
 and prints a summary table.  Supports --quick (fast subset) and --full
 (all automated tests including cold-boot).
 
-Auto-detects ClearCore, Expansion Board, and Sniffer by USB VID:PID.
-Use --port to override the ClearCore port if needed.
+Requires --port to specify the sniffer COM port.
 
 Usage:
-    python test/run_suite.py
-    python test/run_suite.py --quick
-    python test/run_suite.py --full
-    python test/run_suite.py --port COM8 --full
+    python test/run_suite.py --port COM7
+    python test/run_suite.py --port COM7 --quick
+    python test/run_suite.py --port COM7 --full
 """
 
 import argparse
+import datetime
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
-
-import serial.tools.list_ports
+from typing import IO
 
 # ---------------------------------------------------------------------------
 # Test definitions — (id, name, verb + extra args)
@@ -51,51 +48,22 @@ INTERACTIVE_TESTS = [
 ]
 
 RIG_CONTROL = str(Path(__file__).resolve().parent / "rig_control.py")
+LOG_DIR     = Path(__file__).resolve().parent / "log"
 
 POWER_OFF_DWELL_S = 3        # seconds to hold power off
 BOOT_SETTLE_S     = 25       # seconds for QUIESCE + protocol load
 
-# ---------------------------------------------------------------------------
-# USB VID:PID fingerprints for auto-detection
-# ---------------------------------------------------------------------------
-BOARD_FINGERPRINTS = {
-    "clearcore": (0x2890, 0x8022),   # Teknic ClearCore
-    "xpb":       (0x2341, 0x0058),   # Arduino Nano Every (Expansion Board)
-    "sniffer":   (0x16C0, 0x0483),   # Teensy 4.0 (TTL Sniffer)
-}
+
+def _timestamp() -> str:
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def detect_ports() -> Optional[dict[str, str]]:
-    """Auto-detect COM ports for all three boards by USB VID:PID.
-
-    Returns a dict {"clearcore": "COMx", "xpb": "COMy", "sniffer": "COMz"}
-    or None if any board is missing.
-    """
-    ports = serial.tools.list_ports.comports()
-    vid_pid_map: dict[tuple[int, int], str] = {}
-    for p in ports:
-        if p.vid is not None and p.pid is not None:
-            vid_pid_map[(p.vid, p.pid)] = p.device
-
-    found: dict[str, str] = {}
-    missing: list[str] = []
-    for name, (vid, pid) in BOARD_FINGERPRINTS.items():
-        port = vid_pid_map.get((vid, pid))
-        if port:
-            found[name] = port
-        else:
-            missing.append(name)
-
-    if missing:
-        print("  ✗ Board detection FAILED — missing boards:")
-        for name in missing:
-            vid, pid = BOARD_FINGERPRINTS[name]
-            print(f"      {name}: VID:PID={vid:#06x}:{pid:#06x} not found")
-        print(f"  Detected ports: {found}" if found else "  No boards detected.")
-        return None
-
-    return found
-
+def _emit(msg: str, log: IO[str] | None = None) -> None:
+    """Print to stdout and optionally mirror to the master log file."""
+    print(msg)
+    if log is not None:
+        log.write(msg + "\n")
+        log.flush()
 
 def establish_known_state(common_args: list[str]) -> bool:
     """Power-cycle the rig to start from a clean, known state.
@@ -144,13 +112,14 @@ def establish_known_state(common_args: list[str]) -> bool:
 
 
 def run_test(test_id: str, label: str, verb_args: list[str],
-             common_args: list[str]) -> tuple[str, str, float]:
+             common_args: list[str],
+             log: IO[str] | None = None) -> tuple[str, str, float]:
     """Run a single test verb and return (test_id, result, elapsed_s)."""
     cmd = [sys.executable, RIG_CONTROL] + common_args + verb_args
-    print(f"\n{'=' * 60}")
-    print(f"  [{test_id}] {label}")
-    print(f"  CMD: {' '.join(cmd)}")
-    print(f"{'=' * 60}\n")
+    _emit(f"\n{'=' * 60}", log)
+    _emit(f"  [{test_id}] {label}", log)
+    _emit(f"  CMD: {' '.join(cmd)}", log)
+    _emit(f"{'=' * 60}\n", log)
 
     t0 = time.monotonic()
     try:
@@ -162,11 +131,11 @@ def run_test(test_id: str, label: str, verb_args: list[str],
         status = "TIMEOUT"
     except Exception as exc:  # noqa: BLE001
         elapsed = time.monotonic() - t0
-        print(f"  ERROR: {exc}")
+        _emit(f"  ERROR: {exc}", log)
         status = "ERROR"
 
     tag = status
-    print(f"\n  >>> [{test_id}] {label}: {tag}  ({elapsed:.1f}s)")
+    _emit(f"\n  >>> [{test_id}] {label}: {tag}  ({elapsed:.1f}s)", log)
     return test_id, tag, elapsed
 
 
@@ -184,8 +153,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the full suite including cold-boot and multi-reset.",
     )
     parser.add_argument(
-        "--port", type=str, default=None,
-        help="Sniffer serial port override (auto-detected by default).",
+        "--port", type=str, required=True,
+        help="Sniffer serial port (e.g. COM7).",
     )
     parser.add_argument(
         "--baud", type=int, default=None,
@@ -202,23 +171,17 @@ def main() -> int:
     if not args.quick and not args.full:
         args.quick = True
 
-    # ---- Board detection ----
-    print("=" * 60)
-    print("  BOARD DETECTION")
-    print("=" * 60)
-    boards = detect_ports()
-    if boards is None:
-        print("\n  ✗ Cannot proceed — plug in all three boards and retry.")
-        return 1
+    # ---- Master log setup ----
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    mode_tag = "full" if args.full else "quick"
+    log_path = LOG_DIR / f"{_timestamp()}_suite_{mode_tag}.log"
+    log_file = open(log_path, "w", encoding="utf-8")
 
-    for name, port in boards.items():
-        print(f"  ✓  {name:<12s} → {port}")
+    _emit(f"[SUITE] Logging to {log_path}", log_file)
+    _emit(f"[SUITE] Mode: {mode_tag}", log_file)
 
-    # Use explicit --port if given, otherwise auto-detected sniffer (Teensy)
-    # rig_control.py sends commands via the sniffer, which relays to ClearCore
-    cmd_port = args.port if args.port else boards["sniffer"]
-    print(f"\n  Using sniffer on {cmd_port} for test commands")
-    print("=" * 60)
+    cmd_port = args.port
+    _emit(f"[SUITE] Sniffer port: {cmd_port}", log_file)
 
     # Build common args forwarded to every rig_control invocation.
     common: list[str] = ["--port", cmd_port, "--drop-first-line"]
@@ -231,30 +194,37 @@ def main() -> int:
 
     # ---- Preamble: power-cycle to known state ----
     if not establish_known_state(common):
-        print("\n  ✗ PREAMBLE FAILED — aborting suite")
+        _emit("\n  ✗ PREAMBLE FAILED — aborting suite", log_file)
+        log_file.close()
         return 1
 
     results: list[tuple[str, str, str, float]] = []
 
     for test_id, label, verb_args in tests:
-        tid, status, elapsed = run_test(test_id, label, verb_args, common)
+        tid, status, elapsed = run_test(test_id, label, verb_args, common,
+                                        log=log_file)
         results.append((tid, label, status, elapsed))
 
     # ---- Summary ----
-    print("\n")
-    print("=" * 60)
-    print("  TEST SUITE SUMMARY")
-    print("=" * 60)
+    _emit("\n", log_file)
+    _emit("=" * 60, log_file)
+    _emit("  TEST SUITE SUMMARY", log_file)
+    _emit("=" * 60, log_file)
     total_time = sum(r[3] for r in results)
     passes = sum(1 for r in results if r[2] == "PASS")
     fails = len(results) - passes
 
     for tid, label, status, elapsed in results:
         marker = "✓" if status == "PASS" else "✗"
-        print(f"  {marker}  [{tid}] {label:<20s}  {status:<8s}  {elapsed:6.1f}s")
+        _emit(f"  {marker}  [{tid}] {label:<20s}  {status:<8s}  {elapsed:6.1f}s",
+              log_file)
 
-    print(f"\n  {passes} passed, {fails} failed  —  {total_time:.1f}s total")
-    print("=" * 60)
+    _emit(f"\n  {passes} passed, {fails} failed  —  {total_time:.1f}s total",
+          log_file)
+    _emit("=" * 60, log_file)
+
+    _emit(f"\n[SUITE] Master log saved to {log_path}", log_file)
+    log_file.close()
 
     return 0 if fails == 0 else 1
 

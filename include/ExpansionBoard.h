@@ -77,21 +77,26 @@ private:
     elapsedMillis sinceBoot;
     uint32_t estopUiMaskUntilMs_ = 0;       // While now < this, show "Resetting" instead of E-STOP.
     /// @brief If true, suppress the Resume? prompt after boot (XPB-only reboot).
-    bool suppressResumePrompt_{false};
+
 
     // ---------- Debug Helpers ---------
-    /// @brief Print without newline if Serial is enabled.
+#if XPB_DEBUG
     inline void dbg(const char *s)   const { if (Serial) Serial.print(s); }
-    /// @brief Print with newline if Serial is enabled.
     inline void dbgln(const char *s) const { if (Serial) Serial.println(s); }
-    /// @brief Print blank line if Serial is enabled.
     inline void dbgln()              const { if (Serial) Serial.println(); }
-    /// @brief Print key/value (c-string) with newline if Serial is enabled.
     inline void dbgkv(const char *k, const char *v)   const { if (Serial) { Serial.print(k); Serial.print(v); } }
-    /// @brief Print key/value (String) with newline if Serial is enabled.
     inline void dbgkv(const char *k, const String &v) const { if (Serial) { Serial.print(k); Serial.print(v); } }
-    /// @brief Print key/value (number) with newline if Serial is enabled.
     inline void dbgkv(const char *k, unsigned long v) const { if (Serial) { Serial.print(k); Serial.print(v); } }
+    inline void dbgkv(const char *k, long v)          const { if (Serial) { Serial.print(k); Serial.print(v); } }
+#else
+    inline void dbg(const char *)                     const {}
+    inline void dbgln(const char *)                   const {}
+    inline void dbgln()                               const {}
+    inline void dbgkv(const char *, const char *)     const {}
+    inline void dbgkv(const char *, const String &)   const {}
+    inline void dbgkv(const char *, unsigned long)    const {}
+    inline void dbgkv(const char *, long)             const {}
+#endif
 
     // ---------- CC heartbeat / state mirror ----------
     enum class LinkState : uint8_t {NoLink, Alive};
@@ -112,7 +117,7 @@ private:
     int16_t  ccRpm_ = 0;
     bool     ccEstop_ = false; // probably not needed
     uint8_t  ccEstopCode_ = 0;   // raw E_CODE bitmask from CC
-    uint16_t ccHbSeqPrev_ = 0, ccHbSeq_ = 0;
+
 
     /**
      * @brief Prints eStop cause to text
@@ -224,16 +229,15 @@ private:
 
     // ---------- Display / UI ----------
     LCDDriver     lcd_{LCD_CS_};
-    bool          lcdToggle_{false}, lcdRuntimeToggle_{false};
+    bool          lcdToggle_{false};
     bool          modeTorqueToggle_{false}; // torque stand only
     elapsedMillis lcdTmr_;
     uint16_t      lcdToggle_ms_{2000};
-    uint32_t      runMins_{42};
 
     /// @brief UI pages.
     enum class UiPage : uint8_t {
         Boot, ProtoMissingSD, ProtoTxFail,
-        Resetting, LostComms, EStop, ResumePrompt, ResetCountdown, 
+        Resetting, LostComms, EStop, ResetCountdown, 
         Preheat, Normal
     };
     UiPage lastUi_{UiPage::Boot};
@@ -243,13 +247,10 @@ private:
         SDLoaded,
         TxInProgress,
         TxSuccess,
-        ResumeBrief,
         Done
     };
     BootPhase bootPhase_ = BootPhase::Start;
-    int8_t txPct_ = -1;
     elapsedMillis bootMsgSince_{0};
-    static constexpr uint16_t kBootResumeShowMs = 1250;
     static constexpr uint16_t kBootSuccessShowMs = 2000;
 
     /**
@@ -302,8 +303,6 @@ private:
         Failed,        // PROTO_RX=FAIL
         Timeout        // our own timeout
     };
-    const char* statusStringForUi_();
-
     ProtoTxState protoState_ = ProtoTxState::Idle;
     elapsedMillis sdRecoveryTmr_{0};   // non-blocking SD retry cadence
     elapsedMillis protoSince_{0};      
@@ -384,7 +383,11 @@ private:
          * @brief Optional USB log hook used by TTLComms for RX tracing.
          */
         void usbLog(const char *s) override {
+#if XPB_DEBUG
             if (Serial) Serial.println(s);
+#else
+            (void)s;
+#endif
         }
 
     private:
