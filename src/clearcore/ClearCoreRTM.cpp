@@ -40,6 +40,7 @@ bool ClearCoreRTM::begin() {
     MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
     MotorMgr.MotorModeSet(MotorManager::MOTOR_M0M1, Connector::CPM_MODE_STEP_AND_DIR);
     motor.HlfbMode(MotorDriver::HLFB_MODE_STATIC);
+    motor.HlfbFilterLength(1);   // 200 µs filter (min) — needed for 16 PPR at high RPM
     motor.VelMax(kMotorMaxRpm * kStepsPerRev / 60);
     motor.AccelMax(kMotorMaxRpm * kStepsPerRev / 60);
     motor.EStopDecelMax(kMotorMaxRpm * kStepsPerRev / 60);
@@ -49,7 +50,7 @@ bool ClearCoreRTM::begin() {
 
     /* TTL Comms */
     ttlComms_.begin();
-    ttlComms_.setRxUsbLogging(true, "XPB");
+    ttlComms_.setRxUsbLogging(false, "XPB");  // disabled: sniffer captures TTL traffic
     dbgln("TTL Ready");
 
     // listen for XPB ready
@@ -83,29 +84,31 @@ bool ClearCoreRTM::begin() {
     return true;
 }
 
+// Poll HLFB rising edge flag and update span counters.
+// Called from multiple points in tick() so that serial I/O
+// blocking cannot cause missed edges (HlfbHasRisen is clear-on-read).
+inline void ClearCoreRTM::pollHlfbEdge_() {
+    const uint32_t nowUs = Microseconds();
+    if (motor.HlfbHasRisen()) {
+        if (hlfbFirstEdge_) {
+            hlfbWindowStartUs_ = nowUs;
+            hlfbFirstEdge_ = false;
+        }
+        hlfbEdgeCount_++;
+        hlfbWindowLastUs_ = nowUs;
+        hlfbLastEdgeUs_   = nowUs;
+    } else if ((nowUs - hlfbLastEdgeUs_) > kHlfbStaleUs) {
+        measuredRpm_    = 0;
+        hlfbFirstEdge_  = true;
+        hlfbEdgeCount_  = 0;
+    }
+}
+
 void ClearCoreRTM::tick() {
+    pollHlfbEdge_();                        // HLFB poll 1 — before serial I/O
     ttlComms_.checkForMessages();
     ttlComms_.checkRetries();
-
-    // --- HLFB speed feedback (2 PPR edge timing) ---
-    {
-        const uint32_t nowUs = Microseconds();
-        if (motor.HlfbHasRisen()) {
-            if (hlfbFirstEdge_) {
-                hlfbFirstEdge_ = false;
-            } else {
-                const uint32_t periodUs = nowUs - hlfbLastEdgeUs_;
-                if (periodUs > 0) {
-                    int16_t rpm = (int16_t)(60000000UL / ((uint32_t)periodUs * kHlfbPPR));
-                    measuredRpm_ = (currentSpeed_ < 0) ? -rpm : rpm;
-                }
-            }
-            hlfbLastEdgeUs_ = nowUs;
-        } else if ((nowUs - hlfbLastEdgeUs_) > kHlfbStaleUs) {
-            measuredRpm_   = 0;
-            hlfbFirstEdge_ = true;
-        }
-    }
+    pollHlfbEdge_();                        // HLFB poll 2 — after serial I/O
 
     // --- Comms health & stale guard ---
     const bool maskActiveNow = (xpbMaskActive_ && Milliseconds() < xpbMaskUntilMs_);
@@ -192,6 +195,8 @@ void ClearCoreRTM::tick() {
     }
     prevState_ = state_; // capture previous state
     
+    pollHlfbEdge_();                        // HLFB poll 3 — before state handler
+
     // dispatch to state handlers
     switch (state_) {
         case State::BOOT:
@@ -228,6 +233,8 @@ void ClearCoreRTM::tick() {
             break;
     }
 
+    pollHlfbEdge_();                        // HLFB poll 4 — before HB send
+
     if (heartbeatTmr_ >= 250 && heartbeatSystemEnabled_) {
         heartbeatTmr_ = 0;
         const bool maskActiveNowHb = (xpbMaskActive_ && Milliseconds() < xpbMaskUntilMs_);
@@ -253,6 +260,16 @@ void ClearCoreRTM::tick() {
             }
         }
 
+        // Compute RPM from edges accumulated since last HB
+        if (hlfbEdgeCount_ >= 2) {
+            const uint32_t spanUs = hlfbWindowLastUs_ - hlfbWindowStartUs_;
+            if (spanUs > 0) {
+                int16_t rpm = (int16_t)(
+                    (uint32_t)(hlfbEdgeCount_ - 1) * (60000000UL / kHlfbPPR) / spanUs);
+                measuredRpm_ = (motor.VelocityRefCommanded() < 0) ? -rpm : rpm;
+            }
+        }
+
         char msg[96];
         snprintf(msg, sizeof(msg),
                 "HB;SEQ=%u;STATE=%s;STEP=%u;LOOP=%lu/%lu;SW_AGE=%lu;E=%d;E_CODE=%02X;RPM=%d",
@@ -266,7 +283,12 @@ void ClearCoreRTM::tick() {
                 (unsigned)estopReason_,
                 (int)measuredRpm_);
         ttlComms_.sendMessage(msg, MessageType::INFO);
+        pollHlfbEdge_();                    // HLFB poll 5 — after HB serial send
         ttlComms_.checkForMessages();
+
+        // Reset edge counters for next HB window
+        hlfbEdgeCount_ = 0;
+        hlfbFirstEdge_ = true;
 
         // Check periodically for mem corruption
         if (guardBefore_ != 0xDEAD || guardAfter_ != 0xBEEF) {

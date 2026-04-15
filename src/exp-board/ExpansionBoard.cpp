@@ -237,7 +237,7 @@ bool ExpansionBoard::begin() {
 
     // UART to ClearCore (not on SPI) – safe to bring up early
     ttlComms_.begin();
-    ttlComms_.setRxUsbLogging(true, "CC"); // toggle by sending LOG=0 / LOG=1
+    ttlComms_.setRxUsbLogging(false, "CC"); // disabled: sniffer captures TTL traffic
     delay(200);
     dbgln("Connecting with CC..");
     // Ask CC to suppress stale-STAT E-STOP while XPB finishes boot work.
@@ -1379,20 +1379,15 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                     const uint16_t loopTotSnap = (uint16_t)owner_->ccLoopTot_;
                     const uint32_t ph          = owner_->progHash_;
 
-                    if (owner_->everRan_) {
-                        bool ok = saveResumeTU(ph, stepSnap, loopCurSnap, loopTotSnap, 2);
-                        owner_->dbgln(ok ? "[RESUME] snapshot saved" : "[RESUME] snapshot SAVE FAILED after 3 attempts");
-                        if (!ok) {
-                            // Abort reset: cannot safely reset without a confirmed checkpoint
-                            owner_->dbgln("[RESET] ABORTED — no valid resume snapshot");
-                            owner_->resetUiActive_ = false;
-                            return;
-                        }
-                    } else {
-                        owner_->dbgln("[RESET] skipping resume save (protocol not active)");
-                        // Also clear any stale resume files from prior runs
-                        clearResumeTU();
-                    }
+                    // Manual reset: always clear resume state so the
+                    // protocol starts fresh on next boot.  Resume-from-
+                    // power-loss relies on the periodic saves already on
+                    // SD; an intentional operator reset should not
+                    // preserve them.
+                    clearResumeTU();
+                    owner_->haveStoredResume_ = false;
+                    owner_->everRan_          = false;
+                    owner_->dbgln("[RESET] resume slots cleared (manual reset)");
 
                     // 2) Ask CC to mask XPB-stale for ~10s (bounded to 3..15s on CC)
                     {

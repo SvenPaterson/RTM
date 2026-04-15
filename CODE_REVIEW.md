@@ -1,8 +1,35 @@
 # Boot-Up Serial Review Findings
 
-## 0. Session checkpoint (2026-04-13)
+## 0. Session checkpoint (2026-04-15)
 ### Current status
-- **RUN-gate validation: ALL THREE STEPS PASS.**  Validated on hardware after reset-pulse + run-gate sequence (stale-resume regression confirmed fixed).【F:test/log/20260413-100750_run_gate.log†L1-L280】
+- **Run-gate validation: now four-step test** (was three). Steps 1-2 PASS; Step 3 INCONCLUSIVE; Step 4 SKIPPED (depends on step 3).
+  - Step 3 rewritten: power-loss resume via hard power-cut (no longer uses RESET pulse to create snapshot — bug #12 clears resume on RESET).
+  - Step 4 added: manual reset clears resume — issues RESET pulse, cold boots, verifies system stays IDLE with no `CMD;RESUME=AUTO`.
+- **Boot-frame filtering fix**: test harness now evaluates HB states only after `NOTICE;PROTO_RX=OK` marker, excluding garbled boot frames (e.g., `STEP=???READY;ID=CC` from two TTL messages glued during handshake).
+- **Test suite subcommand**: `run-suite` added to `rig_control.py`. Runs cold-boot, comms-health, reset-cancel, reset-pulse, run-cycle, run-gate sequentially; produces a `{timestamp}_suite.log` master log with output from all tests and a summary table.
+
+### Validated test results (2026-04-15)
+| Test | Result | Evidence |
+|------|--------|----------|
+| cold-boot | **PASS** | `QUIESCE=3, proto_ok=1, hb_idle=28` |
+| comms-health | **PASS** | HB + STAT cadence healthy |
+| reset-cancel | **PASS** | Sub-threshold RESET pulses correctly cancelled |
+| reset-pulse | **PASS** | `RESET=ARM` → `RESET=EXEC` → `QUIESCE` sequence with full reboot |
+| run-gate Step 1 | **PASS** | 89 IDLE HBs, no RUNNING before RUN released |
+| run-gate Step 2 | **PASS** | 40 RUNNING HBs after RUN=1, 40 PAUSED after RUN=0 |
+| run-gate Step 3 | **INCONCLUSIVE** | `CMD;RESUME=AUTO;STEP=5;LOOP=1;AUTOSTART=1` sent, `ACK;RESUME=OK` received, but no RUNNING HB in 30s capture window |
+| run-gate Step 4 | **SKIPPED** | Depends on step 3 PASS |
+
+### Next actions
+1. Investigate step 3 INCONCLUSIVE: resume ACK was accepted but system may need longer to transition to RUNNING, or the capture window may start too late.
+2. Run full regression via `run-suite` to confirm all tests pass end-to-end.
+3. Add transport instrumentation to classify duplicate `PR_END`/`QUIESCE` events.
+4. LCD UX for RUN/RESET latch state.
+
+## 0-prev. Session checkpoint (2026-04-14)
+### Current status
+- **HLFB speed measurement: PASS — ±0.1% accuracy at 3000 RPM.**  Validated with HLFB_quick.csv (12 steps, 242 RUNNING HBs).【F:test/log/20260414-170537_run_protocol_HLFB_QUICK.log†L1-L300】
+- **RUN-gate validation: ALL THREE STEPS PASS (2026-04-13).**  Validated on hardware after reset-pulse + run-gate sequence (stale-resume regression confirmed fixed).【F:test/log/20260413-100750_run_gate.log†L1-L280】
 - Eight firmware bugs identified and fixed across ClearCore and Expansion Board:
   1. **PHASH overflow** (CC + XPB): `toInt()` returns signed long, clamping uint32 hash values >2^31 to `INT_MAX` (2147483647). Fixed with `strtoul()`.【F:include/ClearCoreRTM.h†L489】【F:src/exp-board/ExpansionBoard.cpp†L1274】
   2. **SW_AGE overflow** (XPB): Same `toInt()` truncation pattern. Fixed with `strtoul()`.【F:src/exp-board/ExpansionBoard.cpp†L1453】
@@ -12,9 +39,21 @@
   6. **Resume ACK REF mismatch** (CC): Resume ACK responses used CC's own REF counter instead of echoing the sender's REF, causing transport-layer ACK mismatch and retry storms (`ERR_WRONG_STAT` on retries). Fixed all 5 ACK;RESUME sends to echo the incoming REF via `MessageType::NORMAL`.【F:include/ClearCoreRTM.h†L361-L440】
   7. **Stale resume after COMPLETED** (XPB): Resume slots were never cleared when protocol completed normally. On next boot with RUN held low, CC found stale AUTOSTART=1 data and auto-started from the old resume point, bypassing the RUN gate. Fixed: XPB now calls `clearResumeTU()` and resets `everRan_` when CC heartbeat reports `STATE=COMPLETED`.【F:src/exp-board/ExpansionBoard.cpp†L1429-L1437】
   8. **RESET=EXEC saves stale resume** (XPB): RESET=EXEC unconditionally saved resume data even when protocol was already COMPLETED or had never run, leaving stale step/loop values on SD for the next boot. Fixed: save is now gated on `everRan_`; when skipped, any stale resume files are also cleared via `clearResumeTU()`.【F:src/exp-board/ExpansionBoard.cpp†L1356-L1378】
+  9. **Span-based HLFB frequency measurement** (CC): Replaced per-period moving average (`kHlfbAvgN=16` circular buffer) with span-based frequency counting over the 250ms heartbeat window. Old approach suffered ±200µs ISR quantization on every edge pair (5 kHz ISR → ±400µs per period). At 1500 RPM / 16 PPR (2500µs period) this gave ±16% per sample; averaging 16 samples still yielded ±4% (≈±60 RPM). New approach counts all edges in the HB window and computes `RPM = (edges-1) × 60M / (spanUs × PPR)`. Only first+last timestamps carry jitter → ±0.11% at 1500 RPM. Flash −32 B, RAM −48 B from removed buffer arrays.【F:include/ClearCoreRTM.h】【F:src/clearcore/ClearCoreRTM.cpp】
+  10. **Distributed HLFB edge polling** (CC): `HlfbHasRisen()` is clear-on-read, latched by 5 kHz ISR. STAT processing + USB echo blocked `tick()` enough to miss 3–4 edges every 4th HB (1000ms STAT cadence). Created `pollHlfbEdge_()` inline helper with 5 call sites distributed through `tick()`. Eliminated every-4th-HB RPM dip.【F:src/clearcore/ClearCoreRTM.cpp】
+  11. **USB debug echo disabled** (CC + XPB): `setRxUsbLogging(false)` on both boards. Sniffer captures all TTL traffic; USB TX echo was redundant and contributed to HLFB edge loss.【F:src/clearcore/ClearCoreRTM.cpp】【F:src/exp-board/ExpansionBoard.cpp】
+  12. **Manual reset clears resume slots** (XPB): `RESET=EXEC` handler now unconditionally calls `clearResumeTU()` + clears `haveStoredResume_` + `everRan_`. Protocol starts fresh on next boot after manual reset. Power-loss recovery unaffected (periodic saves during RUNNING remain).【F:src/exp-board/ExpansionBoard.cpp】
 - Test script fix: Step 3 evaluation now only fails on `resume_err` if `resume_ok` was NOT also present, tolerating stale retry errors from transport mismatch.【F:test/rig_control.py†L871】
+- Test harness: RPM summary now shows steady-state average (StdyAvg) separately from overall average, filtering out ramp-up samples.【F:test/rig_control.py】
 - Snapshot hardening implemented: `saveResumeTU` and `writeResetFlagTU` have retry loops; `RESET=EXEC` handler aborts on save failure; periodic save logs failures.
 - Primary unresolved risks remain transport reliability (`TTL bad checksum` / duplicate retries) and LCD operator visibility for RUN/RESET latch state.
+
+### Validated test results (2026-04-14)
+| Test | Result | Evidence |
+|------|--------|----------|
+| HLFB_quick (12 steps, 242 HBs) | **PASS** | StdyAvg: 498/1496/2995/−500/−2991 vs targets 500/1500/3000/−500/−3000 |
+| RPM accuracy at 3000 RPM | **±0.1%** | Histogram: 2997(2), 2999(6), 3001(10), 3002(1) |
+| Every-4th-HB dip | **Eliminated** | No dips to 1720–1749 cluster (was present pre-polling-fix) |
 
 ### Validated test results (2026-04-13)
 | Step | Description | Result | Evidence |
@@ -26,13 +65,21 @@
 Preceded by reset-pulse test confirming RESET=EXEC no longer saves stale resume when protocol is completed.【F:test/log/20260413-100706_reset_pulse.log†L1-L60】
 
 ### Next actions
-1. Add temporary TTL transport instrumentation around send/ACK paths to classify duplicate `PR_END`/`QUIESCE` events as retry-vs-logic.
+1. Run regression suite (`run_suite.py --set quick`) to confirm nothing broken by HLFB/reset changes.
+2. Add temporary TTL transport instrumentation around send/ACK paths to classify duplicate `PR_END`/`QUIESCE` events as retry-vs-logic.
+3. Validate manual reset + fresh boot on hardware (resume cleared, no auto-resume).
 
 ### Completed audits
 - **ACK REF-echo audit (2026-04-10):** All ACK responses in both CC (`ClearCoreRTM.h`) and XPB (`ExpansionBoard.cpp`) now correctly echo the sender's REF and use non-retry message types (`INFO` or `NORMAL`). The 5 resume ACKs fixed earlier in this session were the only instances of the bug. Protocol upload ACKs (`PR_BEG`, `PR_DAT`, `PR_END`), QUIESCE ACKs, and `REQ:PROTO` ACKs were already correct. The repeated QUIESCE bursts seen in test logs are genuine transport retries from TTL checksum drops, not REF-echo mismatches.
 
+### Build sizes (2026-04-14)
+| Board | Flash | RAM |
+|-------|-------|-----|
+| ClearCore (SAME53) | 94,508 B (18.6%) | 8,244 B (4.2%) |
+| Expansion Board (ATmega4809) | 47,812 B (98.3%, **828 B free**) | 2,342 B (38.1%) |
+
 ### Resume point for next session
-- All §7 RUN-gate bugs are resolved and validated (8 bugs total).  Focus shifts to LCD UX and transport reliability.
+- HLFB speed measurement verified (±0.1%). Focus shifts to regression suite, LCD UX, and transport reliability. XPB flash is 98.3% full — future XPB changes must account for this constraint.
 
 ## 0.1 To-do tracker and validation attempt (2026-03-19)
 ### What was attempted in this session
@@ -65,8 +112,9 @@ Preceded by reset-pulse test confirming RESET=EXEC no longer saves stale resume 
    - Code review note: retries remain fixed-time resend logic; no explicit back-off strategy or richer duplicate diagnostics were identified in `TTLComms::checkRetries()`.【F:src/shared/TTLComms.cpp†L122-L134】
 
 4. Resume snapshot hardening (retry + stronger diagnostics)
-   - Status: **Complete** — validated 2026-04-13
+   - Status: **Complete** — validated 2026-04-13, updated 2026-04-14
    - Retry logic added to `saveResumeTU(maxRetries)` and `writeResetFlagTU(maxRetries)`. RESET=EXEC aborts if snapshot save fails; skips save entirely when `everRan_` is false (protocol completed or never ran) and clears stale files. Periodic save logs failures. Resume slots cleared on protocol COMPLETED state.【F:src/exp-board/ExpansionBoard.cpp†L136-L147】【F:src/exp-board/ExpansionBoard.cpp†L1356-L1378】【F:src/exp-board/ExpansionBoard.cpp†L1429-L1437】
+   - **Bug 12 (2026-04-14):** Manual `RESET=EXEC` now unconditionally clears resume slots (no more save-before-clear). Power-loss recovery still works via periodic saves from RUNNING state at step/loop boundaries.
 
 ### Additional open item carried from findings
 1. Protocol summary formatting (`PHASH` line glue)

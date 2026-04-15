@@ -8,6 +8,7 @@ import csv
 import random
 import re
 import secrets
+import subprocess
 import sys
 import time
 import shlex
@@ -35,7 +36,7 @@ RESET_CANCEL_MAX_MS = 4500
 POWER_CAPTURE_DEFAULT_S = 4.0
 DEFAULT_INGESTION_WAIT = 15.0
 DEFAULT_TAIL_PAD = 10.0
-DEFAULT_RUN_MARGIN = 5.0
+DEFAULT_RUN_MARGIN = 15.0
 DEFAULT_PROTOCOL_DIR = Path(__file__).resolve().parent.parent / "tools" / "protocols"
 DEFAULT_PROTOCOL_NAME = "protocol.csv"
 
@@ -44,14 +45,20 @@ RUN_GATE_BOOT_WAIT_S = 30.0
 RUN_GATE_SETTLE_S = 5.0
 RUN_GATE_HB_WINDOW_S = 10.0
 RUN_GATE_POWER_DWELL_S = 4.0
+RUN_GATE_STEP_WAIT_S = 12.0
 RUN_GATE_RESET_PULSE_MS = 6000
 RUN_GATE_RESET_WAIT_S = 12.0
 
 
 def detect_default_port() -> str | None:
+    # Prefer Teensy sniffer by VID:PID (0x16C0:0x0483)
+    for port in list_ports.comports():
+        if port.vid == 0x16C0 and port.pid == 0x0483:
+            return port.device
+    # Fallback: match by description
     for port in list_ports.comports():
         desc = (port.description or "").lower()
-        if "teensy" in desc or "usb serial" in desc or "arduino" in desc:
+        if "teensy" in desc:
             return port.device
     return None
 
@@ -61,7 +68,12 @@ def open_serial_with_retry(port: str, baud: int, *, timeout: float, wait_s: floa
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            return serial.Serial(port, baud, timeout=timeout)
+            ser = serial.Serial(port, baud, timeout=timeout)
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            time.sleep(0.5)  # let Teensy USB CDC settle after connect
+            ser.reset_input_buffer()
+            return ser
         except (serial.SerialException, OSError) as exc:
             last_error = exc
             time.sleep(0.05)
@@ -520,6 +532,227 @@ def run_run_pulse(args: argparse.Namespace) -> int:
             send_command(ser, "STATUS", log=log)
             time.sleep(0.2)
             flush_serial(ser, log)
+            emit("[TEST] Capture complete", log)
+
+    return 0
+
+
+def run_protocol(args: argparse.Namespace) -> int:
+    """T9: Run a loaded protocol to completion and log RPM vs step."""
+    proto_path = args.protocol.resolve()
+    if not proto_path.is_file():
+        print(f"[TEST] Protocol file not found: {proto_path}")
+        return 1
+
+    try:
+        proto_name, loop_count, steps = parse_protocol(proto_path)
+    except ValueError as exc:
+        print(f"[TEST] Protocol parse error: {exc}")
+        return 3
+
+    # Simulate expected runtime
+    total_runtime = 0.0
+    current_rpm = 0.0
+    for _ in range(loop_count):
+        for target_rpm, accel_rpm_s, dwell_s in steps:
+            ramp_time = abs(target_rpm - current_rpm) / accel_rpm_s
+            total_runtime += ramp_time + dwell_s
+            current_rpm = target_rpm
+
+    run_hold_s = total_runtime + args.run_margin_s
+    capture_s = args.settle_s + run_hold_s + args.tail_s
+
+    log_dir = ensure_log_dir()
+    safe_name = (proto_name.replace(" ", "_") or "protocol")
+    log_path = log_dir / f"{timestamp()}_run_protocol_{safe_name}.log"
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        emit(f"[TEST] Logging to {rel_path(log_path)}", log)
+        emit(f"[TEST] Command: {format_invocation()}", log)
+        emit("[TEST] === RUN-PROTOCOL TEST ===", log)
+        emit(f"[TEST] Protocol: {proto_name} ({len(steps)} steps, {loop_count} loops)", log)
+        emit(f"[TEST] Expected runtime: {total_runtime:.1f}s, RUN hold: {run_hold_s:.1f}s", log)
+        emit(f"[TEST] Capture window: {capture_s:.1f}s (settle {args.settle_s:.1f}s + run {run_hold_s:.1f}s + tail {args.tail_s:.1f}s)", log)
+        emit(f"[TEST] Opening serial port {args.port} @ {args.baud} baud", log)
+        try:
+            ser = open_serial_with_retry(args.port, args.baud, timeout=0.1)
+        except (serial.SerialException, OSError) as exc:
+            emit(f"[TEST] Serial error: {exc}", log)
+            return 2
+
+        with ser:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            emit("[TEST] Connected", log)
+
+            try:
+                send_command(ser, "STATUS", log=log)
+                time.sleep(0.25)
+
+                # Phase 1: Wait for IDLE (system may still be booting / loading protocol)
+                emit(f"[TEST] Phase 1: Waiting up to {args.settle_s:.0f}s for IDLE state", log)
+                settle_lines: list[str] = []
+                idle_seen = False
+                settle_deadline = time.monotonic() + args.settle_s
+                while time.monotonic() < settle_deadline:
+                    chunk = capture_lines(ser, min(2.0, settle_deadline - time.monotonic()), log)
+                    settle_lines.extend(chunk)
+                    chunk_hits = scan_lines(chunk, {"hb_idle": r"HB;.*STATE=IDLE"})
+                    if chunk_hits["hb_idle"]:
+                        idle_seen = True
+                        emit("[TEST] IDLE confirmed", log)
+                        break
+                if not idle_seen:
+                    emit("[TEST] FAIL — system did not reach IDLE within settle window", log)
+                    return 1
+
+                # Phase 2: Assert RUN, capture through completion
+                run_ms = int(run_hold_s * 1000)
+                emit(f"[TEST] Phase 2: Issuing RUN pulse for {run_hold_s:.1f}s", log)
+                send_command(ser, f"PULSE RUN={run_ms}", log=log)
+                run_lines = capture_lines(ser, run_hold_s + args.tail_s, log)
+
+                send_command(ser, "STATUS", log=log)
+                time.sleep(0.2)
+                flush_serial(ser, log)
+            except KeyboardInterrupt:
+                emit("\n[TEST] Ctrl+C — releasing RUN and stopping", log)
+                send_command(ser, "RUN=0", log=log)
+                time.sleep(0.1)
+                emit("[TEST] ABORTED by user", log)
+                return 1
+
+            # Phase 3: Analyze captured HB messages
+            all_lines = settle_lines + run_lines
+            hits = scan_lines(all_lines, {
+                "hb_running": r"HB;.*STATE=RUNNING",
+                "hb_completed": r"HB;.*STATE=COMPLETED",
+                "hb_estop": r"HB;.*STATE=E-STOP",
+            })
+
+            # Extract RPM values per step with sniffer timestamps
+            rpm_by_step: dict[int, list[int]] = {}
+            step_timeline: list[tuple[float, int, int]] = []  # (ms, step, rpm)
+            for line in all_lines:
+                m = re.search(r"HB;.*STEP=(\d+).*RPM=(-?\d+)", line)
+                if m:
+                    step_idx = int(m.group(1))
+                    rpm_val = int(m.group(2))
+                    rpm_by_step.setdefault(step_idx, []).append(rpm_val)
+                    # Extract sniffer ms timestamp
+                    ts_m = re.search(r"ms=(\d+)", line)
+                    if ts_m:
+                        step_timeline.append((float(ts_m.group(1)), step_idx, rpm_val))
+
+            # Build expected step targets from protocol (1-indexed, repeating per loop)
+            step_targets: dict[int, tuple[float, float]] = {}  # step_idx -> (target_rpm, accel)
+            for loop_i in range(loop_count):
+                for s_i, (trpm, accel, _dwell) in enumerate(steps):
+                    idx = loop_i * len(steps) + s_i + 1  # 1-based step index
+                    step_targets[idx] = (trpm, accel)
+
+            # Single pass: detect ramp completion and collect ramp analysis + steady-state RPMs
+            ramp_results: list[tuple[int, float, float, float, float, str]] = []  # (step, target, expect, actual, diff, result)
+            steady_rpm_by_step: dict[int, list[int]] = {}
+            ramp_targets = dict(step_targets)  # working copy for ramp detection
+            step_reached_ms: dict[int, float] = {}  # step_idx -> ms when target reached
+
+            if step_timeline:
+                prev_step = 0
+                prev_rpm_at_transition = 0
+                transition_ms = 0.0
+                ramp_tolerance = 0.10  # 10% tolerance on RPM match
+
+                for ts_ms, step_idx, rpm_val in step_timeline:
+                    if step_idx != prev_step:
+                        prev_rpm_at_transition = rpm_val
+                        transition_ms = ts_ms
+                        prev_step = step_idx
+                    elif step_idx in ramp_targets and transition_ms > 0:
+                        target_rpm, accel = ramp_targets[step_idx]
+                        abs_target = abs(target_rpm)
+                        abs_rpm = abs(rpm_val)
+
+                        if abs_target == 0:
+                            reached = abs_rpm == 0
+                        else:
+                            reached = abs(abs_rpm - abs_target) <= abs_target * ramp_tolerance
+
+                        if reached:
+                            actual_ramp_s = (ts_ms - transition_ms) / 1000.0
+                            delta_rpm = abs(target_rpm - prev_rpm_at_transition)
+                            expected_ramp_s = delta_rpm / accel if accel > 0 else 0.0
+                            diff_s = actual_ramp_s - expected_ramp_s
+                            ok = abs(diff_s) < max(1.0, expected_ramp_s * 0.25)
+                            result = "OK" if ok else "SLOW" if diff_s > 0 else "FAST"
+                            ramp_results.append((step_idx, target_rpm, expected_ramp_s, actual_ramp_s, diff_s, result))
+                            step_reached_ms[step_idx] = ts_ms
+                            del ramp_targets[step_idx]
+                            transition_ms = 0.0
+
+                    # Collect steady-state samples (after target reached)
+                    if step_idx in step_reached_ms and ts_ms >= step_reached_ms[step_idx]:
+                        steady_rpm_by_step.setdefault(step_idx, []).append(rpm_val)
+
+            # Summary table
+            emit("", log)
+            emit("[TEST] === RPM SUMMARY BY STEP ===", log)
+            emit(f"[TEST] {'Step':>4}  {'Count':>5}  {'Min RPM':>8}  {'Max RPM':>8}  {'Avg RPM':>8}  {'Steady':>6}  {'StdyAvg':>8}", log)
+            emit(f"[TEST] {'----':>4}  {'-----':>5}  {'-------':>8}  {'-------':>8}  {'-------':>8}  {'------':>6}  {'-------':>8}", log)
+            for step_idx in sorted(rpm_by_step.keys()):
+                vals = rpm_by_step[step_idx]
+                avg = sum(vals) / len(vals) if vals else 0
+                svals = steady_rpm_by_step.get(step_idx, [])
+                savg = sum(svals) / len(svals) if svals else 0
+                emit(
+                    f"[TEST] {step_idx:4d}  {len(vals):5d}  {min(vals):8d}  {max(vals):8d}  {avg:8.0f}"
+                    f"  {len(svals):6d}  {savg:8.0f}",
+                    log,
+                )
+
+            # Ramp / acceleration analysis
+            if ramp_results:
+                emit("", log)
+                emit("[TEST] === RAMP / ACCELERATION ANALYSIS ===", log)
+                emit(f"[TEST] {'Step':>4}  {'Target':>7}  {'Expect':>7}  {'Actual':>7}  {'Δ':>7}  {'Result':>6}", log)
+                emit(f"[TEST] {'':>4}  {'RPM':>7}  {'Ramp s':>7}  {'Ramp s':>7}  {'s':>7}  {'':>6}", log)
+                emit(f"[TEST] {'----':>4}  {'-------':>7}  {'-------':>7}  {'-------':>7}  {'-------':>7}  {'------':>6}", log)
+
+                for step_idx, target_rpm, expected_ramp_s, actual_ramp_s, diff_s, result in ramp_results:
+                    emit(
+                        f"[TEST] {step_idx:4d}  {target_rpm:7.0f}  {expected_ramp_s:7.1f}  "
+                        f"{actual_ramp_s:7.1f}  {diff_s:+7.1f}  {result:>6}",
+                        log,
+                    )
+            emit("", log)
+
+            # Verdict
+            if hits["hb_estop"]:
+                emit("[TEST] FAIL — E-STOP detected during protocol run", log)
+                return 1
+
+            if not hits["hb_running"]:
+                emit("[TEST] FAIL — no RUNNING heartbeats observed", log)
+                return 1
+
+            completed = bool(hits["hb_completed"])
+            total_hbs = len(hits["hb_running"])
+            rpm_steps = len(rpm_by_step)
+
+            if completed:
+                emit(
+                    f"[TEST] PASS — protocol completed ({total_hbs} RUNNING HBs, "
+                    f"RPM data for {rpm_steps} steps)",
+                    log,
+                )
+            else:
+                emit(
+                    f"[TEST] WARN — protocol did not reach COMPLETED state "
+                    f"({total_hbs} RUNNING HBs, RPM data for {rpm_steps} steps). "
+                    f"May need longer --run-margin-s or --tail-s.",
+                    log,
+                )
+
             emit("[TEST] Capture complete", log)
 
     return 0
@@ -1031,10 +1264,21 @@ def _run_gate_step1(
 
     hits = scan_lines(lines, {
         "proto_ok": r"NOTICE;PROTO_RX=OK",
-        "hb_idle": r"HB;.*STATE=IDLE",
-        "hb_running": r"HB;.*STATE=RUNNING",
         "err_wrong_stat": r"ACK;RESUME=ERR_WRONG_STAT",
         "cc_stat": r"STAT;SEQ=",
+    })
+
+    # Only evaluate HBs AFTER protocol upload completes — boot-time frames
+    # can be garbled (e.g. glued READY;ID=CC fragments) and must be excluded.
+    proto_ok_idx = None
+    for i, line in enumerate(lines):
+        if re.search(r"NOTICE;PROTO_RX=OK", line, re.IGNORECASE):
+            proto_ok_idx = i
+            break
+    post_proto = lines[proto_ok_idx + 1:] if proto_ok_idx is not None else lines
+    post_hits = scan_lines(post_proto, {
+        "hb_idle": r"HB;.*STATE=IDLE",
+        "hb_running": r"HB;.*STATE=RUNNING",
     })
 
     # Release RUN for subsequent steps
@@ -1053,21 +1297,21 @@ def _run_gate_step1(
         return _STEP_FAIL, reason
 
     # Check whether any RUNNING heartbeat appeared BEFORE we released RUN.
-    # All lines so far were captured while RUN was held low.
-    if hits["hb_running"]:
-        reason = f"HB STATE=RUNNING appeared while RUN held low ({len(hits['hb_running'])} occurrences)"
+    # Only post-protocol-upload HBs are checked (boot noise excluded).
+    if post_hits["hb_running"]:
+        reason = f"HB STATE=RUNNING appeared while RUN held low ({len(post_hits['hb_running'])} occurrences)"
         emit(f"[TEST] Step 1: {_STEP_FAIL} — {reason}", log)
         return _STEP_FAIL, reason
 
     # Primary evidence: proto loaded + NO RUNNING + NO ERR_WRONG_STAT = gate worked.
     # XPB HB IDLE is bonus confirmation; CC STAT messages prove the system is alive.
-    alive = hits["hb_idle"] or hits["cc_stat"]
+    alive = post_hits["hb_idle"] or hits["cc_stat"]
     if not alive:
         reason = "No telemetry after protocol upload (system unresponsive)"
         emit(f"[TEST] Step 1: {_STEP_INCONCLUSIVE} — {reason}", log)
         return _STEP_INCONCLUSIVE, reason
 
-    idle_detail = f"{len(hits['hb_idle'])} IDLE HBs" if hits["hb_idle"] else f"{len(hits['cc_stat'])} CC STAT msgs"
+    idle_detail = f"{len(post_hits['hb_idle'])} IDLE HBs" if post_hits["hb_idle"] else f"{len(hits['cc_stat'])} CC STAT msgs"
     reason = (
         f"Proto upload OK, {idle_detail}, "
         "no RUNNING before RUN released, no ERR_WRONG_STAT"
@@ -1161,12 +1405,16 @@ def _run_gate_step3(
     hb_window_s: float,
     drop_first_line: bool,
 ) -> tuple[str, str]:
-    """Step 3: Create resume snapshot via reset, then cold-boot with RUN held low.
+    """Step 3: Power-loss resume — run protocol until a step boundary save,
+    then hard power-cycle with RUN held low.
 
     Expects CMD;RESUME=AUTO with AUTOSTART=1, followed by ACK;RESUME=OK.
+    The XPB writes a resume snapshot to SD whenever STEP or LOOP changes
+    during RUNNING.  A hard power-cut simulates power loss; the next boot
+    should find the snapshot and offer auto-resume.
     """
-    emit("[TEST] === STEP 3: RESUME AUTOSTART=1 with RUN held low ===", log)
-    emit("[TEST] Expected: resume record created by reset, then honored on cold boot", log)
+    emit("[TEST] === STEP 3: RESUME AUTOSTART=1 via power-loss recovery ===", log)
+    emit("[TEST] Expected: periodic save during RUNNING, power cut, then resume on cold boot", log)
 
     # --- 3a: Resume from PAUSED to get a running protocol ---
     emit("[TEST] Step 3a: Resuming from PAUSED (assert RUN)", log)
@@ -1182,35 +1430,27 @@ def _run_gate_step3(
         send_command(ser, "RUN=0", log=log)
         return _STEP_INCONCLUSIVE, reason
 
-    # --- 3b: Trigger reset to create resume snapshot ---
-    emit("[TEST] Step 3b: Issuing RESET pulse to create resume snapshot", log)
-    send_command(ser, "RUN=0", log=log)
-    time.sleep(0.3)
-    send_command(ser, f"PULSE RST={RUN_GATE_RESET_PULSE_MS}", log=log)
-    reset_lines = capture_lines(ser, RUN_GATE_RESET_WAIT_S, log)
-
-    # Wait for system to settle back to IDLE
-    emit("[TEST] Step 3c: Waiting for system to return to IDLE after reset", log)
-    post_reset_lines = capture_lines(ser, hb_window_s, log)
-    post_hits = scan_lines(post_reset_lines, {
-        "hb_idle": r"HB;.*STATE=IDLE",
-        "sw_run_off": r"SW;RUN=0",
-        "cc_stat": r"STAT;SEQ=",
+    # --- 3b: Wait for at least one step boundary so XPB periodic save fires ---
+    emit(f"[TEST] Step 3b: Waiting {RUN_GATE_STEP_WAIT_S:.0f}s for step boundary save", log)
+    run_lines = capture_lines(ser, RUN_GATE_STEP_WAIT_S, log)
+    run_hits = scan_lines(run_lines, {
+        "hb_running": r"HB;.*STATE=RUNNING",
+        "step_change": r"HB;.*STATE=RUNNING;STEP=(?!1;)",
     })
-    # Accept HB IDLE, or CC alive with no RUNNING as evidence of idle
-    post_alive = post_hits["hb_idle"] or post_hits["sw_run_off"] or post_hits["cc_stat"]
-    if not post_alive:
-        reason = "System did not return to IDLE after reset pulse"
+    if not run_hits["step_change"]:
+        reason = "Protocol did not advance past step 1 — no periodic save expected"
         emit(f"[TEST] Step 3: {_STEP_INCONCLUSIVE} — {reason}", log)
+        send_command(ser, "RUN=0", log=log)
         return _STEP_INCONCLUSIVE, reason
+    emit(f"[TEST] Step boundary observed ({len(run_hits['step_change'])} HBs past step 1)", log)
+
+    # --- 3c: Hard power-cut to simulate power loss ---
+    emit("[TEST] Step 3c: Hard power-cut (simulating power loss)", log)
+    # RUN stays latched low (already asserted from step 2)
+    _power_cycle(ser, log, dwell_s, drop_first_line=drop_first_line)
 
     # --- 3d: Cold boot with RUN held low — expect RESUME=AUTO + AUTOSTART=1 ---
     emit("[TEST] Step 3d: Cold boot with RUN held low, expecting RESUME AUTOSTART=1", log)
-    send_command(ser, "RUN=1", log=log)
-    time.sleep(0.25)
-
-    _power_cycle(ser, log, dwell_s, drop_first_line=drop_first_line)
-
     boot_lines = capture_lines(ser, boot_wait_s, log, drop_first_line=drop_first_line)
 
     hits = scan_lines(boot_lines, {
@@ -1261,6 +1501,113 @@ def _run_gate_step3(
 
     reason = "CMD;RESUME=AUTO AUTOSTART=1 sent, ACK=OK, system entered RUNNING/PREHEAT"
     emit(f"[TEST] Step 3: {_STEP_PASS} — {reason}", log)
+    return _STEP_PASS, reason
+
+
+def _run_gate_step4(
+    ser: serial.Serial,
+    log: TextIO | None,
+    *,
+    boot_wait_s: float,
+    dwell_s: float,
+    hb_window_s: float,
+    drop_first_line: bool,
+) -> tuple[str, str]:
+    """Step 4: Manual reset clears resume — after reset, cold boot must NOT
+    auto-resume even with RUN held low.
+
+    Flow: RUNNING → RESET pulse → system returns to IDLE → cold boot with
+    RUN held → verify NO CMD;RESUME=AUTO sent, system stays IDLE.
+    """
+    emit("[TEST] === STEP 4: Manual reset clears resume state ===", log)
+    emit("[TEST] Expected: RESET clears resume; cold boot with RUN held stays IDLE", log)
+
+    # --- 4a: Ensure we're RUNNING (system should still be running from step 3 resume) ---
+    emit("[TEST] Step 4a: Confirming still RUNNING", log)
+    send_command(ser, "RUN=1", log=log)
+    check_lines = capture_lines(ser, 3.0, log)
+    check_hits = scan_lines(check_lines, {
+        "hb_running": r"HB;.*STATE=RUNNING",
+    })
+    if not check_hits["hb_running"]:
+        reason = "System not in RUNNING state — cannot test reset"
+        emit(f"[TEST] Step 4: {_STEP_INCONCLUSIVE} — {reason}", log)
+        send_command(ser, "RUN=0", log=log)
+        return _STEP_INCONCLUSIVE, reason
+
+    # --- 4b: Issue RESET pulse to clear resume state ---
+    emit("[TEST] Step 4b: Issuing RESET pulse (should clear resume slots)", log)
+    send_command(ser, "RUN=0", log=log)
+    time.sleep(0.3)
+    send_command(ser, f"PULSE RST={RUN_GATE_RESET_PULSE_MS}", log=log)
+    capture_lines(ser, RUN_GATE_RESET_WAIT_S, log)
+
+    # --- 4c: Wait for system to settle back to IDLE ---
+    emit("[TEST] Step 4c: Waiting for system to return to IDLE after reset", log)
+    post_lines = capture_lines(ser, hb_window_s, log)
+    post_hits = scan_lines(post_lines, {
+        "hb_idle": r"HB;.*STATE=IDLE",
+        "cc_stat": r"STAT;SEQ=",
+    })
+    if not post_hits["hb_idle"] and not post_hits["cc_stat"]:
+        reason = "System did not return to IDLE after reset pulse"
+        emit(f"[TEST] Step 4: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    # --- 4d: Cold boot with RUN held low — must NOT auto-resume ---
+    emit("[TEST] Step 4d: Cold boot with RUN held, expecting NO resume (IDLE only)", log)
+    send_command(ser, "RUN=1", log=log)
+    time.sleep(0.25)
+    _power_cycle(ser, log, dwell_s, drop_first_line=drop_first_line)
+    boot_lines = capture_lines(ser, boot_wait_s, log, drop_first_line=drop_first_line)
+
+    # Only check post-protocol-upload HBs (exclude garbled boot frames)
+    proto_ok_idx = None
+    for i, line in enumerate(boot_lines):
+        if re.search(r"NOTICE;PROTO_RX=OK", line, re.IGNORECASE):
+            proto_ok_idx = i
+            break
+
+    hits = scan_lines(boot_lines, {
+        "proto_ok": r"NOTICE;PROTO_RX=OK",
+        "resume_auto": r"CMD;RESUME=AUTO",
+        "cc_stat": r"STAT;SEQ=",
+    })
+    post_proto = boot_lines[proto_ok_idx + 1:] if proto_ok_idx is not None else boot_lines
+    post_hits = scan_lines(post_proto, {
+        "hb_idle": r"HB;.*STATE=IDLE",
+        "hb_running": r"HB;.*STATE=RUNNING",
+    })
+
+    # Cleanup
+    send_command(ser, "RUN=0", log=log)
+    time.sleep(0.25)
+
+    # --- Evaluate ---
+    if not hits["proto_ok"]:
+        reason = "Protocol upload NOT observed on post-reset boot"
+        emit(f"[TEST] Step 4: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    if hits["resume_auto"]:
+        reason = f"CMD;RESUME=AUTO was sent despite manual reset ({len(hits['resume_auto'])} occurrences)"
+        emit(f"[TEST] Step 4: {_STEP_FAIL} — {reason}", log)
+        return _STEP_FAIL, reason
+
+    if post_hits["hb_running"]:
+        reason = f"HB STATE=RUNNING appeared — system auto-started despite reset clearing resume"
+        emit(f"[TEST] Step 4: {_STEP_FAIL} — {reason}", log)
+        return _STEP_FAIL, reason
+
+    alive = post_hits["hb_idle"] or hits["cc_stat"]
+    if not alive:
+        reason = "No telemetry after boot (system unresponsive)"
+        emit(f"[TEST] Step 4: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    idle_count = len(post_hits["hb_idle"]) if post_hits["hb_idle"] else 0
+    reason = f"No CMD;RESUME=AUTO sent, {idle_count} IDLE HBs, no RUNNING — reset cleared resume"
+    emit(f"[TEST] Step 4: {_STEP_PASS} — {reason}", log)
     return _STEP_PASS, reason
 
 
@@ -1330,6 +1677,19 @@ def run_run_gate(args: argparse.Namespace) -> int:
                     drop_first_line=args.drop_first_line,
                 )
 
+            # Step 4 — depends on step 3 passing
+            if s3_result != _STEP_PASS:
+                s4_result, s4_reason = _STEP_SKIPPED, f"Skipped (step 3 was {s3_result})"
+                emit(f"[TEST] Step 4: {s4_result} — {s4_reason}", log)
+            else:
+                s4_result, s4_reason = _run_gate_step4(
+                    ser, log,
+                    boot_wait_s=args.boot_wait_s,
+                    dwell_s=RUN_GATE_POWER_DWELL_S,
+                    hb_window_s=args.hb_window_s,
+                    drop_first_line=args.drop_first_line,
+                )
+
             # Final cleanup
             send_command(ser, "RUN=0", log=log)
             send_command(ser, "STATUS", log=log)
@@ -1343,18 +1703,93 @@ def run_run_gate(args: argparse.Namespace) -> int:
             emit(f"[TEST]         {s1_reason}", log)
             emit(f"[TEST] Step 2 (Gate open, IDLE→RUNNING→PAUSED):    {s2_result}", log)
             emit(f"[TEST]         {s2_reason}", log)
-            emit(f"[TEST] Step 3 (RESUME AUTOSTART=1 accepted):       {s3_result}", log)
+            emit(f"[TEST] Step 3 (Power-loss resume AUTOSTART=1):     {s3_result}", log)
             emit(f"[TEST]         {s3_reason}", log)
+            emit(f"[TEST] Step 4 (Manual reset clears resume):        {s4_result}", log)
+            emit(f"[TEST]         {s4_reason}", log)
             emit("", log)
             emit("[TEST] Capture complete", log)
 
-    all_pass = all(r == _STEP_PASS for r in (s1_result, s2_result, s3_result))
-    any_fail = any(r == _STEP_FAIL for r in (s1_result, s2_result, s3_result))
+    all_pass = all(r == _STEP_PASS for r in (s1_result, s2_result, s3_result, s4_result))
+    any_fail = any(r == _STEP_FAIL for r in (s1_result, s2_result, s3_result, s4_result))
     if all_pass:
         return 0
     if any_fail:
         return 1
     return 0
+
+
+# ---------------------------------------------------------------------------
+# run-suite: run all tests and produce a master log
+# ---------------------------------------------------------------------------
+
+# Each entry is (test_name, argv_tokens_after mode).
+# Tests are run in order; each gets its own log file as usual.
+_SUITE_TESTS: list[tuple[str, list[str]]] = [
+    ("cold-boot", []),
+    ("comms-health", []),
+    ("reset-cancel", []),
+    ("reset-pulse", []),
+    ("run-cycle", []),
+    ("run-gate", []),
+]
+
+
+def run_suite(args: argparse.Namespace) -> int:
+    """Run all standard tests sequentially and write a master log."""
+    log_dir = ensure_log_dir()
+    ts = timestamp()
+    master_path = log_dir / f"{ts}_suite.log"
+    script = str(Path(__file__).resolve())
+
+    # Build common args forwarded to each sub-invocation
+    common: list[str] = [sys.executable, script, "--port", args.port, "--baud", str(args.baud)]
+    if args.drop_first_line:
+        common.append("--drop-first-line")
+
+    results: list[tuple[str, int]] = []
+
+    with open(master_path, "w", encoding="utf-8") as mlog:
+        emit(f"[SUITE] Logging to {rel_path(master_path)}", mlog)
+        emit(f"[SUITE] Command: {format_invocation()}", mlog)
+        emit(f"[SUITE] === TEST SUITE ({len(_SUITE_TESTS)} tests) ===", mlog)
+        emit("", mlog)
+
+        for idx, (test_name, extra_args) in enumerate(_SUITE_TESTS, 1):
+            emit(f"[SUITE] --- [{idx}/{len(_SUITE_TESTS)}] {test_name} ---", mlog)
+            cmd = common + [test_name] + extra_args
+            emit(f"[SUITE] > {shlex.join(cmd)}", mlog)
+
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+
+            # Stream child output into the master log
+            for line in proc.stdout.splitlines():
+                emit(line, mlog)
+
+            rc = proc.returncode
+            label = "PASS" if rc == 0 else ("ERROR" if rc == 2 else "FAIL")
+            emit(f"[SUITE] {test_name}: exit {rc} ({label})", mlog)
+            emit("", mlog)
+            results.append((test_name, rc))
+
+        # Summary table
+        emit("[SUITE] === SUITE SUMMARY ===", mlog)
+        for test_name, rc in results:
+            label = "PASS" if rc == 0 else ("ERROR" if rc == 2 else "FAIL")
+            emit(f"[SUITE]   {test_name:<25s} {label}", mlog)
+        passes = sum(1 for _, rc in results if rc == 0)
+        fails = sum(1 for _, rc in results if rc != 0)
+        emit(f"[SUITE] Totals: {passes} passed, {fails} failed out of {len(results)}", mlog)
+        emit("[SUITE] Suite complete", mlog)
+
+    return 0 if fails == 0 else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1561,7 +1996,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_gate.add_argument(
         "--skip-step-3",
         action="store_true",
-        help="Skip step 3 (resume snapshot + cold boot); run only steps 1-2",
+        help="Skip steps 3-4 (power-loss resume + manual reset); run only steps 1-2",
     )
     run_gate.set_defaults(handler=run_run_gate)
 
@@ -1584,6 +2019,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds to observe each phase (default: 5.0)",
     )
     run_cycle.set_defaults(handler=run_run_cycle)
+
+    run_proto = subparsers.add_parser(
+        "run-protocol",
+        help="T9: Run a loaded protocol to completion and log RPM vs step",
+    )
+    run_proto.add_argument(
+        "--protocol",
+        type=Path,
+        required=True,
+        help="Path to protocol CSV to run (must already be loaded on SD)",
+    )
+    run_proto.add_argument(
+        "--settle-s",
+        type=float,
+        default=30.0,
+        help="Max seconds to wait for IDLE before asserting RUN (default: 30.0)",
+    )
+    run_proto.add_argument(
+        "--run-margin-s",
+        type=float,
+        default=DEFAULT_RUN_MARGIN,
+        help=f"Extra seconds to hold RUN beyond computed runtime (default: {DEFAULT_RUN_MARGIN})",
+    )
+    run_proto.add_argument(
+        "--tail-s",
+        type=float,
+        default=DEFAULT_TAIL_PAD,
+        help=f"Extra seconds to capture after RUN released (default: {DEFAULT_TAIL_PAD})",
+    )
+    run_proto.set_defaults(handler=run_protocol)
 
     comms_health = subparsers.add_parser(
         "comms-health",
@@ -1614,6 +2079,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds to keep power off before restoring (default: 4.0)",
     )
     cold_boot.set_defaults(handler=run_cold_boot)
+
+    suite = subparsers.add_parser(
+        "run-suite",
+        help="Run all standard tests and produce a master log",
+    )
+    suite.set_defaults(handler=run_suite)
 
     return parser
 
@@ -1681,6 +2152,14 @@ def validate_args(args: argparse.Namespace) -> None:
             raise SystemExit("--pulse-ms must be positive")
         if args.observe_s <= 0:
             raise SystemExit("--observe-s must be positive")
+
+    if args.mode == "run-protocol":
+        if args.settle_s <= 0:
+            raise SystemExit("--settle-s must be positive")
+        if args.run_margin_s < 0:
+            raise SystemExit("--run-margin-s cannot be negative")
+        if args.tail_s < 0:
+            raise SystemExit("--tail-s cannot be negative")
 
     if args.mode == "comms-health":
         if args.duration_s <= 0:

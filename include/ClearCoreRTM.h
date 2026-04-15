@@ -205,12 +205,16 @@ private:
     /* ——— protocol helpers ——— */
     // no loadProtocol needed, SD card moved to XPB
 
-    /* ——— HLFB speed feedback ——— */
-    static constexpr uint8_t  kHlfbPPR     = 2;         // pulses per rev (match motor config)
-    static constexpr uint32_t kHlfbStaleUs = 2000000;   // 2 s no-edge timeout → RPM = 0
-    int16_t  measuredRpm_{0};        // latest computed RPM (signed via currentSpeed_)
+    /* ——— HLFB speed feedback (span-based frequency measurement) ——— */
+    static constexpr uint8_t  kHlfbPPR     = 16;        // pulses per rev (match motor MSP config)
+    static constexpr uint32_t kHlfbStaleUs = 400000;    // 400 ms no-edge timeout → RPM = 0
+    int16_t  measuredRpm_{0};        // latest computed RPM (signed via VelocityRefCommanded)
     uint32_t hlfbLastEdgeUs_{0};     // timestamp of last HLFB rising edge (μs)
-    bool     hlfbFirstEdge_{true};   // skip first period calc (no valid Δ yet)
+    bool     hlfbFirstEdge_{true};   // true until first edge of current window
+    uint16_t hlfbEdgeCount_{0};      // edges counted in current HB window
+    uint32_t hlfbWindowStartUs_{0};  // timestamp of first edge in window
+    uint32_t hlfbWindowLastUs_{0};   // timestamp of most recent edge in window
+    inline void pollHlfbEdge_();     // poll HlfbHasRisen and update edge counters
 
     /* ——— heater behaviour ——— */
     bool coldStart_{true};           // True on boot, false once running

@@ -88,7 +88,7 @@ void TTLComms::sendMessage(const char* data, MessageType type) {
     }
 
     // Encode with checksum + LF
-    char msg[80];
+    char msg[MAX_MSG_LEN + 6];
     const uint8_t checksum = this->calculateXOR(payload);
     snprintf(msg, sizeof(msg), "%s:%02X\n", payload, checksum);
 
