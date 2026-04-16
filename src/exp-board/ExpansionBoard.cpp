@@ -1370,21 +1370,26 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                     owner_->runSw_.update();
                     const bool runEngaged = (owner_->runSw_.read() == LOW);
 
-                    if (runEngaged) {
-                        // Only now do we actually resume.
+                    // Always send CMD;RESUME=AUTO so CC loads the
+                    // saved position.  AUTOSTART=1 when RUN is engaged
+                    // (auto-start immediately), AUTOSTART=0 when RUN is
+                    // off (load position, stay IDLE until operator toggles
+                    // RUN).
+                    {
+                        const int autoStart = runEngaged ? 1 : 0;
                         char line[96];
                         snprintf(line, sizeof(line),
                                 "CMD;RESUME=AUTO;STEP=%u;LOOP=%u;PHASH=%lu;AUTOSTART=%d",
                                 (unsigned)owner_->storedStep_,
                                 (unsigned)owner_->storedLoopCur_,
                                 (unsigned long)owner_->storedPhash_,
-                                1);  // AUTOSTART=1 since RUN is engaged
+                                autoStart);
                         sendCommand(line, MessageType::CRITICAL);
-                        owner_->dbgln("[RESUME] Sent (RUN switch engaged)");
-                    } else {
-                        // Do not resume. Skip straight to idle.
-                        owner_->dbgln("[RESUME] Held (RUN switch OFF) -> Idling");
-                        owner_->bootPhase_    = BootPhase::Done;
+                        if (runEngaged) {
+                            owner_->dbgln("[RESUME] Sent AUTOSTART=1 (RUN switch engaged)");
+                        } else {
+                            owner_->dbgln("[RESUME] Sent AUTOSTART=0 (RUN switch OFF, position loaded)");
+                        }
                     }
                 } else {
                     owner_->dbgln("[RESUME] No valid resume (PHASH mismatch or none)");

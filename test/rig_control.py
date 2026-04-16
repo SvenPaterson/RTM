@@ -130,8 +130,10 @@ def rel_path(path: Path) -> str:
 
 
 def ensure_log_dir() -> Path:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    return LOG_DIR
+    now = datetime.now()
+    day_dir = LOG_DIR / f"{now.year}" / f"{now.month:02d}" / f"{now.day:02d}"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    return day_dir
 
 
 def format_invocation(argv: Sequence[str] | None = None) -> str:
@@ -1281,6 +1283,20 @@ def _run_gate_step1(
     emit("[TEST] === STEP 1: RUN held low across cold boot ===", log)
     emit("[TEST] Expected: CC stays IDLE after protocol upload; no RUNNING before RUN released", log)
 
+    # --- Step 1 preamble: clear stale resume data with a RESET pulse ---
+    # Without this, leftover SD resume files from a prior run would trigger
+    # AUTOSTART=1 on the next boot with RUN held, correctly bypassing the
+    # gate (power-loss recovery) and invalidating the gate test.
+    emit("[TEST] Step 1 preamble: clearing stale resume data via RESET pulse", log)
+    send_command(ser, "RUN=0", log=log)
+    time.sleep(0.25)
+    send_command(ser, f"PULSE RST={RUN_GATE_RESET_PULSE_MS}", log=log)
+    capture_lines(ser, RUN_GATE_RESET_WAIT_S, log)
+    # Power-cycle after reset so we boot from a truly clean state
+    _power_cycle(ser, log, dwell_s, drop_first_line=drop_first_line)
+    capture_lines(ser, boot_wait_s, log, drop_first_line=drop_first_line)
+    emit("[TEST] Preamble complete — resume data cleared", log)
+
     # Clean slate
     send_command(ser, "RUN=0", log=log)
     time.sleep(0.25)
@@ -1489,47 +1505,73 @@ def _run_gate_step3(
         "resume_auto": r"CMD;RESUME=AUTO.*AUTOSTART=1",
         "resume_ok": r"ACK;RESUME=OK",
         "resume_err": r"ACK;RESUME=ERR",
-        "hb_running": r"HB;.*STATE=RUNNING",
-        "hb_preheat": r"HB;.*STATE=PREHEAT",
         "proto_ok": r"NOTICE;PROTO_RX=OK",
         "phash_overflow": r"PHASH=2147483647",
     })
 
-    # Cleanup
-    send_command(ser, "RUN=0", log=log)
-    time.sleep(0.25)
-
-    # --- Evaluate ---
+    # --- Evaluate protocol upload and resume handshake ---
     if hits["phash_overflow"]:
         emit("[TEST] WARNING: PHASH=2147483647 (INT_MAX) detected — possible uint32→int truncation", log)
 
     if not hits["proto_ok"]:
         reason = "Protocol upload NOT observed on resume boot"
         emit(f"[TEST] Step 3: {_STEP_INCONCLUSIVE} — {reason}", log)
+        send_command(ser, "RUN=0", log=log)
         return _STEP_INCONCLUSIVE, reason
 
     if not hits["resume_auto"]:
         reason = "CMD;RESUME=AUTO with AUTOSTART=1 NOT sent by XPB"
         detail = " (PHASH overflow may prevent match)" if hits["phash_overflow"] else ""
         emit(f"[TEST] Step 3: {_STEP_INCONCLUSIVE} — {reason}{detail}", log)
+        send_command(ser, "RUN=0", log=log)
         return _STEP_INCONCLUSIVE, reason + detail
 
     if hits["resume_err"] and not hits["resume_ok"]:
         err_line = hits["resume_err"][0]
         reason = f"Resume rejected by CC: {err_line}"
         emit(f"[TEST] Step 3: {_STEP_FAIL} — {reason}", log)
+        send_command(ser, "RUN=0", log=log)
         return _STEP_FAIL, reason
 
     if not hits["resume_ok"]:
         reason = "CMD;RESUME=AUTO sent but ACK;RESUME=OK not received"
         emit(f"[TEST] Step 3: {_STEP_INCONCLUSIVE} — {reason}", log)
+        send_command(ser, "RUN=0", log=log)
         return _STEP_INCONCLUSIVE, reason
 
-    started = hits["hb_running"] or hits["hb_preheat"]
+    # --- Verify system actually entered RUNNING/PREHEAT AFTER the resume ACK ---
+    # The boot capture can contain garbled stale frames from the previous
+    # power cycle that match STATE=RUNNING.  Only count heartbeats that
+    # appear after the ACK;RESUME=OK line.
+    ack_re = re.compile(r"ACK;RESUME=OK", re.IGNORECASE)
+    ack_idx = next((i for i, l in enumerate(boot_lines) if ack_re.search(l)), None)
+    post_resume = boot_lines[ack_idx + 1:] if ack_idx is not None else []
+
+    post_hits = scan_lines(post_resume, {
+        "hb_running": r"HB;.*STATE=RUNNING",
+        "hb_preheat": r"HB;.*STATE=PREHEAT",
+        "hb_resume": r"HB;.*STATE=RESUME",
+    })
+
+    started = post_hits["hb_running"] or post_hits["hb_preheat"] or post_hits["hb_resume"]
     if not started:
-        reason = "Resume accepted (ACK=OK) but no RUNNING/PREHEAT heartbeat observed"
-        emit(f"[TEST] Step 3: {_STEP_INCONCLUSIVE} — {reason}", log)
-        return _STEP_INCONCLUSIVE, reason
+        reason = "Resume accepted (ACK=OK) but CC stayed IDLE — never entered RUNNING/PREHEAT"
+        emit(f"[TEST] Step 3: {_STEP_FAIL} — {reason}", log)
+        send_command(ser, "RUN=0", log=log)
+        return _STEP_FAIL, reason
+
+    # --- Hold RUNNING for 15s so operator can visually confirm on LCD ---
+    emit("[TEST] Step 3e: Holding RUNNING for 15s (visual verification)", log)
+    hold_lines = capture_lines(ser, 15.0, log)
+    hold_hits = scan_lines(hold_lines, {
+        "hb_running": r"HB;.*STATE=RUNNING",
+    })
+    running_count = len(post_hits["hb_running"]) + len(hold_hits["hb_running"])
+    emit(f"[TEST] Step 3e: {running_count} RUNNING HBs observed during hold", log)
+
+    # Cleanup — release RUN so system goes to PAUSED for step 4
+    send_command(ser, "RUN=0", log=log)
+    time.sleep(0.25)
 
     reason = "CMD;RESUME=AUTO AUTOSTART=1 sent, ACK=OK, system entered RUNNING/PREHEAT"
     emit(f"[TEST] Step 3: {_STEP_PASS} — {reason}", log)
@@ -1643,8 +1685,177 @@ def _run_gate_step4(
     return _STEP_PASS, reason
 
 
+def _run_gate_step5(
+    ser: serial.Serial,
+    log: TextIO | None,
+    *,
+    boot_wait_s: float,
+    dwell_s: float,
+    hb_window_s: float,
+    drop_first_line: bool,
+) -> tuple[str, str]:
+    """Step 5: Power-loss resume with RUN switch OFF — verify that XPB sends
+    CMD;RESUME=AUTO with AUTOSTART=0, CC loads position but stays IDLE,
+    and a subsequent RUN toggle starts from the resume point (not step 1).
+
+    Flow: build resume state (RUN ON → wait for step boundary save) → hard
+    power-cut → cold boot with RUN OFF → expect AUTOSTART=0 + IDLE → toggle
+    RUN → expect RUNNING from resumed step (>1).
+    """
+    emit("[TEST] === STEP 5: RESUME AUTOSTART=0 (RUN OFF at power restore) ===", log)
+    emit("[TEST] Expected: power restore with RUN off → AUTOSTART=0 → IDLE → RUN toggle → RUNNING from resume point", log)
+
+    # --- 5a: Start a run and wait for step boundary save ---
+    emit("[TEST] Step 5a: Starting protocol run to build resume state", log)
+    send_command(ser, "RUN=1", log=log)
+    resume_lines = capture_lines(ser, 3.0, log)
+    resume_hits = scan_lines(resume_lines, {
+        "hb_running": r"HB;.*STATE=RUNNING",
+    })
+    if not resume_hits["hb_running"]:
+        reason = "Could not start RUNNING"
+        emit(f"[TEST] Step 5: {_STEP_INCONCLUSIVE} — {reason}", log)
+        send_command(ser, "RUN=0", log=log)
+        return _STEP_INCONCLUSIVE, reason
+
+    emit(f"[TEST] Step 5a: Waiting {RUN_GATE_STEP_WAIT_S:.0f}s for step boundary save", log)
+    run_lines = capture_lines(ser, RUN_GATE_STEP_WAIT_S, log)
+    run_hits = scan_lines(run_lines, {
+        "step_change": r"HB;.*STATE=RUNNING;STEP=(?!1;)",
+    })
+    if not run_hits["step_change"]:
+        reason = "Protocol did not advance past step 1 — no periodic save expected"
+        emit(f"[TEST] Step 5: {_STEP_INCONCLUSIVE} — {reason}", log)
+        send_command(ser, "RUN=0", log=log)
+        return _STEP_INCONCLUSIVE, reason
+    emit(f"[TEST] Step boundary observed ({len(run_hits['step_change'])} HBs past step 1)", log)
+
+    # --- 5b: Hard power-cut, then cold boot with RUN OFF ---
+    emit("[TEST] Step 5b: Hard power-cut, then cold boot with RUN OFF (high)", log)
+    # Release RUN before power-off so it's OFF at restore
+    send_command(ser, "RUN=0", log=log)
+    time.sleep(0.25)
+    _power_cycle(ser, log, dwell_s, drop_first_line=drop_first_line)
+
+    # --- 5c: Cold boot with RUN OFF — expect AUTOSTART=0 + IDLE ---
+    emit("[TEST] Step 5c: Cold boot with RUN off, expecting RESUME AUTOSTART=0", log)
+    boot_lines = capture_lines(ser, boot_wait_s, log, drop_first_line=drop_first_line)
+
+    hits = scan_lines(boot_lines, {
+        "resume_auto_0": r"CMD;RESUME=AUTO.*AUTOSTART=0",
+        "resume_auto_1": r"CMD;RESUME=AUTO.*AUTOSTART=1",
+        "resume_auto_any": r"CMD;RESUME=AUTO",
+        "resume_ok": r"ACK;RESUME=OK",
+        "resume_err": r"ACK;RESUME=ERR",
+        "proto_ok": r"NOTICE;PROTO_RX=OK",
+    })
+
+    # Only evaluate post-protocol HBs
+    proto_ok_idx = None
+    for i, line in enumerate(boot_lines):
+        if re.search(r"NOTICE;PROTO_RX=OK", line, re.IGNORECASE):
+            proto_ok_idx = i
+            break
+    post_proto = boot_lines[proto_ok_idx + 1:] if proto_ok_idx is not None else boot_lines
+    post_hits = scan_lines(post_proto, {
+        "hb_idle": r"HB;.*STATE=IDLE",
+        "hb_running": r"HB;.*STATE=RUNNING",
+    })
+
+    if not hits["proto_ok"]:
+        reason = "Protocol upload NOT observed on resume boot"
+        emit(f"[TEST] Step 5: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    if not hits["resume_auto_any"]:
+        reason = "No CMD;RESUME=AUTO sent by XPB (resume data lost or not sent)"
+        emit(f"[TEST] Step 5: {_STEP_FAIL} — {reason}", log)
+        return _STEP_FAIL, reason
+
+    if hits["resume_auto_1"]:
+        reason = "CMD;RESUME=AUTO sent with AUTOSTART=1 despite RUN being OFF"
+        emit(f"[TEST] Step 5: {_STEP_FAIL} — {reason}", log)
+        return _STEP_FAIL, reason
+
+    if not hits["resume_auto_0"]:
+        reason = "CMD;RESUME=AUTO sent but AUTOSTART=0 not observed"
+        emit(f"[TEST] Step 5: {_STEP_FAIL} — {reason}", log)
+        return _STEP_FAIL, reason
+
+    if hits["resume_err"] and not hits["resume_ok"]:
+        err_line = hits["resume_err"][0]
+        reason = f"Resume rejected by CC: {err_line}"
+        emit(f"[TEST] Step 5: {_STEP_FAIL} — {reason}", log)
+        return _STEP_FAIL, reason
+
+    if not hits["resume_ok"]:
+        reason = "CMD;RESUME=AUTO sent but ACK;RESUME=OK not received"
+        emit(f"[TEST] Step 5: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    if post_hits["hb_running"]:
+        reason = "System entered RUNNING despite AUTOSTART=0 and RUN OFF"
+        emit(f"[TEST] Step 5: {_STEP_FAIL} — {reason}", log)
+        return _STEP_FAIL, reason
+
+    if not post_hits["hb_idle"]:
+        reason = "No IDLE HBs observed (system unresponsive)"
+        emit(f"[TEST] Step 5: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    # Extract resumed step from the CMD;RESUME=AUTO frame
+    resume_step_match = None
+    for line in hits["resume_auto_0"]:
+        m = re.search(r"STEP=(\d+)", line)
+        if m:
+            resume_step_match = int(m.group(1))
+            break
+
+    emit(f"[TEST] Step 5c: AUTOSTART=0 confirmed, {len(post_hits['hb_idle'])} IDLE HBs, resume position step={resume_step_match}", log)
+
+    # --- 5d: Toggle RUN ON → expect RUNNING from resume point (step > 1) ---
+    emit("[TEST] Step 5d: Toggling RUN ON, expecting RUNNING from resume position", log)
+    send_command(ser, "RUN=1", log=log)
+    run_lines = capture_lines(ser, hb_window_s, log)
+    run_hits = scan_lines(run_lines, {
+        "hb_running": r"HB;.*STATE=RUNNING",
+        "hb_preheat": r"HB;.*STATE=PREHEAT",
+    })
+
+    # Cleanup
+    send_command(ser, "RUN=0", log=log)
+    time.sleep(0.25)
+
+    started = run_hits["hb_running"] or run_hits["hb_preheat"]
+    if not started:
+        reason = "RUN toggled but system did not enter RUNNING/PREHEAT"
+        emit(f"[TEST] Step 5: {_STEP_FAIL} — {reason}", log)
+        return _STEP_FAIL, reason
+
+    # Check the step number in RUNNING HBs — should be > 1 if resume loaded
+    resumed_at_step = None
+    for line in (run_hits["hb_running"] or []):
+        m = re.search(r"STEP=(\d+)", line)
+        if m:
+            resumed_at_step = int(m.group(1))
+            break
+
+    detail = f"step={resumed_at_step}" if resumed_at_step else "step=unknown"
+    if resume_step_match and resumed_at_step and resumed_at_step < resume_step_match:
+        reason = f"System started at {detail} but resume was for step={resume_step_match} — position may not have loaded"
+        emit(f"[TEST] Step 5: {_STEP_INCONCLUSIVE} — {reason}", log)
+        return _STEP_INCONCLUSIVE, reason
+
+    reason = (
+        f"AUTOSTART=0 sent, ACK=OK, system stayed IDLE, "
+        f"RUN toggle → RUNNING ({detail})"
+    )
+    emit(f"[TEST] Step 5: {_STEP_PASS} — {reason}", log)
+    return _STEP_PASS, reason
+
+
 def run_run_gate(args: argparse.Namespace) -> int:
-    """Execute the three-step RUN-gate validation sequence from CODE_REVIEW.md §7."""
+    """Execute the five-step RUN-gate validation sequence from CODE_REVIEW.md §7."""
     log_dir = ensure_log_dir()
     log_path = log_dir / f"{timestamp()}_run_gate.log"
 
@@ -1722,6 +1933,20 @@ def run_run_gate(args: argparse.Namespace) -> int:
                     drop_first_line=args.drop_first_line,
                 )
 
+            # Step 5 — depends on step 4 passing (step 4 cleared resume,
+            # so step 5 builds fresh state then power-cycles with RUN OFF)
+            if s4_result != _STEP_PASS:
+                s5_result, s5_reason = _STEP_SKIPPED, f"Skipped (step 4 was {s4_result})"
+                emit(f"[TEST] Step 5: {s5_result} — {s5_reason}", log)
+            else:
+                s5_result, s5_reason = _run_gate_step5(
+                    ser, log,
+                    boot_wait_s=args.boot_wait_s,
+                    dwell_s=RUN_GATE_POWER_DWELL_S,
+                    hb_window_s=args.hb_window_s,
+                    drop_first_line=args.drop_first_line,
+                )
+
             # Final cleanup
             send_command(ser, "RUN=0", log=log)
             send_command(ser, "STATUS", log=log)
@@ -1739,11 +1964,13 @@ def run_run_gate(args: argparse.Namespace) -> int:
             emit(f"[TEST]         {s3_reason}", log)
             emit(f"[TEST] Step 4 (Manual reset clears resume):        {s4_result}", log)
             emit(f"[TEST]         {s4_reason}", log)
+            emit(f"[TEST] Step 5 (Power restore RUN OFF, AUTOSTART=0):{s5_result}", log)
+            emit(f"[TEST]         {s5_reason}", log)
             emit("", log)
             emit("[TEST] Capture complete", log)
 
-    all_pass = all(r == _STEP_PASS for r in (s1_result, s2_result, s3_result, s4_result))
-    any_fail = any(r == _STEP_FAIL for r in (s1_result, s2_result, s3_result, s4_result))
+    all_pass = all(r == _STEP_PASS for r in (s1_result, s2_result, s3_result, s4_result, s5_result))
+    any_fail = any(r == _STEP_FAIL for r in (s1_result, s2_result, s3_result, s4_result, s5_result))
     if all_pass:
         return 0
     if any_fail:
@@ -1776,8 +2003,8 @@ def run_suite(args: argparse.Namespace) -> int:
 
     # Build common args forwarded to each sub-invocation
     common: list[str] = [sys.executable, script, "--port", args.port, "--baud", str(args.baud)]
-    if args.drop_first_line:
-        common.append("--drop-first-line")
+    if args.no_drop_first_line:
+        common.append("--no-drop-first-line")
 
     results: list[tuple[str, int]] = []
 
@@ -1840,9 +2067,10 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"USB baud rate for the sniffer (default: {DEFAULT_BAUD})",
     )
     parser.add_argument(
-        "--drop-first-line",
+        "--no-drop-first-line",
         action="store_true",
-        help="Discard the first decoded line after connect to skip partial boot data",
+        dest="no_drop_first_line",
+        help="Keep the first decoded line after connect (default: drop it to skip partial boot data)",
     )
 
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -2207,6 +2435,8 @@ def validate_args(args: argparse.Namespace) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Default: drop first line (skip partial USB CDC frame). Opt out with --no-drop-first-line.
+    args.drop_first_line = not getattr(args, "no_drop_first_line", False)
     validate_args(args)
     handler: Callable[[argparse.Namespace], int] = args.handler
     return handler(args)

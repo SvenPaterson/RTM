@@ -42,7 +42,7 @@ work in this repository.
 
 ## Reset behavior
 - **Manual reset** (`RESET=EXEC`): Unconditionally clears resume slots (RA.BIN/RB.BIN). Protocol starts fresh on next boot. No resume snapshot is saved.
-- **Power-loss recovery**: Periodic saves during RUNNING at step/loop boundaries. On next boot, XPB finds valid resume data and sends `CMD;RESUME=AUTO` with `AUTOSTART=1`.
+- **Power-loss recovery**: Periodic saves during RUNNING at step/loop boundaries. On next boot, XPB finds valid resume data and sends `CMD;RESUME=AUTO` — with `AUTOSTART=1` if RUN is engaged (auto-start from resume point) or `AUTOSTART=0` if RUN is off (CC loads position, stays IDLE until operator toggles RUN).
 - **Protocol completion**: Resume slots cleared, `everRan_` reset.
 
 ## Build and upload commands

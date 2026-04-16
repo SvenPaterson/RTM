@@ -1,14 +1,13 @@
 # Boot-Up Serial Review Findings
 
-## 0. Session checkpoint (2026-04-15)
+## 0. Session checkpoint (2026-04-16)
 ### Current status
-- **Run-gate validation: now four-step test** (was three). Steps 1-2 PASS; Step 3 INCONCLUSIVE; Step 4 SKIPPED (depends on step 3).
-  - Step 3 rewritten: power-loss resume via hard power-cut (no longer uses RESET pulse to create snapshot — bug #12 clears resume on RESET).
-  - Step 4 added: manual reset clears resume — issues RESET pulse, cold boots, verifies system stays IDLE with no `CMD;RESUME=AUTO`.
-- **Boot-frame filtering fix**: test harness now evaluates HB states only after `NOTICE;PROTO_RX=OK` marker, excluding garbled boot frames (e.g., `STEP=???READY;ID=CC` from two TTL messages glued during handshake).
-- **Test suite subcommand**: `run-suite` added to `rig_control.py`. Runs cold-boot, comms-health, reset-cancel, reset-pulse, run-cycle, run-gate sequentially; produces a `{timestamp}_suite.log` master log with output from all tests and a summary table.
+- **Run-gate validation: five-step test — steps 1, 2, 4, 5 PASS; step 3 FALSE PASS → bug found.**
+  - Step 5 added: power-loss resume with RUN OFF — verifies XPB sends `CMD;RESUME=AUTO;AUTOSTART=0`, CC loads position but stays IDLE, then RUN toggle starts from resume point.
+  - **Bug #13 — Silent resume discard when RUN OFF** (XPB): When resume data existed but RUN switch was OFF at cold boot, XPB silently discarded the resume state (`bootPhase_ = Done`) without informing CC. The CC never learned about the saved position; a subsequent RUN toggle started from step 1/loop 1, losing all progress. Fixed: XPB now always sends `CMD;RESUME=AUTO` regardless of RUN state — `AUTOSTART=1` when RUN engaged (auto-start), `AUTOSTART=0` when RUN OFF (load position, stay IDLE). CC already handled `AUTOSTART=0` correctly.【F:src/exp-board/ExpansionBoard.cpp†L1373-L1393】
+  - **Bug #14 — Run gate blocks AUTOSTART=1 power-loss resume** (CC): On cold boot with RUN held ON (power-loss recovery), CC's boot gate (`runGateReleased_ == false`) blocked the resume from entering RUNNING. The gate requires an OFF→ON edge, but after power loss the operator never released the switch. CC loaded the resume position and set `latchedRunPending_`, but stayed IDLE indefinitely. The test falsely passed because a garbled stale frame from the previous power cycle matched `STATE=RUNNING`. Fixed: when `AUTOSTART=1` (XPB confirmed power-loss w/ RUN engaged), the resume handler now releases the gate and falls through to normal auto-start (preheat or direct resume). Test hardened to only count RUNNING/PREHEAT heartbeats **after** `ACK;RESUME=OK`.【F:include/ClearCoreRTM.h†L416-L427】
 
-### Validated test results (2026-04-15)
+### Validated test results (2026-04-16)
 | Test | Result | Evidence |
 |------|--------|----------|
 | cold-boot | **PASS** | `QUIESCE=3, proto_ok=1, hb_idle=28` |
@@ -17,14 +16,18 @@
 | reset-pulse | **PASS** | `RESET=ARM` → `RESET=EXEC` → `QUIESCE` sequence with full reboot |
 | run-gate Step 1 | **PASS** | 89 IDLE HBs, no RUNNING before RUN released |
 | run-gate Step 2 | **PASS** | 40 RUNNING HBs after RUN=1, 40 PAUSED after RUN=0 |
-| run-gate Step 3 | **INCONCLUSIVE** | `CMD;RESUME=AUTO;STEP=5;LOOP=1;AUTOSTART=1` sent, `ACK;RESUME=OK` received, but no RUNNING HB in 30s capture window |
-| run-gate Step 4 | **SKIPPED** | Depends on step 3 PASS |
+| run-gate Step 3 | **PASS** | Bug #14 fixed. `CMD;RESUME=AUTO;AUTOSTART=1` → `ACK;RESUME=OK` → RUNNING at step=5 (resume point), 149 HBs during 15s visual hold. |
+| run-gate Step 4 | **PASS** | No `CMD;RESUME=AUTO` after manual reset, system stayed IDLE |
+| run-gate Step 5 | **PASS** | `CMD;RESUME=AUTO;AUTOSTART=0` sent, `ACK;RESUME=OK`, 89 IDLE HBs at STEP=4, RUN toggle → RUNNING at step=4 |
+
+### Test harness changes (2026-04-16)
+- **Step 1 preamble**: Sends RESET pulse (6s) + power-cycle before gate test to clear stale SD resume data. Prevents false failure from prior run's AUTOSTART=1 resume.
+- **Step 3 post-ACK verification**: Only counts RUNNING/PREHEAT heartbeats **after** `ACK;RESUME=OK` line (eliminates garbled stale frame false-pass). Then holds RUNNING state for 15s so operator can visually confirm LCD transition (boot → RUNNING).
 
 ### Next actions
-1. Investigate step 3 INCONCLUSIVE: resume ACK was accepted but system may need longer to transition to RUNNING, or the capture window may start too late.
-2. Run full regression via `run-suite` to confirm all tests pass end-to-end.
-3. Add transport instrumentation to classify duplicate `PR_END`/`QUIESCE` events.
-4. LCD UX for RUN/RESET latch state.
+1. Run full regression suite (`run_suite.py --port COM7 --full`) to confirm nothing broken.
+2. Add transport instrumentation to classify duplicate `PR_END`/`QUIESCE` events.
+3. LCD UX for RUN/RESET latch state.
 
 ## 0-prev. Session checkpoint (2026-04-14)
 ### Current status

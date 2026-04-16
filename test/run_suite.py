@@ -172,9 +172,11 @@ def main() -> int:
         args.quick = True
 
     # ---- Master log setup ----
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now()
+    day_dir = LOG_DIR / f"{now.year}" / f"{now.month:02d}" / f"{now.day:02d}"
+    day_dir.mkdir(parents=True, exist_ok=True)
     mode_tag = "full" if args.full else "quick"
-    log_path = LOG_DIR / f"{_timestamp()}_suite_{mode_tag}.log"
+    log_path = day_dir / f"{_timestamp()}_suite_{mode_tag}.log"
     log_file = open(log_path, "w", encoding="utf-8")
 
     _emit(f"[SUITE] Logging to {log_path}", log_file)
@@ -184,7 +186,7 @@ def main() -> int:
     _emit(f"[SUITE] Sniffer port: {cmd_port}", log_file)
 
     # Build common args forwarded to every rig_control invocation.
-    common: list[str] = ["--port", cmd_port, "--drop-first-line"]
+    common: list[str] = ["--port", cmd_port]
     if args.baud:
         common += ["--baud", str(args.baud)]
 

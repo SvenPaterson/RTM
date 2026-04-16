@@ -414,17 +414,15 @@ private:
                         owner_->loopCount_ = owner_->totalLoops_ - (uint32_t)resumeLoop + 1;
 
                         // --- Gating Rules ---
-                        // Respect the boot gate (CODE_REVIEW.md §7): if the
-                        // operator held RUN low across power-on, don't
-                        // force-release the gate.  Load the position and
-                        // latch the run so it starts once the operator
-                        // intentionally toggles the switch.
+                        // AUTOSTART=1 means XPB found valid resume data AND
+                        // the RUN switch was engaged at boot — this is a
+                        // power-loss recovery, not a fresh start.  Release
+                        // the boot gate so the system resumes immediately.
                         if (!owner_->runGateReleased_ && autoStart == 1 && runIsEngaged) {
-                            owner_->latchedRunPending_ = true;
-                            owner_->dbgln("[RESUME] Gate closed — position loaded, waiting for RUN toggle");
-                            snprintf(ackBuf, sizeof(ackBuf), "ACK;RESUME=OK;REF=%u", (unsigned)refVal);
-                            sendMessage(ackBuf, MessageType::NORMAL);
-                            return;
+                            owner_->runGateReleased_ = true;
+                            owner_->latchedRunPending_ = false;
+                            owner_->dbgln("[RESUME] AUTOSTART=1 + RUN=ON — gate released for power-loss recovery");
+                            // fall through to normal AUTOSTART=1 handling below
                         }
 
                         // if AUTOSTART==0 or RUN is not LOW, don't preheat nor start.

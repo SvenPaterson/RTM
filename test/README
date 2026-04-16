@@ -13,7 +13,7 @@ Common Options
 
 * ``--port``: Serial port for the Teensy (auto-detected when possible).
 * ``--baud``: USB CDC baud rate (default 460800).
-* ``--drop-first-line``: Skip the first decoded frame if startup noise is an issue.
+* ``--no-drop-first-line``: Keep the first decoded frame (dropped by default to avoid startup noise).
 
 COM target verification (required)
 ----------------------------------
@@ -38,7 +38,7 @@ Available Modes
 * ``reset-cancel``: Fire multiple sub-threshold RESET pulses to confirm cancel behavior.
 * ``power --state on|off``: Toggle the sniffer-controlled board power relay for hard reset / cold boot validation.
 * ``protocol-upload``: Walk through SD card staging, protocol ingestion, and automatic runtime validation.
-* ``run-gate``: Automated three-step RUN-gate validation from CODE_REVIEW.md §7 — verifies boot masking, gate release, and resume auto-start.
+* ``run-gate``: Automated five-step RUN-gate validation from CODE_REVIEW.md §7 — verifies boot masking, gate release, resume auto-start (RUN ON), manual-reset clears resume, and resume with RUN OFF (AUTOSTART=0).
 * ``run-cycle``: (T2) Double-pulse RUN test — IDLE → RUNNING → PAUSED → RUNNING → PAUSED, with automated verdict.
 * ``comms-health``: (T8) Passive comms health check — verify HB and STAT cadence stay within 2 s tolerance.
 * ``cold-boot``: (T1) Power-cycle via sniffer relay, verify full boot sequence (QUIESCE → PROTO_RX=OK → IDLE HBs).
@@ -87,12 +87,20 @@ The following tests require operator observation and are not automated:
 RUN-gate validation sequence
 ----------------------------
 
-Validates the ClearCore RUN-gate firmware by running three sequential checks:
+Validates the ClearCore RUN-gate firmware by running five sequential checks:
 
-1. **Step 1:** Cold-boot with RUN held low — CC must stay IDLE (gate masks the latched line).
+1. **Step 1:** Reset preamble (RESET pulse + power-cycle to clear stale SD resume), then cold-boot
+   with RUN held low — CC must stay IDLE (gate masks the latched line).
 2. **Step 2:** Release RUN, then re-assert — CC transitions IDLE→RUNNING→PAUSED.
-3. **Step 3:** Create a resume snapshot via reset, cold-boot with RUN low — XPB sends
-   ``CMD;RESUME=AUTO;AUTOSTART=1`` and CC accepts it.
+3. **Step 3:** Create a resume snapshot during RUNNING, hard power-cut with RUN held ON — XPB sends
+   ``CMD;RESUME=AUTO;AUTOSTART=1`` and CC accepts it, system enters RUNNING. Post-ACK verification
+   only counts RUNNING/PREHEAT heartbeats after ``ACK;RESUME=OK``, then holds RUNNING for 15 s so
+   the operator can visually confirm the LCD transition.
+4. **Step 4:** Issue RESET pulse to clear resume state, cold-boot with RUN held — verify no
+   ``CMD;RESUME=AUTO`` sent and system stays IDLE.
+5. **Step 5:** Build new resume state, hard power-cut, cold-boot with RUN **OFF** — XPB sends
+   ``CMD;RESUME=AUTO;AUTOSTART=0``, CC loads position but stays IDLE; then toggle RUN ON and
+   verify system enters RUNNING from the resume point (not step 1).
 
 Pass/fail is determined from observable TTL telemetry (``HB;STATE=``, ``CMD;RESUME=``,
 ``ACK;RESUME=``, ``NOTICE;PROTO_RX=OK``).  Use ``--skip-step-3`` for a quick steps 1-2 run.
