@@ -197,9 +197,7 @@ private:
 
     // ---------- Sensors ----------
     Adafruit_MAX31855 tc1_{TC1_CS_};
-#ifdef USE_TC2
     Adafruit_MAX31855 tc2_{TC2_CS_};
-#endif
     uint16_t      kDataIntervalMs_ = 100;
     elapsedMillis dataTmr_;
     double        latestSealC_ = NAN;

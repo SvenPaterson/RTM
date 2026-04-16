@@ -741,10 +741,12 @@ void ClearCoreRTM::logicalReset() {
     hlfbFirstEdge_ = true;
     hlfbEdgeCount_ = 0;
 
-    // --- Preheat ---
-    coldStart_            = true;
-    waitingForTemp_       = false;
+    // --- Preheat / heating ---
+    coldStart_             = true;
+    waitingForTemp_        = false;
     autoStartAfterPreheat_ = false;
+    protocolUsesHeat_      = false;
+    sealTempC_             = 0;
 
     // --- Runtime timers ---
     testRunTmr_ = 0;
@@ -807,7 +809,7 @@ void ClearCoreRTM::handlePreheat(bool runActive, bool justEntered_) {
 
 // --------- output control handlers ------------
 void ClearCoreRTM::setHeaterOutput(int out) {
-    if (state_ == State::EStop || heaterInhibit_) {
+    if (state_ == State::EStop || heaterInhibit_ || !protocolUsesHeat_) {
         HEATER_OUTPUT_PIN.PwmDuty(0);
         HEATER_SAFETY_PIN.State(false);
         return;

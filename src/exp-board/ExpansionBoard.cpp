@@ -255,6 +255,11 @@ bool ExpansionBoard::begin() {
     else dbgln("DONE");
     tc1_.setFaultChecks(MAX31855_FAULT_ALL);
 
+    dbg("Initializing MAX31855 sensor - TC2...");
+    delay(250);
+    if (!tc2_.begin()) { dbgln("ERROR."); }
+    else { dbgln("DONE"); tc2_.setFaultChecks(MAX31855_FAULT_ALL); }
+
     // Protocol + Resume (only if SD OK)
     if (sdOk) {
         successfulProtoLoadFromSD_ = loadProtocolFromSD_("/protocol.csv");
@@ -340,7 +345,7 @@ bool ExpansionBoard::begin() {
 
     // DEBUGGING ONLY
     heater_.begin();                 // maybe only when a test / preheat starts?
-    heater_.setTargetTemp(32.0);     // temp will come from CC later
+    heater_.setTargetTemp(0);         // stay off until CC sends setpoint
 
     publishSwitchState_(true);
 
@@ -583,7 +588,7 @@ void ExpansionBoard::tick() {
     if (pidTmr_ >= 500) {
         pidTmr_ = 0;
         int outVal;
-        double pv = isnan(latestSealC_) ? 0.0 : latestSealC_; // TEMP until CC drives SP
+        double pv = isnan(latestSumpC_) ? 0.0 : latestSumpC_; // PID tracks sump temp
         (void)heater_.compute(pv, outVal);
     }
 
@@ -593,8 +598,9 @@ void ExpansionBoard::tick() {
         char line[80];
         const int out = heater_.lastOut();
         const int tempC = isnan(latestSumpC_) ? 0 : (int)latestSumpC_;
-        snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d;TEMP=%d", 
-                 hbSeq_++, out, tempC);
+        const int sealC = isnan(latestSealC_) ? 0 : (int)latestSealC_;
+        snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d;TEMP=%d;SEAL=%d", 
+                 hbSeq_++, out, tempC, sealC);
         ttlComms_.sendMessage(line, MessageType::INFO);
     }
 
@@ -733,11 +739,7 @@ void ExpansionBoard::updateData() {
     dataTmr_ = 0;
 
     latestSealC_ = readTC(tc1_, "TC1");
-#ifdef USE_TC2
     latestSumpC_ = readTC(tc2_, "TC2");
-#else
-    latestSumpC_ = 120;
-#endif
 }
 
 /**

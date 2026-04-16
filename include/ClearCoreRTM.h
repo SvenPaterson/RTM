@@ -221,6 +221,8 @@ private:
     bool waitingForTemp_{false};     // True when preheating
     uint16_t preheatTargetC_{0};     // Target temp for preheat
     bool autoStartAfterPreheat_{false}; // Whether to auto-start after preheat
+    bool protocolUsesHeat_{false};       // True if any step has tempC > 0
+    uint16_t sealTempC_{0};              // Latest seal temp from XPB STAT
     void setHeaterOutput(int out);
 
     /* ——— state handlers ——— */
@@ -584,13 +586,17 @@ private:
                             long dwellS = (c3 > 0) ? 
                                 dataStr.substring(c2+1, c3).toInt() : 
                                 dataStr.substring(c2+1).toInt();
-                            // Ignore temp for now (c3 to end) - CC doesn't use it
+                            uint16_t tempC = 0;
+                            if (c3 > 0) {
+                                tempC = (uint16_t)constrain(dataStr.substring(c3+1).toInt(), 0, 200);
+                            }
                             
                             // Convert and store in steps_ array  
                             Step &s = owner_->steps_[owner_->protoRx_.seq];
                             s.speedSteps_s = (rpm * owner_->kStepsPerRev + (rpm >= 0 ? 30 : -30)) / 60;
                             s.accelSteps_s2 = (accel * owner_->kStepsPerRev + 30) / 60;
                             s.dwellMs = dwellS * 1000UL;
+                            s.tempC = tempC;
                         }
                     }
                     
@@ -667,7 +673,19 @@ private:
                             (unsigned long)owner_->progHash_);
                     sendMessage(notice, MessageType::INFO);
 
+                    // Scan steps for any tempC > 0
+                    owner_->protocolUsesHeat_ = false;
+                    for (uint8_t i = 0; i < owner_->stepCount_; ++i) {
+                        if (owner_->steps_[i].tempC > 0) {
+                            owner_->protocolUsesHeat_ = true;
+                            break;
+                        }
+                    }
+
                     owner_->dbgln("[PROTO] Upload complete - ready to run");
+                    if (owner_->protocolUsesHeat_) {
+                        owner_->dbgln("[PROTO] Protocol uses heating");
+                    }
                     owner_->state_ = State::Idle;
                     owner_->isProtoLoaded_ = true;
                     owner_->heartbeatSystemEnabled_ = true;
@@ -734,6 +752,7 @@ private:
                 const int seq = kvGet(data, "SEQ=").toInt();
                 const int out = kvGetIntClamped(data, "OUT=", 0, 0, 150);
                 const int temp = kvGetIntClamped(data, "TEMP=", 0, 0, 200);
+                const int seal = kvGetIntClamped(data, "SEAL=", 0, 0, 200);
 
                 const bool dup = (seq >= 0 && seq == lastSeq);
                 if (seq >= 0) lastSeq = seq;
@@ -742,6 +761,7 @@ private:
                 if (owner_) {
                     owner_->commsHealthy_ = true;
                     owner_->xpbStaleTmr_   = 0;                 // fresh data just arrived
+                    owner_->sealTempC_ = (uint16_t)seal;
                     owner_->setHeaterOutput(out);
 
                     // Auto-clear stale-STAT E-STOP on first good STAT
