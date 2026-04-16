@@ -19,17 +19,7 @@
 // === MCU-specific (guarded) ===
 #if defined(ARDUINO_ARCH_AVR)
   #include <avr/io.h>
-  #include <avr/wdt.h>
-  #include <avr/cpufunc.h>  // _PROTECTED_WRITE
 #endif
-
-/**
- * @brief Perform a software reset of the MCU.
- * @details Uses the megaAVR-0 SWRST register on Nano Every when available; otherwise
- *          falls back to a watchdog-triggered reset.
- * @warning Does not return.
- */
-void xpbSoftResetNow();
 
 /**
  * @brief Expansion board main controller (UI, sensors, comms, heater).
@@ -64,6 +54,9 @@ public:
     void setHeaterTarget(double temp) { heater_.setTargetTemp(temp); }
 
     ExpansionBoard() : ttlComms_(this) {}
+
+    /// @brief Reset all runtime state to "just booted, protocol in RAM, waiting for CC."
+    void logicalReset();
 
 private:
 

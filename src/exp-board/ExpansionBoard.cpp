@@ -4,26 +4,6 @@
 
 #define XPB_INJECT_FROM_USB 0
 
-void xpbSoftResetNow() {
-    #if defined(__AVR_ATmega4809__) || defined(ARDUINO_AVR_NANO_EVERY)
-    // megaAVR-0 (Nano Every): use software reset register
-    // Some cores name it SWRST, some SWRR – guard both.
-    #if defined(RSTCTRL_SWRST)
-        _PROTECTED_WRITE(RSTCTRL.SWRST, 1);
-    #elif defined(RSTCTRL_SWRR)
-        _PROTECTED_WRITE(RSTCTRL.SWRR, 1);
-    #else
-        // Fallback to WDT if symbol names differ
-        wdt_enable(WDTO_15MS);
-        for (;;) {}
-    #endif
-    #else
-    // Classic AVRs (e.g., ATmega328P): WDT nuke
-    wdt_enable(WDTO_15MS);
-    for (;;) {}
-    #endif
-    }
-
 namespace {  // anonymous namespace: TU-private helpers for Resume logic
     // 8.3-safe filenames for Arduino SD
     static constexpr const char *kSlotA = "/RA.BIN";
@@ -369,6 +349,118 @@ bool ExpansionBoard::begin() {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// logicalReset — in-place state reset (replaces MCU hard reset)
+// ---------------------------------------------------------------------------
+void ExpansionBoard::logicalReset() {
+    dbgln("[RESET] Logical reset starting");
+
+    // --- Boot & reset UI ---
+    resetUiActive_    = false;
+    resetUiSecs_      = 0;
+    resetUiTmr_       = 0;
+    resetUiRemaining_ = 0;
+    ccReady_          = false;
+    ccAnySeen_        = false;
+    sinceBoot         = 0;
+    warnedNoLink_     = false;
+    linkState_        = LinkState::NoLink;
+
+    // --- CC heartbeat mirror ---
+    ccHbAgeTmr_    = 0;
+    ccHbSeen_      = false;
+    hbSeq_         = 0;
+    ccAlarmActive_ = false;
+    memset(ccAlarmMsg_, 0, sizeof(ccAlarmMsg_));
+    strcpy(ccState_, "IDLE");
+    ccStep_      = 0;
+    ccLoopCur_   = 0;
+    ccLoopTot_   = 0;
+    ccSwAgeMs_   = 0;
+    ccRpm_       = 0;
+    ccEstop_     = false;
+    ccEstopCode_ = 0;
+
+    // --- Protocol TX state (keep steps_/stepCount_/protocolName_/progHash_) ---
+    protoState_    = ProtoTxState::WaitingReq;
+    protoSince_    = 0;
+    lastProtoRef_  = 0;
+    protoStepSent_ = 0;
+    ccProtoReq_    = false;
+    needResumeAfterProto_ = false;
+    targetMet_     = false;
+    everRan_       = false;
+
+    // --- Resume tracking (already cleared by EXEC handler, reinforce) ---
+    haveStoredResume_ = false;
+    storedPhash_      = 0;
+    storedStep_       = 0;
+    storedLoopCur_    = 0;
+    storedLoopTot_    = 0;
+    // successfulProtoLoadFromSD_ stays true — protocol IS in RAM
+
+    // --- Preheat / heater ---
+    preheatActive_ = false;
+    preheatSpC_    = 0;
+    preheatTmr_    = 0;
+    heater_.setTargetTemp(0);
+
+    // --- USB sim ---
+    usbSimHold_        = false;
+    usbSimHoldUntilMs_ = 0;
+    usbInjecting_      = false;
+
+    // --- Step countdown ---
+    countdownStepSnapshot_ = 0;
+    countdownLoopSnapshot_ = 0;
+    stepStartAgeMs_        = 0;
+    stepTotalMs_           = 0;
+    stepRemainingMs_       = 0;
+
+    // --- Sensors (keep TC handles, reset readings) ---
+    dataTmr_     = 0;
+    latestSealC_ = NAN;
+    latestSumpC_ = NAN;
+
+    // --- UI ---
+    lcdToggle_        = false;
+    modeTorqueToggle_ = false;
+    lcdTmr_           = 0;
+    lastUi_           = static_cast<UiPage>(0xFF);   // force redraw
+    bootPhase_        = BootPhase::Start;
+    bootMsgSince_     = 0;
+
+    // --- Switch ---
+    lastSwPublishMs_ = 0;
+
+    // --- Timers ---
+    heartbeatTmr_ = 0;
+    pidTmr_        = 0;
+    sdRecoveryTmr_ = 0;
+
+    // --- TTL comms ---
+    ttlComms_.resetState();
+
+    // --- Post-reset actions ---
+    // E-STOP UI mask (same as post-XPB-reset-flag path in begin())
+    estopUiMaskUntilMs_ = millis() + 8000UL;
+
+    // Tell CC to suppress stale-STAT E-STOP during transition
+    ttlComms_.sendCommand("QUIESCE;SECS=10");
+
+    // Boot splash
+    lcd_.clearScreen();
+    lcd_.setLineCenter(0, protocolName_);
+    lcd_.setLineCenter(1, "SYSTEM RESET");
+    lcd_.setLineCenter(2, "Reconnecting...");
+    lcd_.flush();
+
+    // Immediately publish switch state so CC gets fresh RUN/RST
+    publishSwitchState_(true);
+
+    dbgln("[RESET] Logical reset complete — awaiting CC");
+}
+
 /**
  * @brief Periodic task driving comms, IO, sensors, PID, heartbeat, and UI.
  * @copydetails ExpansionBoard::tick()
@@ -583,7 +675,10 @@ void ExpansionBoard::tick() {
     else if (!successfulProtoLoadFromSD_) {
         page = UiPage::ProtoMissingSD;
     } 
-    else if (ccHbSeen_ && ccHbAgeTmr_ > 3000U) {
+    else if (ccHbSeen_ && ccHbAgeTmr_ > 3000U &&
+             (int32_t)(millis() - estopUiMaskUntilMs_) >= 0) {
+        // Suppress LostComms during the post-reset mask window — CC's
+        // heartbeat system is restarting and will resume shortly.
         page = UiPage::LostComms;
     } else {
         page = UiPage::Normal;
@@ -1102,8 +1197,26 @@ bool ExpansionBoard::uploadProtocolToCC_() {
     protoState_ = ProtoTxState::BegSent;
     protoStepSent_ = 0;
     protoSince_ = 0;
-    delay(100);
-    ttlComms_.checkForMessages();
+
+    // Poll for CC to ACK PR_BEG (up to 500ms, driving retries).
+    // At 9600 baud the ~65-char PR_BEG takes ~68ms on the wire,
+    // plus CC parse + response time ≈ 150-200ms total.
+    {
+        const unsigned long deadline = millis() + 500;
+        while (millis() < deadline && ttlComms_.isWaitingForAck()) {
+            delay(10);
+            ttlComms_.checkForMessages();
+            ttlComms_.checkRetries();
+        }
+    }
+
+    // Verify CC acknowledged PR_BEG before flooding PR_DAT chunks
+    if (ttlComms_.isWaitingForAck()) {
+        dbgln("[PROTO] PR_BEG not ACKed by CC — aborting upload");
+        ttlComms_.cancelPending();   // prevent orphaned retries
+        protoState_ = ProtoTxState::WaitingReq;
+        return false;
+    }
     
     // 2. Send PR_DAT chunks (dummy for now)
     dbgln("[PROTO] Sending data chunks...");
@@ -1212,15 +1325,24 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
             sendMessage("ACK;OK", MessageType::INFO);
         }
 
-        if (owner_ && !owner_->ccProtoReq_) {
-            owner_->ccProtoReq_ = true;
-            if (!owner_->uploadProtocolToCC_()) {
-                // Upload failed (SD reinit or CSV parse failure).
-                // Reset gate so the next REQ:PROTO triggers a retry.
-                owner_->ccProtoReq_ = false;
-            } else {
-                owner_->bootPhase_ = BootPhase::TxInProgress;
-                owner_->protoSince_ = 0;
+        if (owner_) {
+            // Always attempt upload: CC only sends REQ:PROTO when it
+            // doesn't have a protocol loaded, so repeating is correct.
+            // ccProtoReq_ guards against reentrant calls from
+            // checkForMessages() inside uploadProtocolToCC_().
+            if (!owner_->ccProtoReq_) {
+                owner_->ccProtoReq_ = true;
+                if (!owner_->uploadProtocolToCC_()) {
+                    owner_->ccProtoReq_ = false;
+                } else {
+                    owner_->bootPhase_ = BootPhase::TxInProgress;
+                    owner_->protoSince_ = 0;
+                }
+                // If CC never confirms (NOTICE;PROTO_RX=OK), clear the
+                // gate so the next REQ:PROTO triggers a fresh upload.
+                if (owner_->protoState_ != ProtoTxState::Complete) {
+                    owner_->ccProtoReq_ = false;
+                }
             }
         }
         return;
@@ -1329,6 +1451,12 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                     owner_->dbgln("[RESET] resume slots cleared (manual reset)");
 
                     // 2) Ask CC to mask XPB-stale for ~10s (bounded to 3..15s on CC)
+                    //    NOTE: Do NOT pump checkForMessages() here — we are
+                    //    already inside onMessageReceived → checkForMessages.
+                    //    Reentrant calls corrupt incomingMsg_ and can re-enter
+                    //    this EXEC handler recursively, causing stack overflow.
+                    //    The ~300ms of delays below give CC ample time to
+                    //    process the QUIESCE before we proceed.
                     {
                         char q[96];
                         snprintf(q, sizeof(q),
@@ -1339,14 +1467,7 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                                  (unsigned)loopTotSnap,
                                  (unsigned long)ph);
                         sendCommand(q, MessageType::CRITICAL);
-
-                        // Best-effort: pump for an ACK for ~200 ms
-                        uint32_t tWait = millis();
-                        while ((uint32_t)(millis() - tWait) < 200U) {
-                            owner_->ttlComms_.checkForMessages();
-                            owner_->ttlComms_.checkRetries();
-                            delay(2);
-                        }
+                        delay(100);  // settle — CC processes within one tick (~µs)
                     }
 
                     // 3) Mark intentional XPB reset, give SD a moment
@@ -1357,18 +1478,16 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
                     // 4) Show reboot splash, notify CC, then reset
                     owner_->lcd_.clearScreen();
                     owner_->lcd_.setLineCenter(1, "SYSTEM");
-                    owner_->lcd_.setLineCenter(2, "REBOOTING...");
+                    owner_->lcd_.setLineCenter(2, "RESETTING...");
                     owner_->lcd_.flush();
                     delay(250);
 
                     sendMessage("NOTICE;XPB_RESET=NOW", MessageType::NORMAL);
                     delay(5);
-                    // Cleanly release SD so SPI bus is idle before reset
-                    SD.end();
-                    SPI.end();
-                    // NOTE: do NOT clearResumeSlots_() here — the resume
-                    // record was just saved at step 1 for the next boot.
-                    xpbSoftResetNow();
+
+                    // Logical reset: reinitialize all state in-place
+                    // (no MCU reset — peripherals stay active)
+                    owner_->logicalReset();
                 }
             }
 

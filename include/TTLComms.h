@@ -36,6 +36,9 @@ public:
     void checkRetries();
     void checkForMessages();
     void setRxUsbLogging(bool enabled, const char *peerTag = nullptr);
+    bool isWaitingForAck() const { return waitingForAck_; }
+    /// Cancel in-flight pending message (stops retries without flushing RX)
+    void cancelPending() { pendingMsg_ = {}; waitingForAck_ = false; pendingRef_ = 0; }
 
     // Message callback - override in derived classes
     // probably not needed, or move to universal TTLComms definition
@@ -44,6 +47,17 @@ public:
 
     // TEST ONLY: inject decoded frame straight to handler
     void testInject(const String &frame) { onMessageReceived(frame); }
+
+    /// @brief Reset internal comms state (pending msgs, refs, buffers). Call during logical reset.
+    void resetState() {
+        pendingMsg_    = {};
+        waitingForAck_ = false;
+        nextRef_       = 1;
+        pendingRef_    = 0;
+        incomingMsg_   = "";
+        // Flush hardware RX buffer
+        while (serialAvailable()) { (void)serialRead(); }
+    }
     
 protected:
     // Common message processing

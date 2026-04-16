@@ -102,7 +102,7 @@ private:
     bool       xpbBootSeen_{false};   // saw BOOT;ID=XPB
     elapsedMillis xpbBootWaitTmr_;    // how long we’ve waited after EXEC
     bool resetImmediate_{false};  // skip ARM countdown; still coordinate XPB reset
-
+    bool fromLogicalReset_{false};    // skip 5s BOOT delay after logical reset
     /* ——— runtime states ——— */
     enum class State : uint8_t {
         Debug,
@@ -235,6 +235,7 @@ private:
     void handleCompleted (bool resetActive, bool justEntered_);
     void handlePreheat   (bool runActive,   bool justEntered_);
     bool promoteRun_(RunTrigger trigger);
+    void logicalReset();  ///< In-place state reset (replaces SysMgr.ResetBoard)
 
     class ClearCoreTTL : public TTLComms {
     public:
@@ -504,6 +505,7 @@ private:
                 //owner_->currentlyLoadingProto_ = true;
                 // Only accept in BOOT state
                 if (owner_ && (owner_->state_ == State::BOOT)) {
+                    owner_->dbgln("[PROTO] PR_BEG accepted (BOOT state)");
                     // Parse protocol metadata
                     String name = kvGet(data, "NAME=");
                     String loopsStr = kvGet(data, "LOOPS=");
@@ -783,7 +785,15 @@ private:
         void onBadChecksum(const String& raw) override {
             static uint32_t badCrcCount = 0;
             ++badCrcCount;
-            if (badCrcCount % 10 == 1) {
+            // Always log protocol-related bad checksums (PR_BEG/PR_DAT/PR_END)
+            // to help diagnose silent proto upload failures
+            if (raw.indexOf("PR_") >= 0) {
+                char line[80];
+                snprintf(line, sizeof(line),
+                         "WARN: bad CRC on proto frame (len=%u, #%lu)",
+                         (unsigned)raw.length(), (unsigned long)badCrcCount);
+                usbLog(line);
+            } else if (badCrcCount % 10 == 1) {
                 usbLog("WARN: TTL bad checksum (rate-limited)");
             }
             // Do NOT send any frame here.

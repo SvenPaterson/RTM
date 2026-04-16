@@ -357,22 +357,28 @@ void ClearCoreRTM::handleBoot(bool resetActive, bool justEntered_) {
     if (justEntered_) {
         runGateReleased_   = false;   // active-low RUN stays masked until XPB grants it again
         latchedRunPending_ = false;
-        heartbeatSystemEnabled_ = false;
-        protoRequestTmr_ = 0;
+        heartbeatSystemEnabled_ = true;  // keep HBs alive so XPB doesn't show LostComms
+
+        if (fromLogicalReset_) {
+            // Logical reset: XPB protocol is already in RAM.
+            // Pre-load the timer so the first REQ:PROTO fires immediately.
+            protoRequestTmr_ = 5000;
+            fromLogicalReset_ = false;
+        } else {
+            protoRequestTmr_ = 0;
+        }
 
         if (!isProtoLoaded_) {
-            // Don't send REQ:PROTO immediately — give XPB time to
-            // boot + init SD after a soft reset before we start asking.
-            // The 5-second timer below will fire the first request.
             protocolName_ = "Awaiting Upload";
             stepCount_ = 0;
             loopCount_ = 1;
             totalLoops_ = 1;
             progHash_ = 0;
-
         }
     }
 
+    // Cold boot: 5s delay lets XPB boot + init SD.
+    // Logical reset: timer pre-loaded above, fires immediately.
     if (protoRequestTmr_ > 5000 && !isProtoLoaded_) {
         dbgln("Awaiting protocol from XPB...");
         ttlComms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
@@ -385,11 +391,18 @@ void ClearCoreRTM::handleBoot(bool resetActive, bool justEntered_) {
 
 void ClearCoreRTM::handleProtoLoad(bool justEntered_) {
     if (justEntered_) { 
-        heartbeatSystemEnabled_ = false;
-        dbgln("PROTO_LOADING: Protocol chunks being recieved...");
+        heartbeatSystemEnabled_ = true;   // keep HBs alive so XPB doesn't show LostComms
+        protoRequestTmr_ = 0;             // start safety timeout
+        dbgln("PROTO_LOADING: Protocol chunks being received...");
     }
-    // do nothing while we wait for proto to load?
-    // do we even need handleProtoLoad if we aren't doing anything?
+
+    // Safety: if no PR_DAT arrives within 10s, revert to BOOT
+    // so CC can re-request the protocol.
+    if (protoRequestTmr_ > 10000) {
+        dbgln("[PROTO] Timeout waiting for PR_DAT — reverting to BOOT");
+        protoRx_ = {};   // cancel partial reception
+        state_ = State::BOOT;
+    }
     return;
 }
 
@@ -587,11 +600,11 @@ void ClearCoreRTM::handleReset(bool resetActive, bool justEntered_) {
             break;
 
         case ResetPhase::ExecSent:
-            // 3) Wait a bit for XPB to reboot and announce itself
+            // 3) Wait a bit for XPB to complete its logical reset
             if (xpbBootSeen_ || xpbBootWaitTmr_ >= 1500) {
-                // 4) Now reset ClearCore itself
-                // (Optional: briefly tell XPB we're about to reset, but EXEC already happened.)
-                SysMgr.ResetBoard(); // we won’t return
+                // 4) Logical reset: reinitialize all CC state in-place
+                logicalReset();
+                return;
             }
             break;
 
@@ -663,6 +676,109 @@ void ClearCoreRTM::handleCompleted(bool resetActive, bool justEntered_) {
     }
 
     return;
+}
+
+// ---------------------------------------------------------------------------
+// logicalReset — in-place state reset (replaces SysMgr.ResetBoard)
+// ---------------------------------------------------------------------------
+void ClearCoreRTM::logicalReset() {
+    dbgln("[RESET] CC logical reset starting");
+
+    // --- Motor: safe stop ---
+    motor.MoveStopAbrupt();
+    motor.EnableRequest(false);
+
+    // --- Heater: safe stop ---
+    HEATER_OUTPUT_PIN.PwmDuty(0);
+    HEATER_SAFETY_PIN.State(false);
+    heaterInhibit_ = false;
+
+    // --- Protocol: force re-upload from XPB ---
+    isProtoLoaded_  = false;
+    protocolName_   = "Awaiting Upload";
+    stepCount_      = 0;
+    loopCount_      = 1;
+    totalLoops_     = 1;
+    progHash_       = 0;
+    protoRx_        = {};
+    protoRequestTmr_ = 0;
+
+    // --- Reset state machine ---
+    resetPhase_     = ResetPhase::Idle;
+    resetImmediate_ = false;
+    xpbBootSeen_    = false;
+
+    // --- Motion execution ---
+    currentStep_     = 0;
+    stepInit_        = false;
+    targetMet_       = false;
+    targetSpeed_     = 0;
+    currentSpeed_    = 0;
+    targetAccel_     = 0;
+    currentAccel_    = 0;
+    pause_time_      = 0;
+    resumeFromPause_ = false;
+
+    // --- Comms health ---
+    commsHealthy_            = false;
+    heartbeatSystemEnabled_  = false;
+    heartbeatTmr_            = 0;
+    xpbStaleTmr_             = 0;
+    statAgeTmr_              = 0;
+    hbSeq_                   = 0;
+
+    // --- E-stop ---
+    estopReason_ = 0;
+
+    // --- User input ---
+    runGateReleased_   = false;
+    latchedRunPending_ = false;
+    prevRunActive_     = false;
+    prevResetActive_   = false;
+
+    // --- HLFB ---
+    measuredRpm_   = 0;
+    hlfbFirstEdge_ = true;
+    hlfbEdgeCount_ = 0;
+
+    // --- Preheat ---
+    coldStart_            = true;
+    waitingForTemp_       = false;
+    autoStartAfterPreheat_ = false;
+
+    // --- Runtime timers ---
+    testRunTmr_ = 0;
+    runMins_    = 0;
+    ledTmr_     = 0;
+    lcdTmr_     = 0;
+    dwellTmr_   = 0;
+
+    // --- LCD ---
+    lcdToggle_        = false;
+    lcdRuntimeToggle_ = false;
+    modeTorqueToggle_ = false;
+    for (uint8_t i = 0; i < kNumRows; ++i) dirty_[i] = true;
+
+    // --- TTL comms ---
+    ttlComms_.resetState();
+
+    // --- XPB mask: keep active to cover XPB transition ---
+    // Logical reset is fast (~2s total); 5s mask is plenty.
+    xpbMaskActive_  = true;
+    xpbMaskUntilMs_ = Milliseconds() + 5000UL;
+    fromLogicalReset_ = true;   // tell handleBoot to skip 5s SD-init delay
+
+    // --- Transition to BOOT ---
+    prevState_ = State::Debug;   // force justEntered_ on next tick
+    state_     = State::BOOT;
+
+    // --- Announce readiness (mirrors begin()) ---
+    ttlComms_.sendMessage("READY;ID=CC", MessageType::NORMAL);
+    delay(2);
+    ttlComms_.sendCommand("REQ:SW", MessageType::IMPORTANT);
+
+    LED_PIN.State(true);
+    dbgln("[RESET] CC logical reset complete — entering BOOT");
 }
 
 void ClearCoreRTM::handlePreheat(bool runActive, bool justEntered_) {
