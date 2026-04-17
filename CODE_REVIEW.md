@@ -1,6 +1,20 @@
 # Boot-Up Serial Review Findings
 
-## 0. Session checkpoint (2026-04-16)
+## 0. Session checkpoint (2026-04-17)
+### Current status
+- **Bug #15 — Dwell countdown resets on pause/resume** (XPB display): When the operator paused and resumed a protocol, the XPB LCD countdown timer reset to the full step duration instead of continuing from where it left off. Root cause: three interacting issues — (1) CC sends a transient `STATE=RESUME` heartbeat between PAUSED and RUNNING, which cleared the XPB's `wasPaused` flag; (2) `SW_AGE` resets near zero before the first PAUSED HB arrives, causing uint32 underflow in the elapsed-time calculation; (3) even with an offset approach the new SW_AGE was always smaller than the saved elapsed, underflowing again. Fixed with v3 approach: on RUNNING→PAUSED, compute elapsed from `stepTotalMs_ - stepRemainingMs_` (values still valid from last RUNNING tick) and save as `pausedElapsedMs_`. On resume, repopulate `stepTotalMs_` from the protocol via `refreshStepCountdown_(true)`, shrink by `pausedElapsedMs_`, then `refreshStepCountdown_(false)` to recompute remaining.【F:src/exp-board/ExpansionBoard.cpp†L1587】【F:include/ExpansionBoard.h】
+  - Pre-fix evidence: `T=286→0→300` (countdown reset to 300 after resume)【F:test/log/2026/04/17/20260417-140449_run_cycle.log】
+  - Post-fix evidence: `T=286→0→285` (countdown continued from 285, 1 s jitter normal)【F:test/log/2026/04/17/20260417-145536_run_cycle.log】
+- Transport duplicate analysis: **Closed** — all duplicates are benign transport retries.
+- LCD UX for RUN/RESET latch state: **Dropped** — not needed.
+- PHASH line-glue fix applied (XPB): `dbgln("")` after PHASH `dbgkv` to prevent next debug line from gluing onto PHASH output.【F:src/exp-board/ExpansionBoard.cpp†L1165】
+- TempC=0 column added to 4 protocol CSVs (GROS, TTC, HLFB_test, HLFB_quick) for schema consistency with HEAT_TEST.csv.
+- Instrument-and-observe debugging methodology documented with Bug #15 as worked example.【F:docs/ttl_sniffer_debug.md†L99-L163】
+
+### Next actions
+1. Run full regression suite (`run_suite.py --port COM7 --full`) to confirm nothing broken.
+
+## 0-prev1. Session checkpoint (2026-04-16)
 ### Current status
 - **Run-gate validation: five-step test — steps 1, 2, 4, 5 PASS; step 3 FALSE PASS → bug found.**
   - Step 5 added: power-loss resume with RUN OFF — verifies XPB sends `CMD;RESUME=AUTO;AUTOSTART=0`, CC loads position but stays IDLE, then RUN toggle starts from resume point.
@@ -24,10 +38,10 @@
 - **Step 1 preamble**: Sends RESET pulse (6s) + power-cycle before gate test to clear stale SD resume data. Prevents false failure from prior run's AUTOSTART=1 resume.
 - **Step 3 post-ACK verification**: Only counts RUNNING/PREHEAT heartbeats **after** `ACK;RESUME=OK` line (eliminates garbled stale frame false-pass). Then holds RUNNING state for 15s so operator can visually confirm LCD transition (boot → RUNNING).
 
-### Next actions
-1. Run full regression suite (`run_suite.py --port COM7 --full`) to confirm nothing broken.
-2. Add transport instrumentation to classify duplicate `PR_END`/`QUIESCE` events.
-3. LCD UX for RUN/RESET latch state.
+### Next actions (2026-04-16)
+1. ~~Run full regression suite.~~ Superseded by 2026-04-17 checkpoint.
+2. ~~Add transport instrumentation to classify duplicate `PR_END`/`QUIESCE` events.~~ **Closed (2026-04-17)** — benign transport retries.
+3. ~~LCD UX for RUN/RESET latch state.~~ **Dropped (2026-04-17)** — not needed.
 
 ## 0-prev. Session checkpoint (2026-04-14)
 ### Current status
@@ -49,7 +63,7 @@
 - Test script fix: Step 3 evaluation now only fails on `resume_err` if `resume_ok` was NOT also present, tolerating stale retry errors from transport mismatch.【F:test/rig_control.py†L871】
 - Test harness: RPM summary now shows steady-state average (StdyAvg) separately from overall average, filtering out ramp-up samples.【F:test/rig_control.py】
 - Snapshot hardening implemented: `saveResumeTU` and `writeResetFlagTU` have retry loops; `RESET=EXEC` handler aborts on save failure; periodic save logs failures.
-- Primary unresolved risks remain transport reliability (`TTL bad checksum` / duplicate retries) and LCD operator visibility for RUN/RESET latch state.
+- ~~Primary unresolved risks remain transport reliability (`TTL bad checksum` / duplicate retries) and LCD operator visibility for RUN/RESET latch state.~~ Transport duplicates classified as benign retries (2026-04-17); LCD UX dropped.
 
 ### Validated test results (2026-04-14)
 | Test | Result | Evidence |
@@ -82,7 +96,7 @@ Preceded by reset-pulse test confirming RESET=EXEC no longer saves stale resume 
 | Expansion Board (ATmega4809) | 47,812 B (98.3%, **828 B free**) | 2,342 B (38.1%) |
 
 ### Resume point for next session
-- HLFB speed measurement verified (±0.1%). Focus shifts to regression suite, LCD UX, and transport reliability. XPB flash is 98.3% full — future XPB changes must account for this constraint.
+- HLFB speed measurement verified (±0.1%). LCD UX dropped, transport duplicates classified as benign retries. Focus shifts to regression suite. XPB flash is 98.3% full — future XPB changes must account for this constraint.
 
 ## 0.1 To-do tracker and validation attempt (2026-03-19)
 ### What was attempted in this session
@@ -106,13 +120,14 @@ Preceded by reset-pulse test confirming RESET=EXEC no longer saves stale resume 
    - Why not checked off: step 1 remains inconclusive and step 3 did not yet produce the expected resume command signature.
 
 2. LCD surfacing of RUN/RESET latch state during non-idle/reset windows
-   - Status: Open
-   - Current evidence: reset pages exist, but explicit on-screen latched RUN/RESET bit display is still not documented as implemented; reset-flow captures continue to focus on heartbeat/state text and QUIESCE churn rather than switch-bit confirmation UX.【F:src/exp-board/ExpansionBoard.cpp†L702-L739】【F:test/log/20260109-083256_reset_pulse.log†L31-L55】
+   - Status: **Dropped (2026-04-17)** — operator does not need this.
 
 3. TTL transport instrumentation/back-off and duplicate frame suppression
-   - Status: Open
-   - Current evidence: duplicate protocol and quiesce patterns persist in recent logs (`PR_END` repeated with same REF and repeated `QUIESCE` despite ACKs).【F:test/log/20260108-110836_protocol_upload_TEST_0108_D71A.log†L31-L34】【F:test/log/20260109-083256_reset_pulse.log†L31-L55】
-   - Code review note: retries remain fixed-time resend logic; no explicit back-off strategy or richer duplicate diagnostics were identified in `TTLComms::checkRetries()`.【F:src/shared/TTLComms.cpp†L122-L134】
+   - Status: **Closed (2026-04-17)** — heat-lifecycle log analysis confirmed all duplicate frames are benign transport retries:
+     - **Boot QUIESCE**: XPB sends `QUIESCE;REF=1` before CC finishes booting (~10s). CC can't ACK yet, so XPB retries 2× at fixed interval. All carry same REF=1. Harmless.
+     - **PR_END**: CC ACK takes ~147ms, exceeding the 100ms CRITICAL retry timeout. XPB retries once with same REF=6. CC app layer detects duplicate and logs `[PROTO] Duplicate PR_END ignored`. Harmless.
+     - **No checksum failures** observed in 2026-04-17 heat-lifecycle log.
+     - Transport layer correctly stops retrying on ACK receipt (`waitingForAck_ = false`). App layer handles duplicates idempotently. No back-off needed at current retry counts (max 3).
 
 4. Resume snapshot hardening (retry + stronger diagnostics)
    - Status: **Complete** — validated 2026-04-13, updated 2026-04-14

@@ -96,6 +96,68 @@ Use the right host tool for the task:
 | Inspect framing corruption or byte-level startup noise | [tools/ttl_stream_capture.py](../tools/ttl_stream_capture.py) with `--raw` | Hex output helps distinguish encoding issues from transport corruption. |
 | Generate evidence for findings and regressions | [test/rig_control.py](../test/rig_control.py) first, then optional stream capture | Structured logs are easier to compare across runs. |
 
+## Instrument-and-Observe Debugging
+
+When sniffer logs alone don't reveal the root cause, add a temporary debug field to
+an existing periodic message, re-capture with the test harness, and compare the field
+across state transitions.  This keeps the investigation on real hardware and produces
+a deterministic log you can diff against the post-fix run.
+
+### Workflow
+
+1. **Hypothesise** — identify which internal variable is suspect (e.g. a countdown,
+   timer offset, or state flag).
+2. **Instrument** — append a short key=value field to an existing XPB or CC periodic
+   message so the sniffer captures it every cycle.  Keep the field compact to avoid
+   breaking message budgets.
+   ```cpp
+   // Example: add T=<stepRemainingSeconds> to the STAT line
+   dbgkv("T", stepRemainingMs_ / 1000);
+   ```
+3. **Build & deploy** — `pio run -e exp-board` (or whichever target), then flash via
+   the Upload task or manual upload.  Do **not** remove any existing fields; only add.
+4. **Capture** — run a scripted scenario that exercises the suspect transition:
+   ```
+   python test/rig_control.py --port COM7 run-cycle --pulse 10000 --observe 15
+   ```
+   The `--pulse` duration controls how long RUN is held before the pause; `--observe`
+   sets how many seconds the sniffer records after the final state change.
+5. **Analyse** — grep the log for the new field across phase boundaries:
+   ```
+   grep -E "STAT;.*T=|Phase|RUN=" test/log/2026/04/17/<logfile>.log
+   ```
+   Confirm the value matches expectations before the transition, goes to the expected
+   interim value during the pause, and either continues or resets after resume.
+6. **Fix** — apply the code change, rebuild, and re-run the same scenario.  The new
+   log should show the corrected values at the same phase boundaries.
+7. **Clean up** — remove the debug field, rebuild, and run a full regression suite to
+   ensure the production message format is unchanged.
+
+### Worked example — Bug #15 (dwell countdown reset on pause/resume)
+
+| Phase | Expected `T=` | Observed `T=` | Verdict |
+|-------|---------------|---------------|---------|
+| IDLE baseline | 0 | 0 | OK |
+| RUNNING (14 s elapsed) | 300 → 286 | 300 → 286 | OK |
+| PAUSED | 0 (display cleared) | 0 | OK |
+| RESUME | ~286 (continue) | **300** (reset) | **BUG** — lost 14 s |
+| RUNNING post-fix | ~286 (continue) | **285** (continue) | **FIXED** |
+
+The `T=` field made the 14-second loss immediately visible in a single grep pass,
+eliminating guesswork about SW_AGE resets and XPB-internal timer state.
+
+### Tips
+
+- Prefer appending to an existing periodic message over adding a new message; this
+  avoids changing bus timing or saturating the link.
+- Use the same `run-cycle` parameters for the pre-fix and post-fix captures so the
+  logs are directly comparable.
+- Keep the debug field name short (one or two characters) to stay within the XPB flash
+  budget — the ATmega4809 is >90 % full.
+- If the field you need is on the CC side, instrument the HB line instead of STAT;
+  the sniffer captures both channels.
+- Save pre-fix and post-fix logs; they serve as regression evidence in CODE_REVIEW.md.
+
 ## Diagnostic Checklist
 - Test each UART independently by temporarily commenting out the opposite channel in firmware to
   isolate cross-talk issues

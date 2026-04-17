@@ -1161,6 +1161,7 @@ void ExpansionBoard::logProtocol_() const {
   dbgkv("\nLoops: ", (unsigned long)loopCount_);
   dbgkv("\nSteps: ", (unsigned long)stepCount_);
   dbgkv("\nPHASH: ", (unsigned long)progHash_);
+  dbgln("");
   for (uint8_t i=0;i<stepCount_;++i) {
     static constexpr uint16_t kStepsPerRev = 3200;
     long rpm   = steps_[i].rpmTarget_;
@@ -1584,15 +1585,39 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
         const bool stepChanged = (owner_->ccStep_ != prevStep) || (owner_->ccLoopCur_ != prevLoop);
         // Only count down during RUNNING — no countdown in IDLE, PREHEAT, etc.
         static bool wasRunning = false;
+        static bool wasPaused  = false;
         if (sSTATE == "RUNNING") {
-            // Force countdown init on transition into RUNNING (step may
-            // already be 1 from IDLE/PREHEAT, so stepChanged is false).
-            owner_->refreshStepCountdown_(stepChanged || !wasRunning);
+            const bool resumingFromPause = !wasRunning && wasPaused && !stepChanged;
+            if (resumingFromPause) {
+                // Re-populate stepTotalMs_ from protocol (zeroed during PAUSED)
+                // then shrink it by the already-elapsed dwell so the countdown
+                // continues where it left off.
+                owner_->refreshStepCountdown_(true);   // sets stepTotalMs_ & stepStartAgeMs_
+                if (owner_->pausedElapsedMs_ < owner_->stepTotalMs_) {
+                    owner_->stepTotalMs_ -= owner_->pausedElapsedMs_;
+                } else {
+                    owner_->stepTotalMs_ = 0;
+                }
+                owner_->refreshStepCountdown_(false);  // recompute stepRemainingMs_
+            } else {
+                // Normal init on new step or first entry into RUNNING.
+                owner_->refreshStepCountdown_(stepChanged || !wasRunning);
+            }
             wasRunning = true;
+            wasPaused  = false;
         } else {
+            const bool isPausedLike = (sSTATE == "PAUSED" || sSTATE == "RESUME");
+            if (wasRunning && isPausedLike) {
+                // Save dwell progress before clearing countdown.
+                // Use stepTotalMs_/stepRemainingMs_ from the last RUNNING tick
+                // (SW_AGE has already reset by the time we see PAUSED).
+                owner_->pausedElapsedMs_ = (owner_->stepTotalMs_ > owner_->stepRemainingMs_)
+                    ? (owner_->stepTotalMs_ - owner_->stepRemainingMs_) : 0;
+            }
             owner_->stepTotalMs_     = 0;
             owner_->stepRemainingMs_ = 0;
             wasRunning = false;
+            wasPaused  = isPausedLike;
         }
 
         // One-time "ready" if HB arrived before READY (common on some boots)

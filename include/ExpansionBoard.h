@@ -320,6 +320,7 @@ private:
     uint32_t  stepStartAgeMs_{0};
     uint32_t  stepTotalMs_{0};
     uint32_t  stepRemainingMs_{0};
+    uint32_t  pausedElapsedMs_{0};      //!< dwell elapsed before pause
 
     // ---------- Comms adapter (Serial1 TTL) ----------
     /**
