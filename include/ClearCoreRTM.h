@@ -122,7 +122,7 @@ private:
     enum : uint8_t {
         ESTOP_STALE_STAT = 0x01,    // comms stale: no STAT from XPB
         ESTOP_SAFETY     = 0x02,    // hardware safety chain
-        // future: ESTOP_OVERTEMP = 0x04, ...
+        ESTOP_THERMAL    = 0x04,    // sump over-temperature
     };
     uint8_t estopReason_ { 0 };
 
@@ -224,6 +224,14 @@ private:
     bool protocolUsesHeat_{false};       // True if any step has tempC > 0
     uint16_t sealTempC_{0};              // Latest seal temp from XPB STAT
     void setHeaterOutput(int out);
+    void sendHeaterOff_();
+
+    /* ——— thermal safety ——— */
+    static constexpr uint16_t kSumpAbsoluteCeilingC = 150;
+    static constexpr uint16_t kSumpDeltaAlarmC      = 35;
+    static constexpr uint8_t  kSumpAlarmDebounce    = 3;
+    uint16_t activeSetpointC_{0};        // last CMD;SP sent to XPB
+    uint8_t  sumpOverTempCount_{0};      // consecutive over-temp STAT frames
 
     /* ——— state handlers ——— */
     void handleBoot      (bool resetActive, bool justEntered_);
@@ -428,10 +436,10 @@ private:
                         }
 
                         // if AUTOSTART==0 or RUN is not LOW, don't preheat nor start.
+                        // Keep coldStart_ intact so the first manual RUN triggers preheat.
                         if (autoStart != 1 || !runIsEngaged) {
                             owner_->autoStartAfterPreheat_ = false;
                             owner_->waitingForTemp_        = false;
-                            owner_->coldStart_             = false;
                             owner_->dbgln("RESUMED: position loaded, AUTOSTART=0 or RUN=OFF -> IDLE");
                             snprintf(ackBuf, sizeof(ackBuf), "ACK;RESUME=OK;REF=%u", (unsigned)refVal);
                             sendMessage(ackBuf, MessageType::NORMAL);
@@ -445,6 +453,7 @@ private:
                             owner_->preheatTargetC_        = targetC;
                             owner_->waitingForTemp_        = true;
                             owner_->autoStartAfterPreheat_ = true; // implied by AUTOSTART=1
+                            owner_->activeSetpointC_       = targetC;
 
                             char cmd[48];
                             snprintf(cmd, sizeof(cmd), "CMD;SP=%u", owner_->preheatTargetC_);
@@ -690,10 +699,11 @@ private:
                     owner_->isProtoLoaded_ = true;
                     owner_->heartbeatSystemEnabled_ = true;
 
-                    // Respect the RUN gate: do NOT force runGateReleased_ = true.
-                    // handleBoot() set runGateReleased_ = false; tick() will
-                    // release the gate when the operator lets the RUN line go
-                    // high, then re-asserts it intentionally.
+                    // Fresh protocol upload: gate stays closed when RUN
+                    // is held at boot.  Auto-start only happens via the
+                    // RESUME;AUTOSTART=1 path (XPB found Ra.bin/Rb.bin).
+                    // If no resume data exists the operator must release
+                    // and re-assert RUN to start.
                     owner_->latchedRunPending_ = owner_->runActiveRemote_;
                     if (owner_->runGateReleased_ && owner_->latchedRunPending_) {
                         if (owner_->promoteRun_(ClearCoreRTM::RunTrigger::LatchedAuto)) {
@@ -701,7 +711,7 @@ private:
                             owner_->dbgln("[RUN] Gate was open, auto-started");
                         }
                     } else if (owner_->latchedRunPending_) {
-                        owner_->dbgln("[RUN] RUN held low at boot - gate still closed, waiting for release");
+                        owner_->dbgln("[RUN] RUN held at boot — gate closed, waiting for RESUME or RUN toggle");
                     } else {
                         owner_->runGateReleased_ = true;
                         owner_->dbgln("[RUN] Gate open, no RUN pending");
@@ -751,7 +761,7 @@ private:
                 static int lastSeq = -1;
                 const int seq = kvGet(data, "SEQ=").toInt();
                 const int out = kvGetIntClamped(data, "OUT=", 0, 0, 150);
-                const int temp = kvGetIntClamped(data, "TEMP=", 0, 0, 200);
+                const int sump = kvGetIntClamped(data, "SUMP=", 0, 0, 200);
                 const int seal = kvGetIntClamped(data, "SEAL=", 0, 0, 200);
 
                 const bool dup = (seq >= 0 && seq == lastSeq);
@@ -764,6 +774,29 @@ private:
                     owner_->sealTempC_ = (uint16_t)seal;
                     owner_->setHeaterOutput(out);
 
+                    // --- Over-temperature safety ---
+                    if (owner_->protocolUsesHeat_) {
+                        const uint16_t sumpC = (uint16_t)sump;
+                        // Absolute ceiling — immediate E-STOP
+                        if (sumpC >= kSumpAbsoluteCeilingC) {
+                            owner_->estopReason_ |= ESTOP_THERMAL;
+                            owner_->eStopAll_("SUMP >= 150C ceiling");
+                            return;
+                        }
+                        // Delta runaway — debounced (3 consecutive frames)
+                        if (owner_->activeSetpointC_ > 0 &&
+                            sumpC > owner_->activeSetpointC_ + kSumpDeltaAlarmC) {
+                            if (++owner_->sumpOverTempCount_ >= kSumpAlarmDebounce) {
+                                owner_->estopReason_ |= ESTOP_THERMAL;
+                                owner_->eStopAll_("SUMP runaway > SP+35C");
+                                owner_->sumpOverTempCount_ = 0;
+                                return;
+                            }
+                        } else {
+                            owner_->sumpOverTempCount_ = 0;
+                        }
+                    }
+
                     // Auto-clear stale-STAT E-STOP on first good STAT
                     if (owner_->state_ == State::EStop && (owner_->estopReason_ & ESTOP_STALE_STAT)) {
                         owner_->estopReason_ &= ~ESTOP_STALE_STAT;
@@ -774,8 +807,8 @@ private:
                     // preheat completion check
                     if (owner_->waitingForTemp_ && owner_->state_ == State::Preheat) {
                         static uint8_t inRangeCount = 0;
-                        const int err = temp - (int)owner_->preheatTargetC_;
-                        if (err >= -2 && err <= 2) {
+                        const int err = sump - (int)owner_->preheatTargetC_;
+                        if (err >= -2) {  // at or above (target - 2°C)
                             if (++inRangeCount >= 2) {  // tiny debounce
                                 owner_->waitingForTemp_ = false;
                                 owner_->coldStart_ = false;

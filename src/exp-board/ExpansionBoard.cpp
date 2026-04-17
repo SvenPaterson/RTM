@@ -294,15 +294,12 @@ bool ExpansionBoard::begin() {
                 dbgln(rb);
             }
         }
-        
-        // Scrub "virgin" resume (created before any real run)
-        if (haveStoredResume_ && storedPhash_ == progHash_) {
-            if (storedStep_ <= 1 && storedLoopCur_ <= 1) {
-                dbgln("Resume looks virgin (step=1 loop=1) -> clearing");
-                clearResumeTU();
-                haveStoredResume_ = false;
-            }
-        }
+
+        // NOTE: virgin-resume scrub removed.  Resume is only saved when
+        // everRan_ is true (STATE=RUNNING seen), so a step=1/loop=1
+        // record IS legitimate if the power was lost during step 1.
+        // Stale records from prior runs are already cleared on COMPLETED
+        // or manual RESET;EXEC.
 
         // === ALWAYS UPLOAD PROTOCOL TO CC AFTER BOOT ===
         // === DO NOT AUTO-UPLOAD FROM HERE ===
@@ -599,7 +596,7 @@ void ExpansionBoard::tick() {
         const int out = heater_.lastOut();
         const int tempC = isnan(latestSumpC_) ? 0 : (int)latestSumpC_;
         const int sealC = isnan(latestSealC_) ? 0 : (int)latestSealC_;
-        snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d;TEMP=%d;SEAL=%d", 
+        snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d;SUMP=%d;SEAL=%d", 
                  hbSeq_++, out, tempC, sealC);
         ttlComms_.sendMessage(line, MessageType::INFO);
     }
@@ -869,13 +866,14 @@ void ExpansionBoard::renderNormal_() {
     char buff[LCDDriver::kNumCols+1];
 
     // Line 0: left = protocol name OR runtime; right = CC state
-    if (lcdToggle_) {
+    if (lcdToggle_ || stepTotalMs_ == 0) {
+        // Show protocol name when toggle is active OR no countdown running
         strncpy(buff, protocolName_, LCDDriver::kNumCols);
         buff[LCDDriver::kNumCols] = '\0';
     } else {
         char countdown[16];
         formatStepCountdown_(countdown, sizeof(countdown));
-        snprintf(buff, sizeof(buff), "T- %s", countdown);
+        snprintf(buff, sizeof(buff), "T: %s", countdown);
     }
     lcd_.setLineLR(0, buff, ccState_);
 
@@ -905,9 +903,11 @@ void ExpansionBoard::renderNormal_() {
     } else {
         // RTM view
         int sp  = (int)lround(heater_.setpoint());
-        // int out = heater_.lastOut();
-        // snprintf(buff, sizeof(buff), "Heat:%3d\xDF""C OUT:%03d", sp, out);
-        snprintf(buff, sizeof(buff), "Heat:%3d\xDF""C RPM:%4d", sp, (int)ccRpm_);
+        if (sp > 0) {
+            snprintf(buff, sizeof(buff), "Heat:%3d\xDF""C RPM:%4d", sp, (int)ccRpm_);
+        } else {
+            snprintf(buff, sizeof(buff), "HEAT:none  RPM:%4d", (int)ccRpm_);
+        }
         lcd_.setLineLeft(2, buff);
 
         uint16_t sealInt = isnan(latestSealC_) ? 0U : (uint16_t)(latestSealC_ + 0.5f);
@@ -1529,7 +1529,14 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
             owner_->everRan_          = false;
             owner_->dbgln("[RESUME] cleared (protocol COMPLETED)");
         }
-        if (sSTATE.length()) sSTATE.toCharArray(owner_->ccState_, sizeof(owner_->ccState_));
+        if (sSTATE.length()) {
+            // Shorten COMPLETED → DONE for LCD display
+            if (sSTATE == "COMPLETED") {
+                strcpy(owner_->ccState_, "DONE");
+            } else {
+                sSTATE.toCharArray(owner_->ccState_, sizeof(owner_->ccState_));
+            }
+        }
 
         // E_CODE-based estop
         String sECODE  = kvGet(data, "E_CODE=");
@@ -1575,7 +1582,18 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
         if (sRPM.length()) owner_->ccRpm_ = (int16_t)sRPM.toInt();
 
         const bool stepChanged = (owner_->ccStep_ != prevStep) || (owner_->ccLoopCur_ != prevLoop);
-        owner_->refreshStepCountdown_(stepChanged);
+        // Only count down during RUNNING — no countdown in IDLE, PREHEAT, etc.
+        static bool wasRunning = false;
+        if (sSTATE == "RUNNING") {
+            // Force countdown init on transition into RUNNING (step may
+            // already be 1 from IDLE/PREHEAT, so stepChanged is false).
+            owner_->refreshStepCountdown_(stepChanged || !wasRunning);
+            wasRunning = true;
+        } else {
+            owner_->stepTotalMs_     = 0;
+            owner_->stepRemainingMs_ = 0;
+            wasRunning = false;
+        }
 
         // One-time "ready" if HB arrived before READY (common on some boots)
         if (!owner_->ccReady_) {

@@ -311,6 +311,7 @@ bool ClearCoreRTM::promoteRun_(RunTrigger trigger) {
         preheatTargetC_        = targetC;
         waitingForTemp_        = true;
         autoStartAfterPreheat_ = true;
+        activeSetpointC_       = targetC;
         if (latched) {
             if (logLatched) dbgln(logLatched);
         } else {
@@ -323,7 +324,7 @@ bool ClearCoreRTM::promoteRun_(RunTrigger trigger) {
     };
 
     if (state_ == State::Paused) {
-        if (coldStart_ && targetC > 0) {
+        if (protocolUsesHeat_ && targetC > 0) {
             queuePreheat("PAUSED→PREHEAT (system resume)", "[RUN] Latched resume -> PREHEAT");
         } else {
             state_ = State::Resume;
@@ -528,8 +529,8 @@ void ClearCoreRTM::handleRunning(bool runActive, bool justEntered_) {
 
 void ClearCoreRTM::handlePaused(bool runActive, bool justEntered_) {
     if (justEntered_) {
-        //renderScreen();
         motor.MoveStopDecel((1000 * kStepsPerRev) / 60); // decel to 0 RPM
+        if (protocolUsesHeat_) sendHeaterOff_();
     }
 
     // flash LED slowly
@@ -548,8 +549,22 @@ void ClearCoreRTM::handlePaused(bool runActive, bool justEntered_) {
     if (motor.StepsComplete()) {
         // spin motor down to full stop
         if (runActive) {
-            state_ = State::Resume;
-            //renderScreen();
+            if (protocolUsesHeat_ && steps_[currentStep_].tempC > 0) {
+                // Route through preheat to reheat before resuming motion
+                preheatTargetC_ = steps_[currentStep_].tempC;
+                waitingForTemp_ = true;
+                autoStartAfterPreheat_ = true;
+                activeSetpointC_ = preheatTargetC_;
+
+                char cmd[48];
+                snprintf(cmd, sizeof(cmd), "CMD;SP=%u", preheatTargetC_);
+                ttlComms_.sendMessage(cmd, MessageType::IMPORTANT);
+
+                state_ = State::Preheat;
+                dbgln("PAUSED->PREHEAT (re-heat before resume)");
+            } else {
+                state_ = State::Resume;
+            }
         } else {
             motor.EnableRequest(false);
         }
@@ -667,8 +682,8 @@ void ClearCoreRTM::handleResume(bool runActive, bool justEntered_) {
 
 void ClearCoreRTM::handleCompleted(bool resetActive, bool justEntered_) {
     if (justEntered_) {
-        //renderScreen();
         motor.MoveStopDecel(targetAccel_); // decel to 0 RPM
+        if (protocolUsesHeat_) sendHeaterOff_();
     }
 
     if (motor.StepsComplete()) {
@@ -689,8 +704,7 @@ void ClearCoreRTM::logicalReset() {
     motor.EnableRequest(false);
 
     // --- Heater: safe stop ---
-    HEATER_OUTPUT_PIN.PwmDuty(0);
-    HEATER_SAFETY_PIN.State(false);
+    sendHeaterOff_();
     heaterInhibit_ = false;
 
     // --- Protocol: force re-upload from XPB ---
@@ -747,6 +761,8 @@ void ClearCoreRTM::logicalReset() {
     autoStartAfterPreheat_ = false;
     protocolUsesHeat_      = false;
     sealTempC_             = 0;
+    activeSetpointC_       = 0;
+    sumpOverTempCount_     = 0;
 
     // --- Runtime timers ---
     testRunTmr_ = 0;
@@ -808,6 +824,18 @@ void ClearCoreRTM::handlePreheat(bool runActive, bool justEntered_) {
 }
 
 // --------- output control handlers ------------
+void ClearCoreRTM::sendHeaterOff_() {
+    // Tell XPB to stop PID
+    ttlComms_.sendMessage("CMD;SP=0", MessageType::IMPORTANT);
+
+    // Cut both SSR legs locally
+    HEATER_OUTPUT_PIN.PwmDuty(0);
+    HEATER_SAFETY_PIN.State(false);
+
+    activeSetpointC_ = 0;
+    dbgln("[HEAT] Heater OFF (CMD;SP=0 sent)");
+}
+
 void ClearCoreRTM::setHeaterOutput(int out) {
     if (state_ == State::EStop || heaterInhibit_ || !protocolUsesHeat_) {
         HEATER_OUTPUT_PIN.PwmDuty(0);
@@ -819,8 +847,17 @@ void ClearCoreRTM::setHeaterOutput(int out) {
     if (out < 0)    out = 0;
     if (out > 255)  out = 255;
 
-    HEATER_SAFETY_PIN.State(true);
-    HEATER_OUTPUT_PIN.PwmDuty(out);
+    if (out > 0) {
+        HEATER_SAFETY_PIN.State(true);
+        HEATER_OUTPUT_PIN.PwmDuty(out);
+    } else {
+        HEATER_OUTPUT_PIN.PwmDuty(0);
+        // IO2 stays energised while a setpoint is active;
+        // only sendHeaterOff_ / eStopAll_ cut it.
+        if (activeSetpointC_ == 0) {
+            HEATER_SAFETY_PIN.State(false);
+        }
+    }
 }
 
 void ClearCoreRTM::eStopAll_(const char *reason) {
@@ -828,7 +865,9 @@ void ClearCoreRTM::eStopAll_(const char *reason) {
     motor.MoveStopAbrupt();
     motor.EnableRequest(false);
 
-    // Heater: drop to zero and disable safety if used
+    // Heater: best-effort tell XPB to stop PID, then cut locally
+    ttlComms_.sendMessage("CMD;SP=0", MessageType::IMPORTANT);
+    activeSetpointC_ = 0;
     HEATER_OUTPUT_PIN.PwmDuty(0);
     HEATER_SAFETY_PIN.State(false);
     heaterInhibit_ = true;

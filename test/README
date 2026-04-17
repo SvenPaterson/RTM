@@ -37,11 +37,14 @@ Available Modes
 * ``run-pulse``: Toggle RUN low to start a drive cycle and capture CC/XBP heartbeats.
 * ``reset-cancel``: Fire multiple sub-threshold RESET pulses to confirm cancel behavior.
 * ``power --state on|off``: Toggle the sniffer-controlled board power relay for hard reset / cold boot validation.
-* ``protocol-upload``: Walk through SD card staging, protocol ingestion, and automatic runtime validation.
+* ``protocol-upload``: Walk through SD card staging, protocol ingestion, and automatic runtime validation. Adds preheat margin for heat protocols (``--preheat-s``, default 90 s).
 * ``run-gate``: Automated five-step RUN-gate validation from CODE_REVIEW.md §7 — verifies boot masking, gate release, resume auto-start (RUN ON), manual-reset clears resume, and resume with RUN OFF (AUTOSTART=0).
+* ``run-protocol``: (T9) Run a loaded protocol to completion and log RPM vs step. Reads the protocol CSV to auto-compute RUN pulse duration. When the protocol includes a ``TempC`` column with values > 0, a configurable preheat margin (``--preheat-s``, default 90 s) is added to the RUN hold.
 * ``run-cycle``: (T2) Double-pulse RUN test — IDLE → RUNNING → PAUSED → RUNNING → PAUSED, with automated verdict.
 * ``comms-health``: (T8) Passive comms health check — verify HB and STAT cadence stay within 2 s tolerance.
 * ``cold-boot``: (T1) Power-cycle via sniffer relay, verify full boot sequence (QUIESCE → PROTO_RX=OK → IDLE HBs).
+* ``heat-flags``: (T10) Two-phase heating validation — Phase A confirms no-heat protocol skips PREHEAT and heater stays OFF; Phase B (operator swaps SD to HEAT_TEST.csv) verifies PREHEAT entry, CMD;SP sent, and PID drives output. Interactive (requires SD swap).
+* ``heat-lifecycle``: (T11) Four-phase heater lifecycle validation — Phase A: heater ON during RUNNING (PREHEAT + PID active); Phase B: heater OFF on PAUSED (CMD;SP=0 + OUT=000); Phase C: preheat on resume from pause (re-heat before motion); Phase D: heater OFF on COMPLETED (CMD;SP=0 + OUT=000). Requires heat protocol SD card already loaded (run T10 first or pre-load). Interactive.
 
 Automated Test Suite
 --------------------
@@ -79,10 +82,17 @@ The following tests require operator observation and are not automated:
   XPB detects E-STOP, CC receives CMD;PAUSE, and system pauses gracefully.
 * **M4 — Heater PID**: Start a protocol with a temperature target; verify STAT;OUT
   values ramp up and stabilize near the setpoint over ~60 s.
+  Semi-automated via ``heat-flags`` verb (T10): Phase A validates no-heat → heater OFF;
+  Phase B validates heat protocol → PREHEAT + CMD;SP + PID output.  Use ``--auto`` to
+  skip the interactive SD-swap prompt when the heat protocol SD is already inserted.
 * **M5 — SD card removal**: Remove the SD card while idle; verify "Protocol Missing
   on SD" appears and the system rejects RUN attempts.
 * **M6 — Motor movement**: (Deferred) Requires ClearCore motor docs review to
   design verification protocol.
+* **M7 — Thermal alarm**: Verify over-temperature E-STOP fires when sump exceeds
+  150 °C absolute ceiling or runs away > 35 °C above setpoint for 3 consecutive
+  STAT frames. Cannot safely simulate on live hardware — verify via TTL injection
+  or code inspection.
 
 RUN-gate validation sequence
 ----------------------------

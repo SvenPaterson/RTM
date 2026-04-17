@@ -44,7 +44,9 @@ EXTENDED_TESTS = [
 # Manual-interactive tests — require operator action (SD swap, visual check).
 # Run these individually: python test/rig_control.py protocol-upload --port COM7
 INTERACTIVE_TESTS = [
-    ("T3", "protocol-upload", ["protocol-upload"]),
+    ("T3",  "protocol-upload", ["protocol-upload"]),
+    ("T10", "heat-flags",      ["heat-flags"]),
+    ("T11", "heat-lifecycle",  ["heat-lifecycle"]),
 ]
 
 RIG_CONTROL = str(Path(__file__).resolve().parent / "rig_control.py")

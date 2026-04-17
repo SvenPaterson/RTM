@@ -16,6 +16,8 @@ work in this repository.
   - Suite runner: `python test/rig_control.py run-suite --port COM7` — runs cold-boot, comms-health, reset-cancel, reset-pulse, run-cycle, run-gate sequentially and writes a `{timestamp}_suite.log` master log with combined output and summary table
   - Compatibility wrappers: [test/run_pulse_test.py](../test/run_pulse_test.py), [test/reset_pulse_test.py](../test/reset_pulse_test.py), [test/reset_cancel_test.py](../test/reset_cancel_test.py), [test/protocol_upload_test.py](../test/protocol_upload_test.py)
   - RUN-gate validation: `python test/rig_control.py run-gate --port COM7` (four-step automated test from CODE_REVIEW.md §7)
+  - Protocol run with auto-preheat: `python test/rig_control.py run-protocol --port COM7 --protocol protocols/HEAT_TEST.csv` (auto-adds 90 s preheat margin for heat protocols)
+  - Heat lifecycle: `python test/rig_control.py heat-lifecycle --port COM7` (T11 — four-phase heater lifecycle: ON during RUNNING, OFF on PAUSED, preheat on resume, OFF on COMPLETED; requires heat SD pre-loaded)
   - Captured logs: [test/log/](../test/log/)
 - Debug tooling
   - Live stream capture utility: [tools/ttl_stream_capture.py](../tools/ttl_stream_capture.py)

@@ -37,6 +37,7 @@ POWER_CAPTURE_DEFAULT_S = 4.0
 DEFAULT_INGESTION_WAIT = 15.0
 DEFAULT_TAIL_PAD = 10.0
 DEFAULT_RUN_MARGIN = 15.0
+DEFAULT_PREHEAT_S = 90.0
 DEFAULT_PROTOCOL_DIR = Path(__file__).resolve().parent.parent / "tools" / "protocols"
 DEFAULT_PROTOCOL_NAME = "protocol.csv"
 
@@ -249,6 +250,60 @@ def scan_lines(lines: list[str], patterns: dict[str, str]) -> dict[str, list[str
     return results
 
 
+def capture_lines_until(
+    ser: serial.Serial,
+    max_duration_s: float,
+    log: TextIO | None,
+    patterns: dict[str, str],
+    ready: Callable[[dict[str, list[str]]], bool],
+    hold_s: float = 5.0,
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Capture lines until *ready(hits)* is True, then hold for *hold_s* more.
+
+    Returns (collected_lines, scan_hits).  Falls through to the full
+    *max_duration_s* if the predicate never fires.
+    """
+    compiled = {name: re.compile(pat, re.IGNORECASE) for name, pat in patterns.items()}
+    hits: dict[str, list[str]] = {name: [] for name in patterns}
+    collected: list[str] = []
+    partial = bytearray()
+    deadline = time.monotonic() + max_duration_s
+    satisfied_at: float | None = None
+
+    while time.monotonic() < deadline:
+        if satisfied_at is not None and time.monotonic() >= satisfied_at + hold_s:
+            break
+        chunk = ser.read(512)
+        if chunk:
+            partial.extend(chunk)
+            while True:
+                nl = partial.find(b"\n")
+                if nl < 0:
+                    break
+                frame = partial[:nl]
+                del partial[: nl + 1]
+                text = frame.decode("utf-8", errors="replace").rstrip("\r")
+                if text:
+                    emit(text, log)
+                    collected.append(text)
+                    for name, regex in compiled.items():
+                        if regex.search(text):
+                            hits[name].append(text)
+                    if satisfied_at is None and ready(hits):
+                        satisfied_at = time.monotonic()
+        else:
+            time.sleep(0.02)
+    if partial:
+        text = partial.decode("utf-8", errors="replace").rstrip("\r")
+        if text:
+            emit(text, log)
+            collected.append(text)
+            for name, regex in compiled.items():
+                if regex.search(text):
+                    hits[name].append(text)
+    return collected, hits
+
+
 def timestamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -277,7 +332,11 @@ def ensure_default_protocol() -> Path:
     return path
 
 
-def parse_protocol(path: Path) -> tuple[str, int, Sequence[tuple[float, float, float]]]:
+def parse_protocol(path: Path) -> tuple[str, int, Sequence[tuple[float, float, float]], bool]:
+    """Parse a protocol CSV and return (name, loop_count, steps, uses_heat).
+
+    *uses_heat* is ``True`` when any step defines a TempC value > 0.
+    """
     lines = path.read_text(encoding="utf-8").splitlines()
     if len(lines) < 3:
         raise ValueError("Protocol file must include metadata and at least one row")
@@ -298,6 +357,8 @@ def parse_protocol(path: Path) -> tuple[str, int, Sequence[tuple[float, float, f
     if reader.fieldnames is None or any(h not in reader.fieldnames for h in required):
         raise ValueError("Protocol CSV must define TargetRPM, AccelRPMperSec, DwellSeconds columns")
 
+    has_temp_col = reader.fieldnames is not None and "TempC" in reader.fieldnames
+    uses_heat = False
     steps: list[tuple[float, float, float]] = []
     for row in reader:
         if not row:
@@ -329,9 +390,18 @@ def parse_protocol(path: Path) -> tuple[str, int, Sequence[tuple[float, float, f
             raise ValueError("DwellSeconds cannot be negative")
         steps.append((target, accel, dwell))
 
+        if has_temp_col and not uses_heat:
+            temp_raw = row.get("TempC", "").strip()
+            if temp_raw:
+                try:
+                    if float(temp_raw) > 0:
+                        uses_heat = True
+                except ValueError:
+                    pass
+
     if not steps:
         raise ValueError("Protocol must define at least one step")
-    return protocol_name, loop_count, steps
+    return protocol_name, loop_count, steps, uses_heat
 
 
 def run_reset_pulse(args: argparse.Namespace) -> int:
@@ -579,7 +649,7 @@ def run_protocol(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        proto_name, loop_count, steps = parse_protocol(proto_path)
+        proto_name, loop_count, steps, uses_heat = parse_protocol(proto_path)
     except ValueError as exc:
         print(f"[TEST] Protocol parse error: {exc}")
         return 3
@@ -593,7 +663,8 @@ def run_protocol(args: argparse.Namespace) -> int:
             total_runtime += ramp_time + dwell_s
             current_rpm = target_rpm
 
-    run_hold_s = total_runtime + args.run_margin_s
+    preheat_s = args.preheat_s if uses_heat else 0.0
+    run_hold_s = preheat_s + total_runtime + args.run_margin_s
     capture_s = args.settle_s + run_hold_s + args.tail_s
 
     log_dir = ensure_log_dir()
@@ -604,8 +675,8 @@ def run_protocol(args: argparse.Namespace) -> int:
         emit(f"[TEST] Logging to {rel_path(log_path)}", log)
         emit(f"[TEST] Command: {format_invocation()}", log)
         emit("[TEST] === RUN-PROTOCOL TEST ===", log)
-        emit(f"[TEST] Protocol: {proto_name} ({len(steps)} steps, {loop_count} loops)", log)
-        emit(f"[TEST] Expected runtime: {total_runtime:.1f}s, RUN hold: {run_hold_s:.1f}s", log)
+        emit(f"[TEST] Protocol: {proto_name} ({len(steps)} steps, {loop_count} loops, heat={'yes' if uses_heat else 'no'})", log)
+        emit(f"[TEST] Expected runtime: {total_runtime:.1f}s{f', preheat margin: {preheat_s:.0f}s' if preheat_s else ''}, RUN hold: {run_hold_s:.1f}s", log)
         emit(f"[TEST] Capture window: {capture_s:.1f}s (settle {args.settle_s:.1f}s + run {run_hold_s:.1f}s + tail {args.tail_s:.1f}s)", log)
         emit(f"[TEST] Opening serial port {args.port} @ {args.baud} baud", log)
         try:
@@ -779,6 +850,21 @@ def run_protocol(args: argparse.Namespace) -> int:
                     f"RPM data for {rpm_steps} steps)",
                     log,
                 )
+
+                # Post-completion heater-off check for heat protocols
+                if uses_heat:
+                    heat_off_hits = scan_lines(all_lines, {
+                        "cmd_sp_0": r"CMD;SP=0",
+                        "stat_out_0": r"STAT;.*OUT=000",
+                    })
+                    if heat_off_hits["cmd_sp_0"]:
+                        emit("[TEST] OK — CMD;SP=0 sent after completion (heater commanded off)", log)
+                    else:
+                        emit("[TEST] WARNING — CMD;SP=0 not observed after COMPLETED", log)
+                    if heat_off_hits["stat_out_0"]:
+                        emit(f"[TEST] OK — STAT;OUT=000 after completion ({len(heat_off_hits['stat_out_0'])} frames)", log)
+                    else:
+                        emit("[TEST] WARNING — STAT;OUT=000 not observed after COMPLETED", log)
             else:
                 emit(
                     f"[TEST] WARN — protocol did not reach COMPLETED state "
@@ -1127,7 +1213,7 @@ def run_protocol_upload(args: argparse.Namespace) -> int:
             return 1
 
     try:
-        proto_name, loop_count, steps = parse_protocol(args.protocol)
+        proto_name, loop_count, steps, uses_heat = parse_protocol(args.protocol)
     except ValueError as exc:
         print(f"[TEST] Protocol parse error: {exc}")
         return 3
@@ -1147,10 +1233,11 @@ def run_protocol_upload(args: argparse.Namespace) -> int:
         return total, loop_totals
 
     expected_runtime, loop_durations = simulate_runtime(loop_count, steps)
+    preheat_s = args.preheat_s if uses_heat else 0.0
     first_loop = loop_durations[0] if loop_durations else 0.0
     avg_loop = expected_runtime / loop_count if loop_count else 0.0
-    capture_horizon = args.ingestion_wait + expected_runtime + args.tail_pad
-    pulse_seconds = max(0.0, expected_runtime + args.run_margin_s)
+    capture_horizon = args.ingestion_wait + preheat_s + expected_runtime + args.tail_pad
+    pulse_seconds = max(0.0, preheat_s + expected_runtime + args.run_margin_s)
 
     log_dir = ensure_log_dir()
     ts = timestamp()
@@ -1191,15 +1278,16 @@ def run_protocol_upload(args: argparse.Namespace) -> int:
             if loop_count > 1 and any(abs(ld - first_loop) > 1e-6 for ld in loop_durations[1:]):
                 loop_note += f", avg-loop={avg_loop:.1f}s"
         emit(
-            f"[TEST] Protocol: {proto_name} {proto_note} (loops={loop_count}, {loop_note})",
+            f"[TEST] Protocol: {proto_name} {proto_note} (loops={loop_count}, {loop_note}, heat={'yes' if uses_heat else 'no'})",
+            log,
+        )
+        preheat_note = f", preheat {preheat_s:.0f}s" if preheat_s else ""
+        emit(
+            f"[TEST] Capture horizon: {capture_horizon:.1f}s (ingestion wait {args.ingestion_wait:.1f}s{preheat_note}, runtime {expected_runtime:.1f}s, tail {args.tail_pad:.1f}s)",
             log,
         )
         emit(
-            f"[TEST] Capture horizon: {capture_horizon:.1f}s (ingestion wait {args.ingestion_wait:.1f}s, runtime {expected_runtime:.1f}s, tail {args.tail_pad:.1f}s)",
-            log,
-        )
-        emit(
-            f"[TEST] Planned RUN pulse: {pulse_seconds:.1f}s (runtime {expected_runtime:.1f}s + margin {args.run_margin_s:.1f}s)",
+            f"[TEST] Planned RUN pulse: {pulse_seconds:.1f}s (runtime {expected_runtime:.1f}s{preheat_note} + margin {args.run_margin_s:.1f}s)",
             log,
         )
 
@@ -1979,6 +2067,602 @@ def run_run_gate(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# heat-flags: validate heating detection and preheat behaviour
+# ---------------------------------------------------------------------------
+
+# Default timings for heat-flags test
+HEAT_FLAGS_BOOT_WAIT_S = 30.0
+HEAT_FLAGS_OBSERVE_S = 10.0
+HEAT_FLAGS_PREHEAT_OBSERVE_S = 15.0
+HEAT_FLAGS_POWER_DWELL_S = 4.0
+
+
+def run_heat_flags(args: argparse.Namespace) -> int:
+    """T10: Heat-flags validation.
+
+    Phase A: With the CURRENT (no-heat) protocol already loaded on the SD card,
+    assert RUN and verify the system goes straight to RUNNING (no PREHEAT),
+    and that STAT;OUT= stays at 0 (safety relay OFF).
+
+    Phase B: Operator swaps the SD card to one containing a protocol with TempC > 0.
+    After a power-cycle, assert RUN and verify the system enters PREHEAT,
+    CC sends CMD;SP=<target>, and STAT;OUT= > 0 (PID drives heater output).
+    """
+    log_dir = ensure_log_dir()
+    log_path = log_dir / f"{timestamp()}_heat_flags.log"
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        emit(f"[TEST] Logging to {rel_path(log_path)}", log)
+        emit(f"[TEST] Command: {format_invocation()}", log)
+        emit("[TEST] === HEAT-FLAGS VALIDATION (T10) ===", log)
+        emit(
+            f"[TEST] Configuration: boot_wait={args.boot_wait_s:.1f}s, "
+            f"observe={args.observe_s:.1f}s, "
+            f"preheat_observe={args.preheat_observe_s:.1f}s",
+            log,
+        )
+        emit(f"[TEST] Opening serial port {args.port} @ {args.baud} baud", log)
+        try:
+            ser = open_serial_with_retry(args.port, args.baud, timeout=0.1)
+        except (serial.SerialException, OSError) as exc:
+            emit(f"[TEST] Serial error: {exc}", log)
+            return 2
+
+        with ser:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            emit("[TEST] Connected", log)
+
+            # ==============================================================
+            #  Phase A — No-heat protocol (already loaded on SD)
+            # ==============================================================
+            emit("", log)
+            emit("[TEST] ============ PHASE A: NO-HEAT PROTOCOL ============", log)
+            emit("[TEST] Assumes current SD card has a protocol with NO TempC column.", log)
+
+            send_command(ser, "STATUS", log=log)
+            time.sleep(0.25)
+
+            # Confirm IDLE baseline
+            emit("[TEST] Phase A.1: Confirming IDLE baseline", log)
+            idle_lines = capture_lines(ser, args.observe_s, log,
+                                       drop_first_line=args.drop_first_line)
+            idle_hits = scan_lines(idle_lines, {
+                "hb_idle": r"HB;.*STATE=IDLE",
+            })
+            if not idle_hits["hb_idle"]:
+                emit("[TEST] FAIL — system not in IDLE (Phase A prerequisite)", log)
+                return 1
+
+            # Assert RUN — expect RUNNING immediately (no PREHEAT)
+            emit("[TEST] Phase A.2: Assert RUN — expect RUNNING (no PREHEAT)", log)
+            send_command(ser, "RUN=1", log=log)
+            run_lines = capture_lines(ser, args.observe_s, log)
+            run_hits = scan_lines(run_lines, {
+                "hb_running": r"HB;.*STATE=RUNNING",
+                "hb_preheat": r"HB;.*STATE=PREHEAT",
+                "stat_out0": r"STAT;.*OUT=0[;\s]",
+            })
+
+            a_fail = False
+            if run_hits["hb_preheat"]:
+                emit("[TEST] FAIL — Phase A: unexpected PREHEAT (no-heat protocol)", log)
+                a_fail = True
+            if not run_hits["hb_running"]:
+                emit("[TEST] FAIL — Phase A: no RUNNING heartbeat after RUN asserted", log)
+                a_fail = True
+
+            # Verify heater output is 0 in STAT frames
+            emit("[TEST] Phase A.3: Checking STAT;OUT=0 (heater OFF for no-heat)", log)
+            stat_lines = [l for l in run_lines if "STAT;" in l and "OUT=" in l]
+            any_nonzero_out = False
+            for sl in stat_lines:
+                m = re.search(r"OUT=(\d+)", sl)
+                if m and int(m.group(1)) > 0:
+                    any_nonzero_out = True
+                    break
+            if any_nonzero_out:
+                emit("[TEST] FAIL — Phase A: STAT;OUT > 0 with no-heat protocol!", log)
+                a_fail = True
+            elif stat_lines:
+                emit(f"[TEST] OK — all {len(stat_lines)} STAT frames show OUT=0", log)
+
+            # Release RUN
+            send_command(ser, "RUN=0", log=log)
+            time.sleep(1.0)
+            flush_serial(ser, log)
+
+            if a_fail:
+                emit("[TEST] Phase A: FAIL", log)
+                return 1
+            emit("[TEST] Phase A: PASS — no-heat protocol skips preheat, heater OFF", log)
+
+            # ==============================================================
+            #  Phase B — Heat protocol (operator swaps SD card)
+            # ==============================================================
+            emit("", log)
+            emit("[TEST] ============ PHASE B: HEAT PROTOCOL ============", log)
+            emit("[TEST] ACTION REQUIRED: Swap SD card to one with a TempC protocol", log)
+            emit("[TEST]   (e.g. protocols/HEAT_TEST.csv — copy as /protocol.csv)", log)
+            emit("[TEST]   Then power-cycle the rig.", log)
+
+            if not args.auto:
+                input("[TEST] Press Enter when SD card is swapped and boards are powered down... ")
+
+            # Power cycle
+            emit("[TEST] Phase B.1: Power-cycling boards for heat protocol boot", log)
+            send_command(ser, "PWR=0", log=log)
+            emit(f"[TEST] Power-off dwell {args.power_dwell_s:.1f}s", log)
+            time.sleep(args.power_dwell_s)
+            send_command(ser, "PWR=1", log=log)
+
+            # Wait for boot + protocol upload
+            emit(f"[TEST] Phase B.2: Waiting {args.boot_wait_s:.1f}s for boot + protocol load", log)
+            boot_lines = capture_lines(ser, args.boot_wait_s, log,
+                                       drop_first_line=args.drop_first_line)
+            boot_hits = scan_lines(boot_lines, {
+                "proto_ok": r"NOTICE;PROTO_RX=OK",
+                "hb_idle": r"HB;.*STATE=IDLE",
+            })
+            if not boot_hits["proto_ok"]:
+                emit("[TEST] FAIL — Phase B: protocol upload not observed after boot", log)
+                return 1
+            if not boot_hits["hb_idle"]:
+                emit("[TEST] FAIL — Phase B: no IDLE heartbeat after heat protocol boot", log)
+                return 1
+            emit("[TEST] Phase B.2: Protocol loaded, system IDLE", log)
+
+            # Assert RUN — expect PREHEAT
+            emit("[TEST] Phase B.3: Assert RUN — expect PREHEAT", log)
+            send_command(ser, "RUN=1", log=log)
+            preheat_lines = capture_lines(ser, args.preheat_observe_s, log)
+            preheat_hits = scan_lines(preheat_lines, {
+                "hb_preheat": r"HB;.*STATE=PREHEAT",
+                "cmd_sp": r"CMD;SP=\d+",
+                "stat_out_gt0": r"STAT;.*OUT=(?!0[;\s])\d+",
+                "stat_seal": r"STAT;.*SEAL=\d+",
+            })
+
+            b_fail = False
+            if not preheat_hits["hb_preheat"]:
+                emit("[TEST] FAIL — Phase B: no PREHEAT heartbeat (expected for heat protocol)", log)
+                b_fail = True
+            else:
+                emit(f"[TEST] OK — PREHEAT detected ({len(preheat_hits['hb_preheat'])} HBs)", log)
+
+            if not preheat_hits["cmd_sp"]:
+                emit("[TEST] FAIL — Phase B: no CMD;SP=<target> sent by CC", log)
+                b_fail = True
+            else:
+                emit(f"[TEST] OK — setpoint command sent: {preheat_hits['cmd_sp'][0]}", log)
+
+            if not preheat_hits["stat_out_gt0"]:
+                emit("[TEST] WARNING — Phase B: no STAT;OUT > 0 observed (PID may not have ramped yet)", log)
+                emit("[TEST]   This is a soft warning — PID may need more time to drive output.", log)
+            else:
+                emit(f"[TEST] OK — PID driving heater output ({len(preheat_hits['stat_out_gt0'])} STAT frames with OUT > 0)", log)
+
+            if not preheat_hits["stat_seal"]:
+                emit("[TEST] WARNING — Phase B: SEAL= field not seen in STAT frames", log)
+            else:
+                emit(f"[TEST] OK — SEAL= field present in STAT ({preheat_hits['stat_seal'][0]})", log)
+
+            # Release RUN
+            send_command(ser, "RUN=0", log=log)
+            time.sleep(1.0)
+            flush_serial(ser, log)
+
+            if b_fail:
+                emit("[TEST] Phase B: FAIL", log)
+                return 1
+            emit("[TEST] Phase B: PASS — heat protocol triggers PREHEAT, SP sent, PID active", log)
+
+            # ==============================================================
+            #  Overall verdict
+            # ==============================================================
+            emit("", log)
+            emit("[TEST] === HEAT-FLAGS OVERALL: PASS ===", log)
+            emit("[TEST]   Phase A: no-heat protocol → RUNNING (no preheat), heater OFF", log)
+            emit("[TEST]   Phase B: heat protocol → PREHEAT, CMD;SP sent, PID drives output", log)
+            emit("[TEST] Capture complete", log)
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# heat-lifecycle: validate heater lifecycle across state transitions
+# ---------------------------------------------------------------------------
+
+# Default timings for heat-lifecycle test
+HEAT_LIFECYCLE_BOOT_WAIT_S = 30.0
+HEAT_LIFECYCLE_OBSERVE_S = 10.0
+HEAT_LIFECYCLE_PREHEAT_OBSERVE_S = 90.0
+HEAT_LIFECYCLE_POWER_DWELL_S = 4.0
+
+
+def run_heat_lifecycle(args: argparse.Namespace) -> int:
+    """T11: Heat-lifecycle validation.
+
+    Requires a heat protocol already loaded on the SD card (e.g. HEAT_TEST.csv).
+    Run T10 first or pre-load the heat SD before running this test.
+
+    Phase A: Heater ON during RUNNING — assert RUN, observe PREHEAT + CMD;SP,
+             wait for RUNNING, verify STAT;OUT > 0.
+    Phase B: Heater OFF on PAUSED — release RUN, verify CMD;SP=0 + STAT;OUT=0.
+    Phase C: Preheat on Resume — re-assert RUN from PAUSED, verify PREHEAT
+             entry (not direct RUNNING/RESUME), CMD;SP re-sent.
+    Phase D: Preheat on auto-resume — power-cycle while RUNNING (RUN held),
+             verify PREHEAT entry + CMD;SP on power-restore auto-resume.
+    Phase E: Heater OFF on COMPLETED — hold RUN through completion, verify
+             CMD;SP=0 + STAT;OUT=0 after COMPLETED.
+    """
+    log_dir = ensure_log_dir()
+    log_path = log_dir / f"{timestamp()}_heat_lifecycle.log"
+
+    # Parse protocol for runtime estimate (optional but helpful for Phase E)
+    proto_path: Path | None = None
+    total_runtime = 120.0  # fallback
+    if hasattr(args, "protocol") and args.protocol:
+        proto_path = args.protocol.resolve()
+        if proto_path.is_file():
+            try:
+                _name, loop_count, steps, _uses_heat = parse_protocol(proto_path)
+                total_runtime = 0.0
+                current_rpm = 0.0
+                for _ in range(loop_count):
+                    for target_rpm, accel_rpm_s, dwell_s in steps:
+                        ramp_time = abs(target_rpm - current_rpm) / accel_rpm_s if accel_rpm_s > 0 else 0
+                        total_runtime += ramp_time + dwell_s
+                        current_rpm = target_rpm
+            except (ValueError, ZeroDivisionError):
+                pass  # keep fallback
+
+    with open(log_path, "w", encoding="utf-8") as log:
+        emit(f"[TEST] Logging to {rel_path(log_path)}", log)
+        emit(f"[TEST] Command: {format_invocation()}", log)
+        emit("[TEST] === HEAT-LIFECYCLE VALIDATION (T11) ===", log)
+        emit(
+            f"[TEST] Configuration: boot_wait={args.boot_wait_s:.1f}s, "
+            f"observe={args.observe_s:.1f}s, "
+            f"preheat_observe={args.preheat_observe_s:.1f}s, "
+            f"protocol_runtime={total_runtime:.1f}s",
+            log,
+        )
+        emit(f"[TEST] Opening serial port {args.port} @ {args.baud} baud", log)
+        try:
+            ser = open_serial_with_retry(args.port, args.baud, timeout=0.1)
+        except (serial.SerialException, OSError) as exc:
+            emit(f"[TEST] Serial error: {exc}", log)
+            return 2
+
+        with ser:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            emit("[TEST] Connected", log)
+
+            if not args.auto:
+                emit("[TEST] PRE-REQUISITE: Heat protocol SD card must already be loaded.", log)
+                emit("[TEST]   (e.g. HEAT_TEST.csv — run T10 first, or pre-load manually)", log)
+                input("[TEST] Press Enter to continue... ")
+
+            # Power-cycle to start fresh
+            emit("[TEST] Power-cycling for fresh boot", log)
+            send_command(ser, "PWR=0", log=log)
+            time.sleep(args.power_dwell_s)
+            send_command(ser, "PWR=1", log=log)
+
+            # Wait for boot + protocol upload
+            emit(f"[TEST] Waiting {args.boot_wait_s:.1f}s for boot + protocol load", log)
+            boot_lines = capture_lines(ser, args.boot_wait_s, log,
+                                       drop_first_line=args.drop_first_line)
+            boot_hits = scan_lines(boot_lines, {
+                "proto_ok": r"NOTICE;PROTO_RX=OK",
+                "hb_idle": r"HB;.*STATE=IDLE",
+            })
+            if not boot_hits["proto_ok"]:
+                emit("[TEST] FAIL — protocol upload not observed after boot", log)
+                return 1
+            if not boot_hits["hb_idle"]:
+                emit("[TEST] FAIL — no IDLE heartbeat after boot", log)
+                return 1
+            emit("[TEST] Boot complete — system IDLE with heat protocol", log)
+
+            # ==============================================================
+            #  Phase A — Heater ON during RUNNING
+            # ==============================================================
+            emit("", log)
+            emit("[TEST] ============ PHASE A: HEATER ON DURING RUNNING ============", log)
+
+            emit("[TEST] Phase A.1: Assert RUN — expect PREHEAT", log)
+            send_command(ser, "RUN=1", log=log)
+
+            # Observe preheat→RUNNING with early exit once all criteria met
+            phase_a_patterns = {
+                "hb_preheat": r"HB;.*STATE=PREHEAT",
+                "hb_running": r"HB;.*STATE=RUNNING",
+                "cmd_sp_gt0": r"CMD;SP=[1-9]\d*",
+                "stat_out_gt0": r"STAT;.*OUT=(?!000)\d{3}",
+            }
+
+            def phase_a_ready(h: dict[str, list[str]]) -> bool:
+                return bool(
+                    h["hb_preheat"]
+                    and h["hb_running"]
+                    and h["cmd_sp_gt0"]
+                    and h["stat_out_gt0"]
+                )
+
+            preheat_lines, preheat_hits = capture_lines_until(
+                ser, args.preheat_observe_s, log,
+                phase_a_patterns, phase_a_ready, hold_s=5.0,
+            )
+
+            a_fail = False
+            if not preheat_hits["hb_preheat"]:
+                emit("[TEST] FAIL — Phase A: no PREHEAT heartbeat (expected for heat protocol)", log)
+                a_fail = True
+            else:
+                emit(f"[TEST] OK — PREHEAT detected ({len(preheat_hits['hb_preheat'])} HBs)", log)
+
+            if not preheat_hits["cmd_sp_gt0"]:
+                emit("[TEST] FAIL — Phase A: no CMD;SP=<target> sent by CC", log)
+                a_fail = True
+            else:
+                emit(f"[TEST] OK — setpoint command: {preheat_hits['cmd_sp_gt0'][0]}", log)
+
+            if preheat_hits["hb_running"]:
+                emit(f"[TEST] OK — RUNNING reached ({len(preheat_hits['hb_running'])} HBs)", log)
+            else:
+                emit("[TEST] FAIL — Phase A: never reached RUNNING", log)
+                a_fail = True
+
+            if preheat_hits["stat_out_gt0"]:
+                emit(f"[TEST] OK — PID active ({len(preheat_hits['stat_out_gt0'])} STAT frames with OUT > 0)", log)
+            else:
+                emit("[TEST] WARNING — no STAT;OUT > 0 observed (PID may need more time)", log)
+
+            if a_fail:
+                send_command(ser, "RUN=0", log=log)
+                time.sleep(1.0)
+                flush_serial(ser, log)
+                emit("[TEST] Phase A: FAIL", log)
+                return 1
+            emit("[TEST] Phase A: PASS — heater active during RUNNING", log)
+
+            # ==============================================================
+            #  Phase B — Heater OFF on PAUSED
+            # ==============================================================
+            emit("", log)
+            emit("[TEST] ============ PHASE B: HEATER OFF ON PAUSED ============", log)
+
+            emit("[TEST] Phase B.1: Release RUN — expect PAUSED + heater off", log)
+            send_command(ser, "RUN=0", log=log)
+            pause_lines = capture_lines(ser, args.observe_s, log)
+            pause_hits = scan_lines(pause_lines, {
+                "hb_paused": r"HB;.*STATE=PAUSED",
+                "cmd_sp_0": r"CMD;SP=0",
+                "stat_out_0": r"STAT;.*OUT=000",
+            })
+
+            b_fail = False
+            if not pause_hits["hb_paused"]:
+                emit("[TEST] FAIL — Phase B: no PAUSED heartbeat", log)
+                b_fail = True
+            else:
+                emit(f"[TEST] OK — PAUSED detected ({len(pause_hits['hb_paused'])} HBs)", log)
+
+            if not pause_hits["cmd_sp_0"]:
+                emit("[TEST] FAIL — Phase B: CMD;SP=0 not sent (heater not commanded off)", log)
+                b_fail = True
+            else:
+                emit("[TEST] OK — CMD;SP=0 sent (heater commanded off)", log)
+
+            if not pause_hits["stat_out_0"]:
+                emit("[TEST] WARNING — Phase B: STAT;OUT=000 not observed within window", log)
+                emit("[TEST]   PID may need another cycle to settle to 0", log)
+            else:
+                emit(f"[TEST] OK — STAT;OUT=000 observed ({len(pause_hits['stat_out_0'])} frames)", log)
+
+            if b_fail:
+                flush_serial(ser, log)
+                emit("[TEST] Phase B: FAIL", log)
+                return 1
+            emit("[TEST] Phase B: PASS — heater off during PAUSED", log)
+
+            # ==============================================================
+            #  Phase C — Preheat on Resume
+            # ==============================================================
+            emit("", log)
+            emit("[TEST] ============ PHASE C: PREHEAT ON RESUME ============", log)
+
+            emit("[TEST] Phase C.1: Re-assert RUN — expect PREHEAT (not direct RESUME)", log)
+            send_command(ser, "RUN=1", log=log)
+
+            phase_c_patterns = {
+                "hb_preheat": r"HB;.*STATE=PREHEAT",
+                "hb_running": r"HB;.*STATE=RUNNING",
+                "cmd_sp_gt0": r"CMD;SP=[1-9]\d*",
+            }
+
+            def phase_c_ready(h: dict[str, list[str]]) -> bool:
+                return bool(
+                    h["hb_preheat"]
+                    and h["hb_running"]
+                    and h["cmd_sp_gt0"]
+                )
+
+            resume_lines, resume_hits = capture_lines_until(
+                ser, args.preheat_observe_s, log,
+                phase_c_patterns, phase_c_ready, hold_s=5.0,
+            )
+
+            c_fail = False
+            if not resume_hits["hb_preheat"]:
+                emit("[TEST] FAIL — Phase C: no PREHEAT on resume (expected re-heat)", log)
+                c_fail = True
+            else:
+                emit(f"[TEST] OK — PREHEAT on resume detected ({len(resume_hits['hb_preheat'])} HBs)", log)
+
+            if not resume_hits["cmd_sp_gt0"]:
+                emit("[TEST] FAIL — Phase C: CMD;SP=<target> not re-sent on resume", log)
+                c_fail = True
+            else:
+                emit(f"[TEST] OK — setpoint re-sent: {resume_hits['cmd_sp_gt0'][0]}", log)
+
+            if resume_hits["hb_running"]:
+                emit(f"[TEST] OK — RUNNING reached ({len(resume_hits['hb_running'])} HBs)", log)
+            else:
+                emit("[TEST] FAIL — Phase C: never reached RUNNING after resume preheat", log)
+                c_fail = True
+
+            if c_fail:
+                send_command(ser, "RUN=0", log=log)
+                time.sleep(1.0)
+                flush_serial(ser, log)
+                emit("[TEST] Phase C: FAIL", log)
+                return 1
+            emit("[TEST] Phase C: PASS — preheat triggers on resume from pause", log)
+
+            # ==============================================================
+            #  Phase D — Preheat on auto-resume after power restore
+            # ==============================================================
+            emit("", log)
+            emit("[TEST] ============ PHASE D: PREHEAT ON POWER-RESTORE RESUME ============", log)
+
+            emit("[TEST] Phase D.1: Power-cycle while RUNNING (RUN held)", log)
+            send_command(ser, "PWR=0", log=log)
+            time.sleep(args.power_dwell_s)
+            send_command(ser, "PWR=1", log=log)
+
+            emit(f"[TEST] Waiting for boot + auto-resume (up to {args.boot_wait_s + args.preheat_observe_s:.0f}s)", log)
+
+            phase_d_patterns = {
+                "hb_preheat": r"HB;.*STATE=PREHEAT",
+                "hb_running": r"HB;.*STATE=RUNNING",
+                "cmd_sp_gt0": r"CMD;SP=[1-9]\d*",
+                "hb_any":     r"HB;.*STATE=",
+            }
+
+            def phase_d_ready(h: dict[str, list[str]]) -> bool:
+                return bool(
+                    h["hb_preheat"]
+                    and h["hb_running"]
+                    and h["cmd_sp_gt0"]
+                )
+
+            # Single capture covers boot + preheat + running transition
+            restore_lines, restore_hits = capture_lines_until(
+                ser, args.boot_wait_s + args.preheat_observe_s, log,
+                phase_d_patterns, phase_d_ready, hold_s=5.0,
+            )
+
+            if not restore_hits["hb_any"]:
+                emit("[TEST] FAIL — Phase D: no heartbeat after power restore", log)
+                return 1
+
+            emit("[TEST] Phase D.2: Expect PREHEAT → RUNNING on auto-resume", log)
+
+            d_fail = False
+            if not restore_hits["hb_preheat"]:
+                emit("[TEST] FAIL — Phase D: no PREHEAT after power-restore resume", log)
+                d_fail = True
+            else:
+                emit(f"[TEST] OK — PREHEAT on auto-resume ({len(restore_hits['hb_preheat'])} HBs)", log)
+
+            if not restore_hits["cmd_sp_gt0"]:
+                emit("[TEST] FAIL — Phase D: CMD;SP=<target> not re-sent on auto-resume", log)
+                d_fail = True
+            else:
+                emit(f"[TEST] OK — setpoint re-sent: {restore_hits['cmd_sp_gt0'][0]}", log)
+
+            if restore_hits["hb_running"]:
+                emit(f"[TEST] OK — RUNNING reached ({len(restore_hits['hb_running'])} HBs)", log)
+            else:
+                emit("[TEST] FAIL — Phase D: never reached RUNNING after auto-resume", log)
+                d_fail = True
+
+            if d_fail:
+                send_command(ser, "RUN=0", log=log)
+                time.sleep(1.0)
+                flush_serial(ser, log)
+                emit("[TEST] Phase D: FAIL", log)
+                return 1
+            emit("[TEST] Phase D: PASS — preheat on auto-resume from power restore", log)
+
+            # ==============================================================
+            #  Phase E — Heater OFF on COMPLETED
+            # ==============================================================
+            emit("", log)
+            emit("[TEST] ============ PHASE E: HEATER OFF ON COMPLETED ============", log)
+
+            # Hold RUN through protocol completion
+            run_hold_s = total_runtime + 30.0  # generous margin
+            emit(f"[TEST] Phase E.1: Holding RUN for ~{run_hold_s:.0f}s until COMPLETED", log)
+
+            phase_e_patterns = {
+                "hb_completed": r"HB;.*STATE=COMPLETED",
+                "cmd_sp_0": r"CMD;SP=0",
+                "stat_out_0": r"STAT;.*OUT=000",
+            }
+
+            def phase_e_ready(h: dict[str, list[str]]) -> bool:
+                return bool(
+                    h["hb_completed"]
+                    and h["cmd_sp_0"]
+                    and h["stat_out_0"]
+                )
+
+            completion_lines, completion_hits = capture_lines_until(
+                ser, run_hold_s, log,
+                phase_e_patterns, phase_e_ready, hold_s=5.0,
+            )
+
+            e_fail = False
+            if not completion_hits["hb_completed"]:
+                emit("[TEST] FAIL — Phase E: COMPLETED not reached within run window", log)
+                emit("[TEST]   Try increasing protocol or extending --preheat-observe-s", log)
+                e_fail = True
+            else:
+                emit(f"[TEST] OK — COMPLETED detected ({len(completion_hits['hb_completed'])} HBs)", log)
+
+            if not completion_hits["cmd_sp_0"]:
+                emit("[TEST] FAIL — Phase E: CMD;SP=0 not sent after COMPLETED", log)
+                e_fail = True
+            else:
+                emit("[TEST] OK — CMD;SP=0 sent after completion", log)
+
+            if not completion_hits["stat_out_0"]:
+                emit("[TEST] WARNING — Phase E: STAT;OUT=000 not observed after COMPLETED", log)
+                emit("[TEST]   PID may need another cycle to reach 0 output", log)
+            else:
+                emit(f"[TEST] OK — STAT;OUT=000 after completion ({len(completion_hits['stat_out_0'])} frames)", log)
+
+            # Release RUN
+            send_command(ser, "RUN=0", log=log)
+            time.sleep(1.0)
+            flush_serial(ser, log)
+
+            if e_fail:
+                emit("[TEST] Phase E: FAIL", log)
+                return 1
+            emit("[TEST] Phase E: PASS — heater off after protocol completion", log)
+
+            # ==============================================================
+            #  Overall verdict
+            # ==============================================================
+            emit("", log)
+            emit("[TEST] === HEAT-LIFECYCLE OVERALL: PASS ===", log)
+            emit("[TEST]   Phase A: heater ON during RUNNING (PREHEAT + PID active)", log)
+            emit("[TEST]   Phase B: heater OFF on PAUSED (CMD;SP=0 + OUT=000)", log)
+            emit("[TEST]   Phase C: preheat on resume from pause (re-heat before motion)", log)
+            emit("[TEST]   Phase D: preheat on auto-resume after power restore", log)
+            emit("[TEST]   Phase E: heater OFF on COMPLETED (CMD;SP=0 + OUT=000)", log)
+            emit("[TEST] Capture complete", log)
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # run-suite: run all tests and produce a master log
 # ---------------------------------------------------------------------------
 
@@ -2229,6 +2913,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_RUN_MARGIN,
         help=f"Seconds to extend RUN pulse beyond computed runtime (default: {DEFAULT_RUN_MARGIN})",
     )
+    upload.add_argument(
+        "--preheat-s",
+        type=float,
+        default=DEFAULT_PREHEAT_S,
+        help=(
+            f"Extra seconds added to RUN hold for preheat when protocol has TempC > 0 "
+            f"(default: {DEFAULT_PREHEAT_S}; ignored for non-heat protocols)"
+        ),
+    )
     upload.set_defaults(handler=run_protocol_upload)
 
     run_gate = subparsers.add_parser(
@@ -2308,6 +3001,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TAIL_PAD,
         help=f"Extra seconds to capture after RUN released (default: {DEFAULT_TAIL_PAD})",
     )
+    run_proto.add_argument(
+        "--preheat-s",
+        type=float,
+        default=DEFAULT_PREHEAT_S,
+        help=(
+            f"Extra seconds added to RUN hold for preheat when protocol has TempC > 0 "
+            f"(default: {DEFAULT_PREHEAT_S}; ignored for non-heat protocols)"
+        ),
+    )
     run_proto.set_defaults(handler=run_protocol)
 
     comms_health = subparsers.add_parser(
@@ -2339,6 +3041,82 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds to keep power off before restoring (default: 4.0)",
     )
     cold_boot.set_defaults(handler=run_cold_boot)
+
+    heat_flags = subparsers.add_parser(
+        "heat-flags",
+        help="T10: Validate protocolUsesHeat_ detection — no-heat vs heat protocol",
+    )
+    heat_flags.add_argument(
+        "--boot-wait-s",
+        type=float,
+        default=HEAT_FLAGS_BOOT_WAIT_S,
+        help=f"Seconds to wait for boot + protocol upload (default: {HEAT_FLAGS_BOOT_WAIT_S})",
+    )
+    heat_flags.add_argument(
+        "--observe-s",
+        type=float,
+        default=HEAT_FLAGS_OBSERVE_S,
+        help=f"Seconds to observe each phase (default: {HEAT_FLAGS_OBSERVE_S})",
+    )
+    heat_flags.add_argument(
+        "--preheat-observe-s",
+        type=float,
+        default=HEAT_FLAGS_PREHEAT_OBSERVE_S,
+        help=f"Seconds to observe preheat behaviour (default: {HEAT_FLAGS_PREHEAT_OBSERVE_S})",
+    )
+    heat_flags.add_argument(
+        "--power-dwell-s",
+        type=float,
+        default=HEAT_FLAGS_POWER_DWELL_S,
+        help=f"Seconds to keep power off before restoring (default: {HEAT_FLAGS_POWER_DWELL_S})",
+    )
+    heat_flags.add_argument(
+        "--auto",
+        action="store_true",
+        help="Skip interactive prompts (SD card must already be swapped before running)",
+    )
+    heat_flags.set_defaults(handler=run_heat_flags)
+
+    heat_lifecycle = subparsers.add_parser(
+        "heat-lifecycle",
+        help="T11: Validate heater lifecycle — on during running, off on pause/completed, preheat on resume",
+    )
+    heat_lifecycle.add_argument(
+        "--boot-wait-s",
+        type=float,
+        default=HEAT_LIFECYCLE_BOOT_WAIT_S,
+        help=f"Seconds to wait for boot + protocol upload (default: {HEAT_LIFECYCLE_BOOT_WAIT_S})",
+    )
+    heat_lifecycle.add_argument(
+        "--observe-s",
+        type=float,
+        default=HEAT_LIFECYCLE_OBSERVE_S,
+        help=f"Seconds to observe each short phase (default: {HEAT_LIFECYCLE_OBSERVE_S})",
+    )
+    heat_lifecycle.add_argument(
+        "--preheat-observe-s",
+        type=float,
+        default=HEAT_LIFECYCLE_PREHEAT_OBSERVE_S,
+        help=f"Seconds to observe preheat behaviour (default: {HEAT_LIFECYCLE_PREHEAT_OBSERVE_S})",
+    )
+    heat_lifecycle.add_argument(
+        "--power-dwell-s",
+        type=float,
+        default=HEAT_LIFECYCLE_POWER_DWELL_S,
+        help=f"Seconds to keep power off before restoring (default: {HEAT_LIFECYCLE_POWER_DWELL_S})",
+    )
+    heat_lifecycle.add_argument(
+        "--protocol",
+        type=Path,
+        default=None,
+        help="Path to protocol CSV for runtime estimate (optional)",
+    )
+    heat_lifecycle.add_argument(
+        "--auto",
+        action="store_true",
+        help="Skip interactive prompts (heat SD must already be loaded)",
+    )
+    heat_lifecycle.set_defaults(handler=run_heat_lifecycle)
 
     suite = subparsers.add_parser(
         "run-suite",
