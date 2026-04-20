@@ -76,7 +76,7 @@ python test/rig_control.py power --state on --capture-s 8 --drop-first-line
 Use [tools/ttl_stream_capture.py](tools/ttl_stream_capture.py) to monitor USB output:
 
 ```
-python tools/ttl_stream_capture.py --port COM6 --baud 460800 --drop-first-line
+python tools/ttl_stream_capture.py --port COM7 --baud 460800 --drop-first-line
 ```
 
 Key options:

@@ -429,7 +429,7 @@ void ExpansionBoard::logicalReset() {
     modeTorqueToggle_ = false;
     lcdTmr_           = 0;
     lastUi_           = static_cast<UiPage>(0xFF);   // force redraw
-    bootPhase_        = BootPhase::Start;
+    bootPhase_        = BootPhase::Done;
     bootMsgSince_     = 0;
 
     // --- Switch ---
@@ -449,13 +449,6 @@ void ExpansionBoard::logicalReset() {
 
     // Tell CC to suppress stale-STAT E-STOP during transition
     ttlComms_.sendCommand("QUIESCE;SECS=10");
-
-    // Boot splash
-    lcd_.clearScreen();
-    lcd_.setLineCenter(0, protocolName_);
-    lcd_.setLineCenter(1, "SYSTEM RESET");
-    lcd_.setLineCenter(2, "Reconnecting...");
-    lcd_.flush();
 
     // Immediately publish switch state so CC gets fresh RUN/RST
     publishSwitchState_(true);
@@ -644,23 +637,8 @@ void ExpansionBoard::tick() {
         (protoState_ == ProtoTxState::EndSent)  ||
         (protoState_ == ProtoTxState::AwaitResult);
 
-    if (!ccReady_) {
-        bootPhase_ = {successfulProtoLoadFromSD_ ? BootPhase::SDLoaded : BootPhase::Start};
-        page = UiPage::Boot;
-    }
-    else if (protoBusy) {
-        bootPhase_ = BootPhase::TxInProgress;
-        page = UiPage::Boot;
-    }
-    else if (protoState_ == ProtoTxState::Failed || protoState_ == ProtoTxState::Timeout) {
+    if (protoState_ == ProtoTxState::Failed || protoState_ == ProtoTxState::Timeout) {
         page = UiPage::ProtoTxFail;
-    }
-    else if (bootPhase_ == BootPhase::TxSuccess) {
-        page = UiPage::Boot;
-        if (bootMsgSince_ > kBootSuccessShowMs) {
-            bootPhase_ = BootPhase::Done;
-            page = UiPage::Normal;
-        }
     }
     else if (ccEstop_) {
         // Prefer "Resetting" during (a) our post-XPB-reset mask window, or
@@ -750,49 +728,6 @@ void ExpansionBoard::renderUi_(UiPage page) {
     }
 
     switch (page) {
-        case UiPage::Boot:
-            lcd_.setLineLeft(0, "BOOTING...");
-            // line 1/2/3: phase specific
-            switch (bootPhase_) {
-                case BootPhase::Start:
-                    lcd_.setLineLeft(1, "PROTOCOL:");
-                    lcd_.setLineCenter(2, "looking for protocol");
-                    break;
-                
-                case BootPhase::SDLoaded: {
-                    // Protocol name on line 1, short hint on 2
-                    char nameBuf[LCDDriver::kNumCols+1];
-                    strncpy(nameBuf, protocolName_, LCDDriver::kNumCols);
-                    nameBuf[LCDDriver::kNumCols] = '\0';
-                    lcd_.setLineLR(1, "PROTOCOL:", nameBuf);
-                    lcd_.setLineCenter(2, "Waiting for CC to");
-                    lcd_.setLineCenter(3, "to request protocol");
-                    break;
-                }
-
-                case BootPhase::TxInProgress: {
-                    // Show % based on PR_DAT count
-                    char buf[21];
-                    uint8_t pct = stepCount_ ? (uint8_t)((protoStepSent_ * 100UL) / stepCount_) : 0;
-                    snprintf(buf, sizeof(buf), "Uploading... %u%%", (unsigned)pct);
-                    lcd_.setLineLR(2, "UPLOADING:", buf);
-                    break;
-                }
-
-                case BootPhase::TxSuccess: {
-                    lcd_.setLineLR(0, "BOOTING...", "SUCCESS!");
-                    lcd_.setLineCenter(1, "Finalizing...");
-                    break;
-                }
-
-                case BootPhase::Done:
-                default:
-                    // Should not land here for long; router will move to Normal
-                    lcd_.setLineCenter(1, "Ready");
-                    break;
-            }
-            break;
-
         case UiPage::ProtoMissingSD:
             lcd_.setLineCenter(1, "Protocol Missing");
             lcd_.setLineCenter(2, "on SD Card!");

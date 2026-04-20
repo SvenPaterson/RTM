@@ -24,7 +24,7 @@ re-enumeration, USB hub changes, or power switching.
 Example check:
 
 ```
-C:/Users/Stephen.Garden/RTM/.venv/Scripts/python.exe -c "from serial.tools import list_ports; [print(f'{p.device} | {p.description} | {p.hwid}') for p in list_ports.comports()]"
+python -c "from serial.tools import list_ports; [print(f'{p.device} | {p.description} | {p.hwid}') for p in list_ports.comports()]"
 ```
 
 Use the detected sniffer COM port explicitly with ``--port`` for all test commands.
@@ -76,8 +76,9 @@ The following tests require operator observation and are not automated:
 
 * **M1 — LCD inspection**: Verify home-screen layout: rows show STATE, TEMP,
   HEATER, STEP, and TIME values that update when running.
-* **M2 — Reboot splash**: Trigger a coordinated reset; confirm the LCD shows
-  "SYSTEM / REBOOTING..." briefly before the countdown resumes.
+* **M2 — Soft reset transition**: Trigger a coordinated reset; confirm the LCD
+  transitions directly to the Normal page (state, temp, step) without lingering
+  on intermediate screens.
 * **M3 — E-STOP recovery**: Disconnect/reconnect TTL cable while running; verify
   XPB detects E-STOP, CC receives CMD;PAUSE, and system pauses gracefully.
 * **M4 — Heater PID**: Start a protocol with a temperature target; verify STAT;OUT
@@ -118,9 +119,9 @@ Pass/fail is determined from observable TTL telemetry (``HB;STATE=``, ``CMD;RESU
 Example:
 
 ```
-python test/rig_control.py run-gate --port COM6
-python test/rig_control.py run-gate --port COM6 --skip-step-3
-python test/rig_control.py run-gate --port COM6 --boot-wait-s 40 --hb-window-s 15
+python test/rig_control.py run-gate --port COM7
+python test/rig_control.py run-gate --port COM7 --skip-step-3
+python test/rig_control.py run-gate --port COM7 --boot-wait-s 40 --hb-window-s 15
 ```
 
 Hard reset sequence (power cycle)

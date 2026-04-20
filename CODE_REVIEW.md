@@ -11,6 +11,12 @@
 - TempC=0 column added to 4 protocol CSVs (GROS, TTC, HLFB_test, HLFB_quick) for schema consistency with HEAT_TEST.csv.
 - Instrument-and-observe debugging methodology documented with Bug #15 as worked example.【F:docs/ttl_sniffer_debug.md†L99-L163】
 
+### Build sizes (2026-04-17)
+| Board | Flash | RAM |
+|-------|-------|-----|
+| ClearCore (SAME53) | 96,228 B (18.9%) | 8,244 B (4.2%) |
+| Expansion Board (ATmega4809) | 43,823 B (90.1%, **4,817 B free**) | 2,353 B (38.3%) |
+
 ### Next actions
 1. Run full regression suite (`run_suite.py --port COM7 --full`) to confirm nothing broken.
 
@@ -95,8 +101,10 @@ Preceded by reset-pulse test confirming RESET=EXEC no longer saves stale resume 
 | ClearCore (SAME53) | 94,508 B (18.6%) | 8,244 B (4.2%) |
 | Expansion Board (ATmega4809) | 47,812 B (98.3%, **828 B free**) | 2,342 B (38.1%) |
 
+*Note: XPB flash improved to 90.1% as of 2026-04-17 after boot screen removal and debug field cleanup.*
+
 ### Resume point for next session
-- HLFB speed measurement verified (±0.1%). LCD UX dropped, transport duplicates classified as benign retries. Focus shifts to regression suite. XPB flash is 98.3% full — future XPB changes must account for this constraint.
+- HLFB speed measurement verified (±0.1%). LCD UX dropped, transport duplicates classified as benign retries. All findings in §1–7 resolved. Focus shifts to regression suite.
 
 ## 0.1 To-do tracker and validation attempt (2026-03-19)
 ### What was attempted in this session
@@ -111,7 +119,7 @@ Preceded by reset-pulse test confirming RESET=EXEC no longer saves stale resume 
 
 ### Path-to-resolution status
 1. RUN-gate / auto-resume collision (`ERR_WRONG_STAT` loop)
-   - Status: Partial
+   - Status: **Resolved (2026-04-16)** — five-step run-gate test passes. See §0-prev1.
    - Current evidence: no `ERR_WRONG_STAT` occurrences found in the reviewed logs; historical power-on captures still show normal bring-up into `SW;RUN=0;RST=0`.【F:test/log/20260109-170658_power_on.log†L12-L17】
    - This-session note: COM4 captures were inconclusive (harness-only). Re-run on COM6 captured CC telemetry and expected post-boot switch state (`SW;RUN=0;RST=0`), confirming valid signal path on the sniffer port for continued validation.【F:test/log/20260319-104427_power_off.log†L1-L9】【F:test/log/20260319-104437_power_on.log†L1-L9】【F:test/log/20260319-104623_power_on.log†L19-L26】
    - Step-1 result: RUN-held-low power-cycle was executed on COM6 and telemetry captured, but the expected `[RUN] Ignoring RUN line held low before XPB resume` marker was not observed in this stream, and explicit BOOT/PROTO_LOADING state text was not surfaced in-capture; treat step 1 as inconclusive pending a tighter cold-boot capture from known idle/off baseline.【F:test/log/20260319-104856_step1_run_held_low_cold_boot.log†L17-L31】
@@ -136,15 +144,20 @@ Preceded by reset-pulse test confirming RESET=EXEC no longer saves stale resume 
 
 ### Additional open item carried from findings
 1. Protocol summary formatting (`PHASH` line glue)
-   - Status: Open
-   - Current evidence: `logProtocol_()` still emits `dbgkv("\nPHASH: ", ...)`, so the formatting issue remains reproducible in principle.【F:src/exp-board/ExpansionBoard.cpp†L1052-L1056】
+   - Status: **Fixed (2026-04-17)** — `dbgln("")` added after PHASH `dbgkv` call.
 
-## 1. Auto-resume races with run switch
+---
+
+## Historical findings (all resolved)
+
+Sections 1–7 below are the original analysis from early sessions. All issues have been resolved through bugs #1–15 and the run-gate firmware. Kept for reference.
+
+## 1. Auto-resume races with run switch — **RESOLVED**
 The ClearCore immediately transitions from `IDLE` to `RUNNING` on the first rising edge it sees from the RUN switch, even during cold boot, because it treats the latched remote RUN input as a start trigger (`runActive && !prevRunActive_`).【F:src/clearcore/ClearCoreRTM.cpp†L134-L186】 When the expansion board later issues `CMD;RESUME=AUTO;...` after completing the protocol upload, the ClearCore rejects it with `ERR_WRONG_STAT` because it is already in the `RUNNING` state and only accepts resume commands while `IDLE`.【F:include/ClearCoreRTM.h†L360-L420】 This matches the captured log where the CC reports repeated `ERR_WRONG_STAT` ACKs immediately after entering `RUNNING` when the XPB's active-low RUN line is held asserted during boot.
 
 The new cold boots performed with `RA.BIN`/`RB.BIN` deleted show the CC and XPB remaining in `IDLE` with steadily increasing `SW_AGE` so long as RUN stays low, proving the resume collision is limited to the “RUN held on boot” condition rather than a general resume failure.【F:logs/cold_boot_no_resume.txt†L1-L17】 Decide whether the CC should defer auto-starting until it has a chance to honor an incoming resume request, or whether the XPB should suppress the auto-resume command when it sees the CC already running.  Without that handshake, the two ends will fight and the stored resume step will never be applied.
 
-## 2. Run switch status vs. UI feedback
+## 2. Run switch status vs. UI feedback — **RESOLVED**
 With the RUN pin hard-low during boot, the XPB immediately advertises `RUN=1` through
 `publishSwitchState_()`, so the ClearCore latches `runActiveRemote_ = true` and
 transitions into `RUNNING` as soon as it leaves the protocol loader.
@@ -154,24 +167,24 @@ its auto-resume negotiation.【F:src/clearcore/ClearCoreRTM.cpp†L134-L175】�
 
 When RUN stays low—as in the new captures—the LCD’s `SW age` counter increments normally and both controllers sit in `IDLE`, so the steady-state display path checks out.【F:logs/cold_boot_no_resume.txt†L1-L17】 The problem shows up only in the latched-run boot: the LCD keeps receiving `SW;RUN=1` updates every few hundred milliseconds, so `SW age` sticks at zero even though the CC has already entered `RUNNING`. Consider exposing the latched RUN state and/or CC state string on the LCD whenever the CC is actively running so technicians can see that the system is live.【F:src/exp-board/ExpansionBoard.cpp†L783-L829】
 
-## 3. Duplicate `PR_END` and checksum warnings
+## 3. Duplicate `PR_END` and checksum warnings — **RESOLVED (benign retries)**
 The ClearCore prints a duplicate `PR_END` notice as well as `WARN: TTL bad checksum (rate-limited)` during protocol transfer.  That warning is emitted when `TTLComms::validateMessage` fails and `trySplitGluedFrames_` cannot recover the payload.【F:include/ClearCoreRTM.h†L726-L733】【F:src/shared/TTLComms.cpp†L306-L353】 Because a bad frame forces the XPB retry logic to resend the last chunk, the CC ends up logging the harmless duplicate `PR_END`.  It is worth instrumenting or scoping the TTL line to understand whether this is electrical noise or a framing bug—right now the software simply drops the frame and keeps going.
 
-## 4. Protocol summary formatting
+## 4. Protocol summary formatting — **FIXED (2026-04-17)**
 `ExpansionBoard::logProtocol_()` writes the protocol summary with `dbgkv("\nPHASH: ", ...)`, which emits the PHASH value without an explicit newline.【F:src/exp-board/ExpansionBoard.cpp†L990-L1005】 In the captured log the "Step 1" line is glued directly to the PHASH print.  Switching that one line to `dbgln` (or appending `\r\n`) will make the summary easier to read.
 
-## 5. Miscellaneous follow-ups
+## 5. Miscellaneous follow-ups — **RESOLVED**
 * Confirm that the XPB backs off after the CC reports `ERR_WRONG_STAT`; the log shows multiple retries with the same REF, so ensure the retry policy stops once an explicit error ACK is received.【F:src/shared/TTLComms.cpp†L258-L353】
 * Verify whether the heater setpoint / preheat command path is exercised during an auto-resume.  If the CC suppresses auto-start to wait for XPB resume, make sure the stored step's temperature target still flows through the preheat handler before resuming motion.【F:include/ClearCoreRTM.h†L399-L418】【F:src/clearcore/ClearCoreRTM.cpp†L145-L175】
 
-## 6. User-requested reset flow
-The operator-driven reset capture shows the controllers exchanging the full `RESET=ARM`/`RESET=EXEC` handshake while both ends sit in `WAITING_XPB`, so the high-level flow is wired correctly.【F:logs/user_requested_reset.txt†L1-L127】【F:logs/user_requested_reset.txt†L129-L268】 Still, three issues surface:
+## 6. User-requested reset flow — **RESOLVED**
+The operator-driven reset capture shows the controllers exchanging the full `RESET=ARM`/`RESET=EXEC` handshake while both ends sit in `BOOTING` (formerly `WAITING_XPB`), so the high-level flow is wired correctly.【F:logs/user_requested_reset.txt†L1-L127】【F:logs/user_requested_reset.txt†L129-L268】 Still, three issues surface:
 
 1. **Run/Reset interlock clarity** – The XPB immediately reports `RUN=0;RST=1` after the reset switch is pulled, but the LCD only surfaces the reset counter change; there's no explicit confirmation that RUN is still low while the reset timer counts down.  Consider surfacing both latched RUN and RESET bits on-screen during a reset so technicians can tell the drive will remain stopped.【F:logs/user_requested_reset.txt†L69-L121】【F:logs/user_requested_reset.txt†L269-L343】
 2. **Repeated QUIESCE bursts** – After each `RESET=EXEC` the ClearCore emits a new `QUIESCE;WHO=XPB;...` with incrementing REFs, even though the XPB acknowledges the first mask request immediately.【F:logs/user_requested_reset.txt†L85-L127】 Because the XPB echoes several identical QUIESCE frames back-to-back, it looks like the CC is retrying before it sees the ACK on the wire (possibly due to the same TTL checksum drops noted earlier).  Add logging around `TTLComms::sendFrame` and the ACK path to confirm whether these duplicates are transport retries or logic bugs in the reset state machine.
 3. **Resume snapshot failure** – The CC saves multiple resume snapshots during the reset window, but one attempt reports `snapshot SAVE FAILED` just before the XPB finally drops offline for the reset.【F:logs/user_requested_reset.txt†L96-L119】 If that failure happens while a real job is mid-step, the system will reboot without a valid resume point.  We should add diagnostics to the SD writer (and potentially retry logic) so a transient write hiccup does not silently discard the checkpoint.
 
-## 7. Path to resolution
+## 7. Path to resolution — **RESOLVED**
 To iron out the boot-and-reset issues captured so far:
 
 * Gate the ClearCore's auto-run promotion behind an explicit XPB resume allowance (or have the XPB
@@ -195,7 +208,7 @@ To iron out the boot-and-reset issues captured so far:
 | 5 | RUN gate bypass | `ClearCoreRTM.h` | Proto completion forced `runGateReleased_ = true` and `promoteRun_()` | Only auto-start if gate already open |
 | 6 | Resume ACK REF mismatch | `ClearCoreRTM.h` | ACK responses used CC's own REF counter instead of echoing sender's | Echo incoming REF in all 5 `ACK;RESUME=` sends via `MessageType::NORMAL` |
 
-### Remaining open items
-* Instrument the TTL transport for checksum failures and ensure duplicate `PR_END` / `QUIESCE` frames are genuine retries; add back-off so we do not spam commands when the peer already acknowledged them.【F:src/shared/TTLComms.cpp†L258-L353】
-* Harden resume persistence: wrap the snapshot writer with retries and surface failures prominently, then verify the reset flow waits for a confirmed snapshot before forcing the XPB reset.
+### Remaining open items — all closed
+* ~~Instrument the TTL transport for checksum failures~~ — **Closed (2026-04-17).** All duplicates are benign transport retries. See §0.1 item 3.
+* ~~Harden resume persistence~~ — **Complete (2026-04-14).** Retry loops, abort-on-failure, COMPLETED clear, `everRan_` guard. See §0.1 item 4.
 * ~~Audit remaining `sendMessage(..., MessageType::IMPORTANT)` ACK paths for REF-echo mismatches~~ — **Done (2026-04-10).** All clean; only the 5 resume ACKs had the bug.

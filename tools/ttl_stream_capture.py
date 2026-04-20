@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--port",
-        default='COM6' if sys.platform.startswith('win') else '/dev/ttyUSB0',
+        default='COM7' if sys.platform.startswith('win') else '/dev/ttyUSB0',
         help="Serial port connected to the sniffer (e.g. COM7 or /dev/ttyUSB0)",
     )
     parser.add_argument(

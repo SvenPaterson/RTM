@@ -25,14 +25,14 @@ work in this repository.
 
 ## Current state checkpoint
 - **HLFB speed measurement: PASS (±0.1% at 3000 RPM)** — validated 2026-04-14. Span-based frequency measurement, distributed HLFB polling, USB debug echo disabled.
-- **RUN-gate validation: four-step test** — Steps 1-2 PASS (2026-04-15). Step 3 (power-loss resume) INCONCLUSIVE (resume ACK accepted but no RUNNING HB in capture window). Step 4 (manual reset clears resume) SKIPPED. Previously all 3 steps PASS (2026-04-13 with old three-step design).
-- Twelve firmware bugs fixed (PHASH/SW_AGE overflow, resume slot wipe, heartbeat skip, RUN gate bypass, resume ACK REF mismatch, stale resume after COMPLETED, RESET=EXEC stale save, span-based HLFB, distributed HLFB polling, USB echo disable, manual reset clears resume). See CODE_REVIEW.md §0 for details.
+- **RUN-gate validation: five-step test** — All steps PASS (2026-04-16). See CODE_REVIEW.md §0-prev1.
+- Fifteen firmware bugs fixed (PHASH/SW_AGE overflow, resume slot wipe, heartbeat skip, RUN gate bypass, resume ACK REF mismatch, stale resume after COMPLETED, RESET=EXEC stale save, span-based HLFB, distributed HLFB polling, USB echo disable, manual reset clears resume, silent resume discard, run gate blocks AUTOSTART=1, dwell countdown reset on pause/resume). See CODE_REVIEW.md for details.
 - Resume snapshot hardening complete: retry loops, abort-on-failure, COMPLETED clear, and `everRan_` guard on RESET=EXEC. Manual RESET now unconditionally clears resume slots.
-- Build sizes: ClearCore 94,508 B flash (18.6%), 8,244 B RAM (4.2%); XPB 47,812 B flash (**98.3% — 828 B free**), 2,342 B RAM (38.1%).
+- Build sizes: ClearCore 96,228 B flash (18.9%), 8,244 B RAM (4.2%); XPB 43,823 B flash (90.1%, 4,817 B free), 2,353 B RAM (38.3%).
 - Investigation status and active findings are tracked in
   [CODE_REVIEW.md](../CODE_REVIEW.md).
 - The latest resume checkpoint is section 0 in [CODE_REVIEW.md](../CODE_REVIEW.md).
-- Remaining open items: LCD latch state UX, TTL transport instrumentation, regression suite run.
+- Remaining open item: full regression suite run.
 
 ## HLFB speed measurement architecture
 - **Motor**: ClearPath CPM-SDSK-2321S-RLN, NEMA 23, max 3170 RPM.
@@ -82,7 +82,7 @@ For a full power-cycle reset from host tooling:
 0. Verify the active sniffer COM target first (COM assignments can change):
 
 ```bash
-C:/Users/Stephen.Garden/RTM/.venv/Scripts/python.exe -c "from serial.tools import list_ports; [print(f'{p.device} | {p.description} | {p.hwid}') for p in list_ports.comports()]"
+python -c "from serial.tools import list_ports; [print(f'{p.device} | {p.description} | {p.hwid}') for p in list_ports.comports()]"
 ```
 
 1. Turn power off through the sniffer relay.

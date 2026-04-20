@@ -238,7 +238,7 @@ void ClearCoreRTM::tick() {
     if (heartbeatTmr_ >= 250 && heartbeatSystemEnabled_) {
         heartbeatTmr_ = 0;
         const bool maskActiveNowHb = (xpbMaskActive_ && Milliseconds() < xpbMaskUntilMs_);
-        const char *stateStr = maskActiveNowHb ? "WAITING_XPB" : stateToString(state_);
+        const char *stateStr = maskActiveNowHb ? "BOOTING" : stateToString(state_);
 
 
         const uint32_t loopsTotal = totalLoops_;
