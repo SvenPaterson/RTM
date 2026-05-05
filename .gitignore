@@ -7,3 +7,4 @@ ser_term_logs/
 tools/*.log
 tools/protocols/
 test/log/*
+pcb/.history/
