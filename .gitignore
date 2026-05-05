@@ -6,3 +6,4 @@ upload_files/__pycache__/
 RTM_env/
 test/*
 tools/*
+/pcb/RTM_XPB_rev0/RTM_XPB_rev0-backups
