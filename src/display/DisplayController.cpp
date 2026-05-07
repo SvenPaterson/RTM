@@ -18,6 +18,7 @@ DisplayController::DisplayController() : _heaterPIDControl(&_input, &_output, &_
     _setpoint_temp = 70.0;
     _heaterPIDControl.SetMode(AUTOMATIC);
     _heaterPIDControl.SetOutputLimits(0, 150);
+    _areHeatersArmed = false;
     _askingForHeat = true;
     Serial.println(" - PID loop initialized");
     _runSwitch = NULL;
@@ -148,6 +149,7 @@ void DisplayController::begin(const std::map<String, uint8_t>& pinMappings) {
     digitalWrite(_supply_valve_pin, LOW);
     digitalWrite(_heat_output_pin, LOW);
     digitalWrite(_heat_safety_pin, LOW);
+    _areHeatersArmed = false;
 
     String msg ="\nInitializing display controller...";
     Serial.begin(115200);
@@ -269,6 +271,9 @@ void DisplayController::update(const uint32_t& loop_count) {
 }
 
 void DisplayController::runProgram() {
+    if (digitalRead(_run_bus_pin) != HIGH) {
+        Serial.println(getTimeStr() + " RUN_BUS -> HIGH (motor: run)");
+    }
     digitalWrite(_run_bus_pin, HIGH);
 }
 
@@ -288,6 +293,9 @@ void DisplayController::resetTest() {
 }
 
 void DisplayController::stopProgram() {
+    if (digitalRead(_run_bus_pin) != LOW) {
+        Serial.println(getTimeStr() + " RUN_BUS -> LOW  (motor: pause)");
+    }
     digitalWrite(_run_bus_pin, LOW);
 }
 
@@ -307,10 +315,6 @@ uint32_t DisplayController::getCurrentLoopCount() {
 
 
 void DisplayController::computeHeaterOutput(const unsigned int& interval) {
-    Serial.print("Setpoint temp: ");
-    Serial.print(_setpoint_temp);
-    Serial.print(", _askingForHeat: ");
-    Serial.println(_askingForHeat);
     if (_setpoint_temp == 0 || !_askingForHeat) {
         turnOffHeaters();
     } 
@@ -412,7 +416,7 @@ void DisplayController::writeToLog(const String& msg, const String& type,
             log += " [" + type + "]\t" + msg + "\n";
             _logFile.print(log);
             _logFile.close();
-            Serial.println(" - " + msg);
+            Serial.println(getTimeStr() + " - " + msg);
         }
         else {
             errorScreen(msg, 5);
@@ -657,8 +661,7 @@ void DisplayController::testCompleted(const String& test_status_str) {
         _hasTestCompletedBeenCalled = true;
         _screenTimer = 0;
      }
-    Serial.println(digitalRead(_run_bus_pin)); // don't remove this!
-    
+
     if (_completeTimer >= 1500) {
         if (_flasher) {
             lcd.setFastBacklight(RGB_GREEN);

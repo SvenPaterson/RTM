@@ -241,6 +241,18 @@ class DisplayController {
          */
         double getSetpointTemp();
 
+        /**
+         * Returns the current time as a string in 24-hr format
+         * @return str in hh:mm:ss
+         */
+        String getTimeStr();
+
+        /**
+         * Return the current date as a string
+         * @return str in mm:dd:yyyy
+         */
+        String getDateStr();
+
     private:
 
         std::map<String, uint8_t> _pinMappings;
@@ -355,18 +367,6 @@ class DisplayController {
          * @return padded string
          */ 
         String rightJustifiedString(const String& str);
-
-        /**  
-         * Returns the current time as a string in 24-hr format
-         * @return str in hh:mm:ss
-         */
-        String getTimeStr();
-
-        /**  
-         * Return the current date as a string
-         * @return str in mm:dd:yyyy
-         */
-        String getDateStr();
 };
 
 #endif // DC_h

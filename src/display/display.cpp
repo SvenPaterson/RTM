@@ -57,6 +57,14 @@ String srcfile_details();
 void loopPinRisingEdge();
 void loopPinFallingEdge();
 void torquePinRisingEdge();
+const char* stateName(ProgramState s);
+void logEdgeEvents();
+
+// Edge-trigger trackers for debug logging
+ProgramState prev_logged_state = STATE_STANDBY;
+bool prev_run_sw = false;
+bool prev_reset_sw = false;
+uint32_t prev_logged_loop = 0;
 
 String source_file = srcfile_details();
 
@@ -114,6 +122,7 @@ void setup() {
 /* -------------------------------- MAIN LOOP -------------------------------- */
 void loop() {
     rtm.update(current_loop_count);
+    logEdgeEvents();
 
     if (test_status_str != prev_status_str) {
         // force the screen to update whenever a switch is 
@@ -125,6 +134,7 @@ void loop() {
 
     switch (currentState) {
     case STATE_STANDBY:
+        rtm.stopProgram();
         if (rtm.getRunSwitch()) {
             currentState = STATE_HEATING;
             test_status_str = "HEATING";
@@ -141,6 +151,8 @@ void loop() {
         break;
 
     case STATE_HEATING:
+        // Motor must remain stopped while heating; never advance steps in HEATING.
+        rtm.stopProgram();
         rtm.updateLCD(test_status_str);
         rtm.computeHeaterOutput();
         if (!rtm.getRunSwitch()) {
@@ -149,7 +161,6 @@ void loop() {
             rtm.writeToLog(test_status_str, "STATUS");
         }
         else if (rtm.getSumpTemp() < rtm.getSetpointTemp()) {
-            rtm.stopProgram();
             rtm.updateLCD(test_status_str);
             rtm.computeHeaterOutput();
         }
@@ -306,4 +317,54 @@ void torquePinRisingEdge() {
 void resetFunc() {
   wdt_enable(WDTO_15MS);
   while (true) {}
+}
+
+/****** EDGE-TRIGGERED DEBUG LOGGING ******/
+
+const char* stateName(ProgramState s) {
+    switch (s) {
+        case STATE_STANDBY:         return "STANDBY";
+        case STATE_HEATING:         return "HEATING";
+        case STATE_RUNNING:         return "RUNNING";
+        case STATE_PAUSED:          return "PAUSED";
+        case STATE_TEST_COMPLETED:  return "TEST_COMPLETED";
+        case STATE_RESET_REQUESTED: return "RESET_REQUESTED";
+    }
+    return "?";
+}
+
+void logEdgeEvents() {
+    String ts = rtm.getTimeStr();
+
+    if (currentState != prev_logged_state) {
+        Serial.print(ts);
+        Serial.print(" STATE ");
+        Serial.print(stateName(prev_logged_state));
+        Serial.print(" -> ");
+        Serial.println(stateName(currentState));
+        prev_logged_state = currentState;
+    }
+
+    bool run_sw = rtm.getRunSwitch();
+    if (run_sw != prev_run_sw) {
+        Serial.print(ts);
+        Serial.println(run_sw ? " RUN_SW HIGH" : " RUN_SW LOW");
+        prev_run_sw = run_sw;
+    }
+
+    bool reset_sw = rtm.getResetSwitch();
+    if (reset_sw != prev_reset_sw) {
+        Serial.print(ts);
+        Serial.println(reset_sw ? " RESET_SW HIGH" : " RESET_SW LOW");
+        prev_reset_sw = reset_sw;
+    }
+
+    if (current_loop_count != prev_logged_loop) {
+        Serial.print(ts);
+        Serial.print(" LOOP ");
+        Serial.print(current_loop_count);
+        Serial.print("/");
+        Serial.println(requested_loops);
+        prev_logged_loop = current_loop_count;
+    }
 }

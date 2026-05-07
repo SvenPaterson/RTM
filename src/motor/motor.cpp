@@ -160,20 +160,22 @@ void loop() {
             break;
 
         case PAUSED:
-            // store the test step timer value upon pausing test
-            pause_start_time = test_step_timer;
-
             // Flash LED quickly to signal PAUSED state
             if (LED_timer > 100) {
                 digitalWrite(LED_PIN, !digitalRead(LED_PIN));
                 LED_timer = 0;
             }
 
-            // upon entering a pause, call for a stop
+            // upon entering a pause, capture timer and call for a stop
             if (!isPauseInitiated) {
-                Serial.println("Motor called to stop");
+                pause_start_time = test_step_timer;
+                Serial.print("[ms=");
+                Serial.print(millis());
+                Serial.print("] Motor called to stop at test_step_timer = ");
+                Serial.println(pause_start_time);
                 stepper.setTargetPositionToStop();
                 isPauseInitiated = true;
+                isFullyStopped = false;
             }
 
             // Run until stopped, then disable motor
@@ -193,20 +195,31 @@ void loop() {
             break;
 
         case RESUME:
-            Serial.println("Resuming the following step:");
+            Serial.print("[ms=");
+            Serial.print(millis());
+            Serial.print("] Resuming step at test_step_timer = ");
+            Serial.println(pause_start_time);
             debugStepInfo();
 
             // re-initialize common test settings
             digitalWrite(LED_PIN, HIGH);
             digitalWrite(HEAT_BUS_PIN, steps[currentStepIndex].turnOnHeat);
             digitalWrite(MOTOR_ENABLE_PIN, HIGH);
-            
+
+            // re-arm stepper for the current step (PAUSED called
+            // setTargetPositionToStop, so motionComplete is true and
+            // processMovement would otherwise be a no-op)
+            stepper.setAccelerationInRevolutionsPerSecondPerSecond(steps[currentStepIndex].accel / 60.0);
+            stepper.setSpeedInRevolutionsPerSecond(steps[currentStepIndex].target_speed / 60.0);
+            stepper.setTargetPositionRelativeInRevolutions(steps[currentStepIndex].is_CCW ? MAX_REVS : -MAX_REVS);
+
+            isFullyStopped = false;
             currentState = RUNNING;
             printCurrentState();
 
             // resume the test step timer
             test_step_timer = pause_start_time;
-            
+
             break;
 
         case RUNNING:

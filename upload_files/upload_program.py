@@ -1,39 +1,70 @@
+import argparse
+import os
 import shutil
-from rtm_funcs import *
 from pathlib import Path
 
-# For users who are more comfortable uploading directly from VS Code
-# Run this script to upload the motor configuration to RTM test stand
+from rtm_funcs import compile_and_upload, generate_motor_config, load_config_from_excel
 
-# ENSURE RTM PROJECT RESIDES IN "C:/RTM/upload_files"
-# IF NOT MOVE IT OR CHANGE THE PATH FOR project_dir
+def resolve_project_dir() -> Path:
+    user_profile = Path(os.environ["USERPROFILE"])
+    if Path("C:/RTM").exists():
+        return Path("C:/RTM")
+    return user_profile / "RTM"
 
-user_profile = Path(os.environ["USERPROFILE"])
-if os.path.exists("C:\\RTM"):
-    project_dir = Path("C:\\RTM")
-else:
-    project_dir = user_profile / "RTM"
 
-desktop = Path(os.path.join(os.environ["USERPROFILE"], "Desktop"))
-onedriveTSS_desktop = Path(os.path.join(os.environ["USERPROFILE"], "OneDrive - Trelleborg AB", "Desktop"))
-onedrive_desktop = Path(os.path.join(os.environ["USERPROFILE"], "Desktop"))
-if onedrive_desktop.exists():
-    desktop = onedrive_desktop
-if onedriveTSS_desktop.exists():
-    desktop = onedriveTSS_desktop
-config_xlsx = project_dir / "upload_files" / "RTM_continuous_config.xlsx"
-new_config_xlsx = desktop / "RTM_continuous_config.xlsx"
-if not new_config_xlsx.exists():
-    shutil.copy(config_xlsx, desktop)
-    print("'RTM_continuous_config.xlsx' was not present on the desktop, so a generic one has been created.")
-    print("Please edit it to reflect the desired test profile and re-run the 'RTM Upload' program.")
+def resolve_config_path(project_dir: Path, args: argparse.Namespace) -> Path:
+    local_config = project_dir / "upload_files" / "RTM_continuous_config.xlsx"
+    desktop = Path(os.environ["USERPROFILE"]) / "Desktop"
+    desktop_config = desktop / "RTM_continuous_config.xlsx"
 
-config_xlsx = desktop / "RTM_continuous_config.xlsx"
-# Load configurations and steps from Excel
-steps, config = load_config_from_excel(config_xlsx)
+    if args.config_path:
+        return Path(args.config_path)
 
-# Generate the motor_config.h file
-generate_motor_config(steps, config)
+    if args.config_source == "desktop":
+        if not desktop_config.exists():
+            shutil.copy(local_config, desktop)
+            print("Desktop config missing. Copied template to Desktop.")
+            print("Edit it and re-run the upload script.")
+        return desktop_config
 
-# Compile and upload the project
-compile_and_upload(project_dir)
+    return local_config
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate motor_config.h from Excel and upload motor firmware."
+    )
+    parser.add_argument(
+        "--config-source",
+        choices=["local", "desktop"],
+        default="local",
+        help="Choose config source when --config-path is not provided.",
+    )
+    parser.add_argument(
+        "--config-path",
+        default=None,
+        help="Explicit path to RTM_continuous_config.xlsx.",
+    )
+    args = parser.parse_args()
+
+    project_dir = resolve_project_dir()
+    config_xlsx = resolve_config_path(project_dir, args)
+
+    if not config_xlsx.exists():
+        raise FileNotFoundError(f"Config file not found: {config_xlsx}")
+
+    print(f"Project directory: {project_dir}")
+    print(f"Using config file: {config_xlsx}")
+
+    # Load configurations and steps from Excel
+    steps, config = load_config_from_excel(config_xlsx)
+
+    # Generate the motor_config.h file in this project directory
+    generate_motor_config(steps, config, project_dir)
+
+    # Compile and upload the project
+    compile_and_upload(project_dir)
+
+
+if __name__ == "__main__":
+    main()
