@@ -41,7 +41,10 @@ void DisplayController::setTempSetpoint(const double& setpoint,
         String err = "setpoint set too high! must be 250F/120C or less";
         errorScreen(err);
     }
-    update(0); // this needs to be verified when test restart or powerloss!
+    // Refresh sensors without altering the persisted loop count: passing 0
+    // (or any value other than the current count) would cause update() to
+    // overwrite config_file.txt with that value.
+    update(_current_loop_count);
     String msg = "Heater PID control initialized";
     messageScreen(msg);
     writeToLog(msg);
@@ -69,7 +72,9 @@ void DisplayController::setPressureOffset(const uint8_t& num_meas) {
     unsigned int duration = (num_meas + 1) * 1000;
     while (avgPressTimer <= duration) {
         if (sampleTimer > 1000) {
-            update(0);
+            // Refresh sensors only; preserve the persisted loop count so a
+            // power-on (which calls setPressureOffset) cannot wipe it.
+            update(_current_loop_count);
             _press_offset += _abs_pressure;
             sample_count++;  
             sampleTimer = 0;
@@ -280,13 +285,17 @@ void DisplayController::runProgram() {
 void DisplayController::resetTest() {
     _PIDTimer = 0;
     readConfigFile();
-    _current_loop_count = 0;
-    writeToConfigFile();
     writeToLog("RESET", "STATUS");
     lcd.clear();
     digitalWrite(_reset_bus_pin, HIGH);
     delay(10);
     digitalWrite(_reset_bus_pin, LOW);
+    // Only zero the loop count after the reset pulse has been delivered.
+    // This guarantees that the count is never wiped by anything other than
+    // a fully-completed user-initiated reset (5 s hold + successful pulse),
+    // and is preserved across power restores via config_file.txt.
+    _current_loop_count = 0;
+    writeToConfigFile();
     _hasHeaderBeenWritten = false;
     //writeToDataFile();
     setPressureOffset();
@@ -342,6 +351,10 @@ void DisplayController::turnOffHeaters() {
         digitalWrite(_heat_output_pin, LOW);
         digitalWrite(_heat_safety_pin, LOW);
         _areHeatersArmed = false;
+        // Reset so the "sump temp not rising" watchdog measures elapsed
+        // heating time, not time since the last PID compute (which would
+        // free-run during unheated dwells and falsely trip on resume).
+        _PIDTimer = 0;
     } 
 }
 
@@ -437,14 +450,15 @@ void DisplayController::writeToDataFile() {
             _dataFile = SD.open("test_data.csv", FILE_WRITE);
             if (_dataFile) {
                 if (!_hasHeaderBeenWritten) {
-                    String header_str = "Datetime,Loop,Press(psi),";
+                    String header_str = "Elapsed(s),Loop,Press(psi),";
                     header_str += "SealTemp(\xB0" + unit + "),SumpTemp(\xB0";
                     header_str += unit + "),CW_Torque(Nm),CCW_Torque(Nm)";
                     _dataFile.println(header_str);
                     writeToLog("data logging to test_data.csv started", "LOG");
                     _hasHeaderBeenWritten = true;
+                    _testElapsed = 0;
                 }
-                String data_str = getDateStr() + " " + getTimeStr() + ",";
+                String data_str = String(_testElapsed / 1000UL) + ",";
                 data_str += String(_current_loop_count) + "," + String(_rel_pressure);
                 data_str += "," + String(_seal_temp) + "," + String(_sump_temp);
                 data_str += "," + String(_cw_torque) + "," + String(_ccw_torque);

@@ -295,6 +295,7 @@ class DisplayController {
 
         File _restartFile, _dataFile, _logFile;
         elapsedMillis _dataLoggerTimer;
+        elapsedMillis _testElapsed;
         uint8_t _record_interval;
         bool _isSDCardInserted, _isSDCardActive;
         bool _hasHeaderBeenWritten = false;

@@ -264,8 +264,10 @@ void loop() {
             }
 
             if (rtm.getResetSwitch()) {
-                current_loop_count = 0;
                 rtm.resetTest();
+                // Sync the local counter from the controller, which is the
+                // single source of truth for the persisted loop count.
+                current_loop_count = rtm.getCurrentLoopCount();
                 requested_loops = rtm.getRequestedNumberOfLoops();
                 rtm.messageScreen(source_file);
                 delay(4000);
