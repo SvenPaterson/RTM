@@ -36,6 +36,12 @@ bool ClearCoreRTM::begin() {
     LED_PIN.State(true);
     dbgln("GPIO ready");
 
+    /* Heater PID (sample matches XPB STAT cadence; cap matches old XPB limit) */
+    pid_.SetSampleTime(1000);
+    pid_.SetOutputLimits(0, 150);
+    pid_.SetMode(MANUAL);
+    pidOut_ = 0;
+
     /* MOTOR */
     MotorMgr.MotorInputClocking(MotorManager::CLOCK_RATE_NORMAL);
     MotorMgr.MotorModeSet(MotorManager::MOTOR_M0M1, Connector::CPM_MODE_STEP_AND_DIR);
@@ -48,31 +54,31 @@ bool ClearCoreRTM::begin() {
 
     Delay_ms(250);
 
-    /* TTL Comms */
-    ttlComms_.begin();
-    dbgln("TTL Ready");
+    /* Comms */
+    comms_.begin();
+    dbgln("Comms Ready");
 
     // listen for XPB ready
     {
         uint32_t tReady = Milliseconds();
         while (Milliseconds() - tReady < 250) {
-            ttlComms_.checkForMessages();
-            ttlComms_.checkRetries();
+            comms_.checkForMessages();
+            comms_.checkRetries();
         }
     }
     
-    ttlComms_.sendMessage("READY;ID=CC", MessageType::NORMAL);
+    comms_.sendMessage("READY;ID=CC", MessageType::NORMAL);
     delay(2);
-    ttlComms_.sendMessage("NOTICE;PROTO=2;CC_FW=2025.08", MessageType::NORMAL);
+    comms_.sendMessage("NOTICE;PROTO=2;CC_FW=2025.08", MessageType::NORMAL);
     delay(2);
-    ttlComms_.sendCommand("REQ:SW",      MessageType::IMPORTANT);
+    comms_.sendCommand("REQ:SW",      MessageType::IMPORTANT);
 
     // Initialize with empty protocol - will receive from XPB
     state_ = State::BOOT;
 
     // MOVED TO handleBoot()
     //dbgln("Awaiting protocol from XPB...");
-    //ttlComms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
+    //comms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
     //delay(2);
 
     // MOVED to handleProtoLoad()
@@ -105,8 +111,8 @@ inline void ClearCoreRTM::pollHlfbEdge_() {
 
 void ClearCoreRTM::tick() {
     pollHlfbEdge_();                        // HLFB poll 1 — before serial I/O
-    ttlComms_.checkForMessages();
-    ttlComms_.checkRetries();
+    comms_.checkForMessages();
+    comms_.checkRetries();
     pollHlfbEdge_();                        // HLFB poll 2 — after serial I/O
 
     // --- Comms health & stale guard ---
@@ -119,6 +125,23 @@ void ClearCoreRTM::tick() {
             eStopAll_(why);
         }
     }
+
+#if RTM_LINK_ETHERNET
+    // --- Link-loss recovery watchdog ---
+    // Once stale (also triggers eStopAll_ above for motor/heater safety),
+    // periodically tear down + re-open the UDP socket. This unsticks any
+    // soft-locked socket state on either the local Teknic Ethernet stack
+    // or the peer W5500 (XPB). Debounced to once per 5s to avoid thrash.
+    if (xpbStaleTmr_ > 5000UL) {
+        if (linkRecoveryTmr_ > 5000UL) {
+            linkRecoveryTmr_ = 0;
+            dbgln("[LINK] Recovery watchdog -- reinit UDP");
+            comms_.reinitUdp();
+        }
+    } else {
+        linkRecoveryTmr_ = 0;
+    }
+#endif
 
     bool eStopActive  = !SAFETY_PIN.State();
     const bool runLineLow = runActiveRemote_;   // XPB publishes RUN=1 when the active-low line is asserted
@@ -281,9 +304,9 @@ void ClearCoreRTM::tick() {
                 (estopReason_ != 0) ? 1 : 0, // probably not needed
                 (unsigned)estopReason_,
                 (int)measuredRpm_);
-        ttlComms_.sendMessage(msg, MessageType::INFO);
+        comms_.sendMessage(msg, MessageType::INFO);
         pollHlfbEdge_();                    // HLFB poll 5 — after HB serial send
-        ttlComms_.checkForMessages();
+        comms_.checkForMessages();
 
         // Reset edge counters for next HB window
         hlfbEdgeCount_ = 0;
@@ -319,7 +342,7 @@ bool ClearCoreRTM::promoteRun_(RunTrigger trigger) {
 
         char cmd[48];
         snprintf(cmd, sizeof(cmd), "CMD;SP=%u", preheatTargetC_);
-        ttlComms_.sendMessage(cmd, MessageType::IMPORTANT);
+        comms_.sendMessage(cmd, MessageType::IMPORTANT);
     };
 
     if (state_ == State::Paused) {
@@ -381,7 +404,7 @@ void ClearCoreRTM::handleBoot(bool resetActive, bool justEntered_) {
     // Logical reset: timer pre-loaded above, fires immediately.
     if (protoRequestTmr_ > 5000 && !isProtoLoaded_) {
         dbgln("Awaiting protocol from XPB...");
-        ttlComms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
+        comms_.sendCommand("REQ:PROTO", MessageType::IMPORTANT);
         delay(2);
         protoRequestTmr_ = 0;
     }
@@ -557,7 +580,7 @@ void ClearCoreRTM::handlePaused(bool runActive, bool justEntered_) {
 
                 char cmd[48];
                 snprintf(cmd, sizeof(cmd), "CMD;SP=%u", preheatTargetC_);
-                ttlComms_.sendMessage(cmd, MessageType::IMPORTANT);
+                comms_.sendMessage(cmd, MessageType::IMPORTANT);
 
                 state_ = State::Preheat;
                 dbgln("PAUSED->PREHEAT (re-heat before resume)");
@@ -575,7 +598,7 @@ void ClearCoreRTM::handleReset(bool resetActive, bool justEntered_) {
     if (!resetActive && resetPhase_ != ResetPhase::ExecSent) {
         // Cancel only if we haven't already told XPB to reboot.
         // Once ExecSent, XPB is committed to rebooting and CC must follow.
-        ttlComms_.sendCommand("CMD;RESET=CANCEL", MessageType::IMPORTANT);
+        comms_.sendCommand("CMD;RESET=CANCEL", MessageType::IMPORTANT);
         motor.EnableRequest(true);
         if (state_ != preReset_) {
             prevState_ = State::Debug; // force a mismatch, check o3 to see if this makes sense anymore!
@@ -590,14 +613,14 @@ void ClearCoreRTM::handleReset(bool resetActive, bool justEntered_) {
         resetTmr_    = 0;
 
         if (resetImmediate_) {
-            ttlComms_.sendCommand("CMD;RESET=EXEC", MessageType::CRITICAL);
+            comms_.sendCommand("CMD;RESET=EXEC", MessageType::CRITICAL);
             resetPhase_      = ResetPhase::ExecSent;
             xpbBootWaitTmr_  = 0;
             resetImmediate_  = false;  // one-shot
         } else {
             char line[40];
             snprintf(line, sizeof(line), "CMD;RESET=ARM;SECS=%u", (unsigned)resetArmSecs_);
-            ttlComms_.sendCommand(line, MessageType::IMPORTANT);
+            comms_.sendCommand(line, MessageType::IMPORTANT);
             resetPhase_ = ResetPhase::Armed;
         }
     }
@@ -607,7 +630,7 @@ void ClearCoreRTM::handleReset(bool resetActive, bool justEntered_) {
             // Let XPB own the countdown visuals; we just wait out the time.
             if (resetTmr_ >= (uint32_t)resetArmSecs_ * 1000UL) {
                 // 2) Tell XPB to actually reset now
-                ttlComms_.sendMessage("CMD;RESET=EXEC", MessageType::CRITICAL);
+                comms_.sendMessage("CMD;RESET=EXEC", MessageType::CRITICAL);
                 resetPhase_ = ResetPhase::ExecSent;
                 xpbBootWaitTmr_ = 0;
             }
@@ -776,8 +799,8 @@ void ClearCoreRTM::logicalReset() {
     modeTorqueToggle_ = false;
     for (uint8_t i = 0; i < kNumRows; ++i) dirty_[i] = true;
 
-    // --- TTL comms ---
-    ttlComms_.resetState();
+    // --- Comms ---
+    comms_.resetState();
 
     // --- XPB mask: keep active to cover XPB transition ---
     // Logical reset is fast (~2s total); 5s mask is plenty.
@@ -790,9 +813,9 @@ void ClearCoreRTM::logicalReset() {
     state_     = State::BOOT;
 
     // --- Announce readiness (mirrors begin()) ---
-    ttlComms_.sendMessage("READY;ID=CC", MessageType::NORMAL);
+    comms_.sendMessage("READY;ID=CC", MessageType::NORMAL);
     delay(2);
-    ttlComms_.sendCommand("REQ:SW", MessageType::IMPORTANT);
+    comms_.sendCommand("REQ:SW", MessageType::IMPORTANT);
 
     LED_PIN.State(true);
     dbgln("[RESET] CC logical reset complete — entering BOOT");
@@ -802,6 +825,18 @@ void ClearCoreRTM::handlePreheat(bool runActive, bool justEntered_) {
     if (justEntered_) {
         motor.EnableRequest(false);
         LED_PIN.State(true);
+    }
+
+    // RUN released during preheat -> abort heating immediately and pause.
+    // Without this the heater keeps driving toward setpoint even after the
+    // operator backs out, which is unsafe and confusing.
+    if (!runActive) {
+        sendHeaterOff_();
+        waitingForTemp_         = false;
+        autoStartAfterPreheat_  = false;
+        state_                  = State::Paused;
+        dbgln("[PREHEAT] RUN released - heater OFF, -> PAUSED");
+        return;
     }
 
     if (!waitingForTemp_) {
@@ -825,7 +860,7 @@ void ClearCoreRTM::handlePreheat(bool runActive, bool justEntered_) {
 // --------- output control handlers ------------
 void ClearCoreRTM::sendHeaterOff_() {
     // Tell XPB to stop PID
-    ttlComms_.sendMessage("CMD;SP=0", MessageType::IMPORTANT);
+    comms_.sendMessage("CMD;SP=0", MessageType::IMPORTANT);
 
     // Cut both SSR legs locally
     HEATER_OUTPUT_PIN.PwmDuty(0);
@@ -833,6 +868,32 @@ void ClearCoreRTM::sendHeaterOff_() {
 
     activeSetpointC_ = 0;
     dbgln("[HEAT] Heater OFF (CMD;SP=0 sent)");
+}
+
+void ClearCoreRTM::runHeaterPid_(int sumpC) {
+    // Setpoint follows the active target; 0 => heater off, integrator reset.
+    pidSp_ = (double)activeSetpointC_;
+    pidPv_ = (double)sumpC;
+
+    const bool wantActive = (activeSetpointC_ > 0)
+                          && protocolUsesHeat_
+                          && !heaterInhibit_
+                          && (state_ != State::EStop);
+
+    if (wantActive != pidActive_) {
+        pidActive_ = wantActive;
+        // Switching MANUAL->AUTOMATIC re-seeds the integrator from current pidOut_.
+        pid_.SetMode(wantActive ? AUTOMATIC : MANUAL);
+        if (!wantActive) pidOut_ = 0;
+    }
+
+    if (pidActive_) {
+        pid_.Compute();
+    } else {
+        pidOut_ = 0;
+    }
+
+    setHeaterOutput((int)pidOut_);
 }
 
 void ClearCoreRTM::setHeaterOutput(int out) {
@@ -865,7 +926,7 @@ void ClearCoreRTM::eStopAll_(const char *reason) {
     motor.EnableRequest(false);
 
     // Heater: best-effort tell XPB to stop PID, then cut locally
-    ttlComms_.sendMessage("CMD;SP=0", MessageType::IMPORTANT);
+    comms_.sendMessage("CMD;SP=0", MessageType::IMPORTANT);
     activeSetpointC_ = 0;
     HEATER_OUTPUT_PIN.PwmDuty(0);
     HEATER_SAFETY_PIN.State(false);
@@ -894,5 +955,5 @@ void ClearCoreRTM::sendAlarm_(const char *type, const char *reason) {
     buf[i] = '\0';
 
     snprintf(msg, sizeof(msg), "ALARM;TYPE=%s;MSG=%s", t, buf);
-    ttlComms_.sendMessage(msg, MessageType::INFO);
+    comms_.sendMessage(msg, MessageType::INFO);
 }

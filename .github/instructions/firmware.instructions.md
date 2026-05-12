@@ -1,6 +1,6 @@
 ---
 applyTo: "src/**/*.cpp,src/**/*.h,include/**/*.h"
-description: "Use when: editing ClearCore, expansion board, sniffer, or shared embedded C/C++ firmware."
+description: "Use when: editing ClearCore, expansion board, or shared embedded C/C++ firmware."
 ---
 
 # Firmware Instructions
@@ -16,12 +16,11 @@ Applies to embedded firmware under src and include.
 - Keep comments concise and focused on intent where control flow is non-obvious.
 
 ## Required documentation updates
-- Update [docs/ttl_sniffer_debug.md](../../docs/ttl_sniffer_debug.md) when sniffer command behavior, wiring assumptions, or control semantics change.
 - Update [README.md](../../README.md) and [docs/PROJECT_HANDOFF.md](../../docs/PROJECT_HANDOFF.md) when architecture, workflows, or operator procedures change.
 - Update [CODE_REVIEW.md](../../CODE_REVIEW.md) when new findings, mitigations, or validation evidence are produced.
 
 ## Upload / flash policy
-- **NEVER** attempt to upload or flash firmware to any board (ClearCore, Expansion Board, Sniffer) from the terminal or via PlatformIO CLI (`pio run --target upload`). Always let the user perform uploads manually through the PlatformIO IDE task runner.
+- **NEVER** attempt to upload or flash firmware to any board (ClearCore, Expansion Board) from the terminal or via PlatformIO CLI (`pio run --target upload`). Always let the user perform uploads manually through the PlatformIO IDE task runner.
 - **NEVER** open a serial monitor or DeviceMonitor on any COM port. Holding a COM port can brick a Nano Every and prevent re-enumeration.
 - Build (`pio run -e <env>`) is permitted; upload and monitor are not.
 

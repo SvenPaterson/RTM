@@ -1,4 +1,4 @@
-// TTLComms.h - Shared TTL communication class
+// RtmComms.h - Shared inter-board comms class (UDP transport over Ethernet)
 #pragma once
 
 #include <Arduino.h>
@@ -22,7 +22,7 @@ enum class MessageType {
     INFO            // Telemetry/heartbeat: no ACK
 };
 
-class TTLComms {
+class RtmComms {
 public:
     // Abstract interface for different serial implementations
     virtual void serialSend(const char* data) = 0;
@@ -43,7 +43,7 @@ public:
     void cancelPending() { pendingMsg_ = {}; waitingForAck_ = false; pendingRef_ = 0; }
 
     // Message callback - override in derived classes
-    // probably not needed, or move to universal TTLComms definition
+    // probably not needed, or move to universal RtmComms definition
     virtual void onMessageReceived(const String& data) = 0;
     virtual void onBadChecksum(const String& rawMsg) = 0;
 
@@ -75,16 +75,6 @@ protected:
 private:
     static constexpr uint32_t ACK_TIMEOUT_MS = 500;
     static constexpr uint8_t MAX_RETRIES = 5;
-
-#ifndef RTM_LINK_ETHERNET
-#define RTM_LINK_ETHERNET 0
-#endif
-#if !RTM_LINK_ETHERNET
-    // TTL-only: salvage two frames glued during boot (timing artifact of
-    // the Serial1 link). UDP datagrams have hard frame boundaries so this
-    // path is dead under RTM_LINK_ETHERNET=1.
-    bool trySplitGluedFrames_(const String &line);
-#endif
 
     PendingMessage pendingMsg_;
     bool waitingForAck_ = false;

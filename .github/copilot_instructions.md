@@ -14,7 +14,7 @@ These instructions apply to the full repository.
 ## Documentation maintenance requirement
 - Any change to project functionality MUST include documentation updates in the same change.
 - Any change to test utilities, test scenarios, or validation thresholds MUST include documentation updates in the same change.
-- At minimum, update the most relevant files among [README.md](../README.md), [test/README](../test/README), [docs/ttl_sniffer_debug.md](../docs/ttl_sniffer_debug.md), [docs/PROJECT_HANDOFF.md](../docs/PROJECT_HANDOFF.md), and [CODE_REVIEW.md](../CODE_REVIEW.md).
+- At minimum, update the most relevant files among [README.md](../README.md), [test/README](../test/README), [docs/PROJECT_HANDOFF.md](../docs/PROJECT_HANDOFF.md), and [CODE_REVIEW.md](../CODE_REVIEW.md).
 - If behavior changed but no docs were updated, treat the task as incomplete.
 
 ## Workflow conventions

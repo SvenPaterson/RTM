@@ -1,17 +1,11 @@
-// TTLComms.cpp
-#include "TTLComms.h"
+// RtmComms.cpp
+#include "RtmComms.h"
 #include <ctype.h>
-
-// Verbose [TX]/[RX] USB echo paths. Off by default — they only matter when
-// stepping through framing problems on a USB-attached host.
-#ifndef TTL_VERBOSE_LOG
-#define TTL_VERBOSE_LOG 0
-#endif
 
 #define XPB_TX_ECHO_USB 1
 
 // 1) Command sender: always carries REF and expects an ACK/response
-void TTLComms::sendCommand(const char* base, MessageType type) {
+void RtmComms::sendCommand(const char* base, MessageType type) {
     // Force an ACK policy if caller passed INFO/NORMAL
     if (type == MessageType::INFO || type == MessageType::NORMAL) {
         type = MessageType::IMPORTANT;
@@ -59,7 +53,7 @@ void TTLComms::sendCommand(const char* base, MessageType type) {
 }
 
 // 2) Typed sender: INFO/NORMAL (no ACK), IMPORTANT/CRITICAL (ACK + REF)
-void TTLComms::sendMessage(const char* data, MessageType type) {
+void RtmComms::sendMessage(const char* data, MessageType type) {
     const bool wantsAck =
         (type == MessageType::CRITICAL || type == MessageType::IMPORTANT);
 
@@ -113,12 +107,12 @@ void TTLComms::sendMessage(const char* data, MessageType type) {
 }
 
 // 3) Legacy bool overload → map onto typed policy cleanly
-void TTLComms::sendMessage(const char* data, bool needsAck) {
+void RtmComms::sendMessage(const char* data, bool needsAck) {
     if (needsAck) sendMessage(data, MessageType::IMPORTANT);
     else          sendMessage(data, MessageType::INFO);
 }
 
-void TTLComms::checkRetries() {
+void RtmComms::checkRetries() {
     if (!waitingForAck_) return;
 
     if (millis() - pendingMsg_.sentTime > ackTimeoutMs_) {
@@ -134,7 +128,7 @@ void TTLComms::checkRetries() {
     }
 }
 
-void TTLComms::checkForMessages() {
+void RtmComms::checkForMessages() {
     while (serialAvailable()) {
         char c = serialRead();
         if (c == '\r') continue;
@@ -148,15 +142,7 @@ void TTLComms::checkForMessages() {
             if (validateMessage(line)) {
                 processMessage(line);
             } else {
-#if !RTM_LINK_ETHERNET
-                // TTL-only: attempt to salvage two glued frames like
-                // "...:4FACK;...:63" — boot-time artifact of Serial1 timing.
-                if (!trySplitGluedFrames_(line)) {
-                    onBadChecksum(line);
-                }
-#else
                 onBadChecksum(line);
-#endif
             }
             incomingLen_ = 0;
         } else if (incomingLen_ < MAX_MSG_LEN) {
@@ -165,7 +151,7 @@ void TTLComms::checkForMessages() {
     }
 }
 
-uint8_t TTLComms::calculateXOR(const char* data) {
+uint8_t RtmComms::calculateXOR(const char* data) {
     // for error checking a message
     uint8_t checksum = 0;
     while (*data) {
@@ -174,7 +160,7 @@ uint8_t TTLComms::calculateXOR(const char* data) {
     return checksum;
 }
 
-/* bool TTLComms::validateMessage(const String& msg) {
+/* bool RtmComms::validateMessage(const String& msg) {
     const int delim = msg.lastIndexOf(':');
     const size_t len = msg.length();
     if (delim < 0) return false;
@@ -204,8 +190,7 @@ uint8_t TTLComms::calculateXOR(const char* data) {
     for (int i = 0; i < delim; ++i) calc ^= (uint8_t)msg[i];
 
     if (calc != given) {
-        // Optional: one-shot hex dump (guarded) – pure C strings for usbLog()
-        #ifndef TTL_DUMP_BAD_DISABLE
+        // Optional: one-shot hex dump on first bad checksum.
         static bool dumpedBadOnce = false;
         if (!dumpedBadOnce && logRx_) {
             dumpedBadOnce = true;
@@ -225,14 +210,13 @@ uint8_t TTLComms::calculateXOR(const char* data) {
                 usbLog(line);
             }
         }
-        #endif
         return false;
     }
 
     return true;
 } */
 
-bool TTLComms::validateMessage(const String& msg) {
+bool RtmComms::validateMessage(const String& msg) {
     const int delim = msg.lastIndexOf(':');
     const size_t len = msg.length();
     if (delim < 0) return false;
@@ -265,7 +249,7 @@ bool TTLComms::validateMessage(const String& msg) {
 }
 
 
-void TTLComms::processMessage(const String& msg) {
+void RtmComms::processMessage(const String& msg) {
     int lastColon = msg.lastIndexOf(':');
     String data = (lastColon >= 0) ? msg.substring(0, lastColon) : msg;
 
@@ -308,7 +292,7 @@ void TTLComms::processMessage(const String& msg) {
     onMessageReceived(data);
 }
 
-String TTLComms::kvGet(const String &frame, const char *key) {
+String RtmComms::kvGet(const String &frame, const char *key) {
     int k = frame.indexOf(key);
     if (k < 0) return String();
     k += (int)strlen(key);
@@ -317,7 +301,7 @@ String TTLComms::kvGet(const String &frame, const char *key) {
     return frame.substring(k, e);
 }
 
-int TTLComms::kvGetIntClamped(const String &frame, const char *key,
+int RtmComms::kvGetIntClamped(const String &frame, const char *key,
                                 int defVal, int minV, int maxV) {
     String s = kvGet(frame, key);
     if (!s.length()) return defVal;
@@ -327,49 +311,7 @@ int TTLComms::kvGetIntClamped(const String &frame, const char *key,
     return (int)v;
 }
 
-double TTLComms::kvGetDouble(const String &frame, const char *key, double defVal) {
+double RtmComms::kvGetDouble(const String &frame, const char *key, double defVal) {
         String s = kvGet(frame, key);
         return s.length() ? s.toFloat() : defVal;
     }
-
-// Try to split two glued frames like "...:4FACK;QUIESCE;...:63"
-// Returns true if it split and dispatched both parts.
-// TTL-only: UDP datagrams have hard frame boundaries (one packet per frame).
-#if !RTM_LINK_ETHERNET
-bool TTLComms::trySplitGluedFrames_(const String &line) {
-    const int n = line.length();
-    for (int i = 0; i + 3 < n; ++i) {
-        if (line[i] == ':' &&
-            isxdigit(line[i+1]) && isxdigit(line[i+2])) {
-            const int next = i + 3;
-
-            auto startsWithAt = [&](int j, const char *tok) {
-                const int L = (int)strlen(tok);
-                return j + L <= n && line.substring(j, j + L) == tok;
-            };
-
-            if (next < n && (
-                startsWithAt(next, "ACK;")     ||
-                startsWithAt(next, "READY;")   ||
-                startsWithAt(next, "NOTICE;")  ||
-                startsWithAt(next, "HB;")      ||
-                startsWithAt(next, "STAT;")    ||
-                startsWithAt(next, "SW;")      ||
-                startsWithAt(next, "PR_")      ||   // PR_BEG/PR_DAT/PR_END
-                startsWithAt(next, "QUIESCE;") ||
-                startsWithAt(next, "REQ:")
-            )) {
-                String a = line.substring(0, next);
-                String b = line.substring(next);
-                a.trim(); b.trim();
-
-                bool used = false;
-                if (a.length() && validateMessage(a)) { processMessage(a); used = true; }
-                if (b.length() && validateMessage(b)) { processMessage(b); used = true; }
-                return used;  // true only if we dispatched at least one valid half
-            }
-        }
-    }
-    return false;
-}
-#endif  // !RTM_LINK_ETHERNET

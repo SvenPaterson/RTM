@@ -26,17 +26,13 @@
 #include "ClearCore.h"
 #include "ClearCoreElapsedMillis.h"
 #include "SPI.h"
-#include "TTLComms.h"
+#include "RtmComms.h"
 #include "RtmNet.h"
+#include <PID_v1.h>
 #include <type_traits>
 
-#ifndef RTM_LINK_ETHERNET
-#define RTM_LINK_ETHERNET 0
-#endif
 
-#if RTM_LINK_ETHERNET
 #include <Ethernet.h>
-#endif
 
 // ClearCore (and other Arduino cores) define min/max macros that clash with
 // <algorithm> templates in <array> on GCC. Undef them before any STL headers
@@ -71,7 +67,7 @@ public:
     static constexpr uint8_t  kNumCols = 20;
     static constexpr uint8_t  kNumRows = 4;
 
-    ClearCoreRTM() : ttlComms_(this) {} // ctor
+    ClearCoreRTM() : comms_(this) {} // ctor
 
 private:
     /* ——— XPB QUIESCE mask ——— */
@@ -91,7 +87,7 @@ private:
     bool heaterInhibit_{false};
     bool heartbeatSystemEnabled_{false};
     elapsedMillis heartbeatTmr_, xpbStaleTmr_;
-
+    elapsedMillis linkRecoveryTmr_;     // debounces UDP socket reinit attempts
     /* ——— debug helpers ——— */
     char debugBuf_[150];
     inline void dbg(const char *s)                    { if (SerialPort) SerialPort.Send(s); }
@@ -235,6 +231,13 @@ private:
     void setHeaterOutput(int out);
     void sendHeaterOff_();
 
+    /* ——— heater PID (moved from XPB) ——— */
+    double pidSp_{0}, pidPv_{0}, pidOut_{0};
+    double pidKp_{60}, pidKi_{40}, pidKd_{25};
+    PID    pid_{&pidPv_, &pidOut_, &pidSp_, pidKp_, pidKi_, pidKd_, DIRECT};
+    bool   pidActive_{false};
+    void runHeaterPid_(int sumpC);
+
     /* ——— thermal safety ——— */
     static constexpr uint16_t kSumpAbsoluteCeilingC = 150;
     static constexpr uint16_t kSumpDeltaAlarmC      = 35;
@@ -256,42 +259,12 @@ private:
     bool promoteRun_(RunTrigger trigger);
     void logicalReset();  ///< In-place state reset (replaces SysMgr.ResetBoard)
 
-    class ClearCoreTTL : public TTLComms {
+    class ClearCoreComms : public RtmComms {
     public:
-        explicit ClearCoreTTL(ClearCoreRTM *owner) : owner_(owner) {}
-#if !RTM_LINK_ETHERNET
-        void begin() {
-            ConnectorCOM1.Mode(Connector::TTL);
-            ConnectorCOM1.Speed(9600);
-            ConnectorCOM1.PortOpen();
-            Delay_ms(30);
-            while (ConnectorCOM1.AvailableForRead() > 0) {
-                ConnectorCOM1.CharGet();
-            }
-            beginBase();
-        }
-        
-        // Implement serial interface for ClearCore COM1
-        void serialSend(const char* data) override {
-            ConnectorCOM1.Send(data);
-            //ConnectorCOM1.Flush(); // ensure CRLF is sent
-        }
-        
-        bool serialAvailable() override {
-            return (ConnectorCOM1.CharPeek() != -1);
-        }
-        
-        char serialRead() override {
-            return ConnectorCOM1.CharGet();
-        }
-        
-        int serialPeek() override {
-            return ConnectorCOM1.CharPeek();
-        }
-#else  // RTM_LINK_ETHERNET — Phase 4/5 transport: UDP via built-in Teknic Ethernet.
-        // ----- UDP byte-transport bridging TTLComms.serialSend/Available/Read/Peek -----
+        explicit ClearCoreComms(ClearCoreRTM *owner) : owner_(owner) {}
+        // ----- UDP byte-transport bridging RtmComms.serialSend/Available/Read/Peek -----
         // TX: buffer characters until '\n' (or near overflow), then ship as
-        //     one datagram to peer IP:port — preserves TTLComms's frame
+        //     one datagram to peer IP:port — preserves RtmComms's frame
         //     boundaries.
         // RX: pumpRx_() drains udp.parsePacket()/read() into a ring buffer
         //     consumed by serialAvailable/Read/Peek. Caller invokes
@@ -308,6 +281,21 @@ private:
             txLen_ = 0;
             rxHead_ = rxTail_ = 0;
             beginBase();
+        }
+
+        /**
+         * @brief Tear down + re-open the UDP socket.
+         * @details Recovery path for the case where the underlying Ethernet
+         *          stack has gone silent (router reboot, link bounce, peer
+         *          reboot, socket soft-lock). Caller is responsible for
+         *          cadence; ClearCoreRTM::tick() debounces to 5s while
+         *          xpbStaleTmr_ > 5s.
+         */
+        void reinitUdp() {
+            udp_.stop();
+            udp_.begin(RtmNet::kUdpPort);
+            txLen_ = 0;
+            rxHead_ = rxTail_ = 0;
         }
 
         void serialSend(const char* data) override {
@@ -346,6 +334,10 @@ private:
         EthernetUDP udp_;
         IPAddress   peerIp_{RtmNet::kXpbIp[0], RtmNet::kXpbIp[1],
                             RtmNet::kXpbIp[2], RtmNet::kXpbIp[3]};
+#if RTM_TEE_TO_PC
+        IPAddress   pcIp_{RtmNet::kPcIp[0], RtmNet::kPcIp[1],
+                          RtmNet::kPcIp[2], RtmNet::kPcIp[3]};
+#endif
 
         // TX line-buffer: one datagram per framed line. 192 bytes covers
         // MAX_MSG_LEN (160) plus checksum/REF overhead.
@@ -364,6 +356,14 @@ private:
             udp_.beginPacket(peerIp_, RtmNet::kUdpPort);
             udp_.write((const uint8_t*)txBuf_, txLen_);
             udp_.endPacket();
+#if RTM_TEE_TO_PC
+            // Tee a copy to the PC observer so harness/capture works
+            // through any unmanaged switch (which only forwards unicast
+            // peer-to-peer frames to the addressed port).
+            udp_.beginPacket(pcIp_, RtmNet::kUdpPort);
+            udp_.write((const uint8_t*)txBuf_, txLen_);
+            udp_.endPacket();
+#endif
             txLen_ = 0;
         }
 
@@ -391,7 +391,6 @@ private:
         }
 
     public:
-#endif  // RTM_LINK_ETHERNET
         
         // Handle received messages
         /* void onMessageReceived(const String& data) override {
@@ -874,7 +873,6 @@ private:
             if (data.startsWith("STAT;")) {
                 static int lastSeq = -1;
                 const int seq = kvGet(data, "SEQ=").toInt();
-                const int out = kvGetIntClamped(data, "OUT=", 0, 0, 150);
                 const int sump = kvGetIntClamped(data, "SUMP=", 0, 0, 200);
                 const int seal = kvGetIntClamped(data, "SEAL=", 0, 0, 200);
 
@@ -886,7 +884,7 @@ private:
                     owner_->commsHealthy_ = true;
                     owner_->xpbStaleTmr_   = 0;                 // fresh data just arrived
                     owner_->sealTempC_ = (uint16_t)seal;
-                    owner_->setHeaterOutput(out);
+                    owner_->runHeaterPid_(sump);
 
                     // --- Over-temperature safety ---
                     if (owner_->protocolUsesHeat_) {
@@ -942,7 +940,33 @@ private:
 
             // 6) / NOTICE / HB from XPB:
             //    Treat as notices/telemetry. Do not ACK. If you need UI updates, handle here.
-            // (Currently ignoring silently unless you already have handlers elsewhere.)
+
+            // === XPB protocol ready announcement (PHASH drift detection) ===
+            if (data.startsWith("NOTICE;PROTO_READY")) {
+                if (owner_) {
+                    String phStr = kvGet(data, "PHASH=");
+                    uint32_t advertised = strtoul(phStr.c_str(), nullptr, 10);
+                    // Only act when CC is in a benign state. Never disturb a running test.
+                    bool benign = (owner_->state_ == State::BOOT) ||
+                                  (owner_->state_ == State::Idle) ||
+                                  (owner_->state_ == State::Completed);
+                    bool drifted = (!owner_->isProtoLoaded_) || (advertised != owner_->progHash_);
+                    if (benign && drifted) {
+                        owner_->dbgln("[PROTO] PHASH drift detected; clearing local proto and re-requesting");
+                        owner_->isProtoLoaded_  = false;
+                        owner_->protocolName_   = "Awaiting Upload";
+                        owner_->stepCount_      = 0;
+                        owner_->loopCount_      = 1;
+                        owner_->totalLoops_     = 1;
+                        owner_->progHash_       = 0;
+                        owner_->protoRx_        = {};
+                        // Force handleBoot to fire REQ:PROTO immediately
+                        owner_->protoRequestTmr_ = 5001;
+                        if (owner_->state_ != State::BOOT) owner_->state_ = State::BOOT;
+                    }
+                }
+                return;
+            }
 
             // else ignore silently
         }
@@ -959,7 +983,7 @@ private:
                          (unsigned)raw.length(), (unsigned long)badCrcCount);
                 usbLog(line);
             } else if (badCrcCount % 10 == 1) {
-                usbLog("WARN: TTL bad checksum (rate-limited)");
+                usbLog("WARN: bad checksum (rate-limited)");
             }
             // Do NOT send any frame here.
         }
@@ -973,9 +997,7 @@ private:
     private:
         ClearCoreRTM *owner_{nullptr};
     };
-    ClearCoreTTL ttlComms_;
+    ClearCoreComms comms_;
     
 };
-
-
 

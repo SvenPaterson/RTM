@@ -4,7 +4,7 @@
 Sends a UDP datagram to a target peer and waits for an echo. Reports
 round-trip latency, packet loss, and decoded payload. Designed to be
 extended in later phases into a full passive listener / harness peer
-(see plan: tools/udp_capture.py is the eventual sniffer-replacement).
+(see plan: tools/udp_capture.py is the production passive listener).
 
 Usage examples:
     # Single ping to XPB (default)
@@ -16,7 +16,7 @@ Usage examples:
     # Burst of 50 packets, 20 ms apart, custom payload
     python tools/udp_probe.py -n 50 -i 0.02 --payload "HELLO"
 
-    # Listen-only mode (passive sniffer; firmware must broadcast)
+    # Listen-only mode (passive; firmware must broadcast)
     python tools/udp_probe.py --listen
 
 Notes:

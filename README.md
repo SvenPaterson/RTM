@@ -6,7 +6,6 @@ Re-write of the Rotary Stand code base.
 
 - Resume checkpoint and active findings: [CODE_REVIEW.md](CODE_REVIEW.md)
 - Full project handoff map: [docs/PROJECT_HANDOFF.md](docs/PROJECT_HANDOFF.md)
-- TTL sniffer wiring and host control: [docs/ttl_sniffer_debug.md](docs/ttl_sniffer_debug.md)
 - Test harness modes and usage: [test/README](test/README)
 
 Project policy: every functional change and every test-harness change must include related
@@ -33,14 +32,14 @@ The RTM (Rotary Test Machine) controls a rotary seal test stand capable of execu
 | Subsystem | Description | Key Details |
 |-----------|-------------|-------------|
 | Motion controller | **Teknic ClearCore** | Primary control platform handling motor motion, I/O coordination, and power distribution. User manual: [ClearCore User Manual](https://teknic.com/files/downloads/clearcore_user_manual.pdf). |
-| Protocol / display controller | **Arduino Nano Every** | Manages UI, protocol parsing, and auxiliary I/O at 5 V logic levels. Communicates with ClearCore over TTL serial (COM1 ↔ RX/TX). |
+| Protocol / display controller | **Arduino Nano Every** | Manages UI, protocol parsing, and auxiliary I/O at 5 V logic levels. Communicates with ClearCore over UDP via a W5500 Ethernet module. |
 | Motor | **Teknic ClearPath CPM-SDHP-N0563A-ELN** | Main drive motor for the rotary stand. Documentation: [Model Info](https://teknic.com/model-info/CPM-SDHP-N0563A-ELN_Fan/?model_voltage=230VAC3ph), [Manual](https://teknic.com/files/downloads/ac_clearpath-mc-sd_manual.pdf). |
 | Motor power | **230 VAC, 3φ** | ClearPath motor requires mains-class supply routed through ClearCore-managed safety interlocks. |
 | Display | **Newhaven NHD-0420D3Z-NSW-BBW-V3** | 4×20 character LCD display for local status and prompts. Datasheet: [PDF](https://newhavendisplay.com/content/specs/NHD-0420D3Z-NSW-BBW-V3.pdf). |
 | Temperature sensing | **MAX31855 thermocouple interface** | Two channels populated: sump thermocouple (primary) and seal thermocouple (secondary). |
 | Storage | **microSD card** | Profile storage and optional data logging. Interface level-shifted to 3.3 V using SN74LVC245AN bus transceiver. |
 | Level shifting | **SN74LVC245AN** | Provides 5 V ↔ 3.3 V translation between controllers and SD interface. |
-| Board-to-board link | **TTL serial (present) → RS-485 (planned)** | ClearCore COM1 at TTL levels (9600 baud). RS-485 upgrade planned for production cable lengths (~10 ft). |
+| Board-to-board link | **UDP over Ethernet (W5500)** | Static IPs: ClearCore 10.0.0.10, XPB 10.0.0.11, host PC 10.0.0.100, port 8888. Frames are line-oriented ASCII with an XOR checksum suffix. |
 
 ## Power Distribution
 
@@ -52,8 +51,8 @@ The RTM (Rotary Test Machine) controls a rotary seal test stand capable of execu
 
 ## I/O and Interfaces
 
-* **Serial (controller-to-controller):** ClearCore COM1 ↔ Nano Every UART at TTL levels (9600 baud). A Teensy 4.0 sniffer taps both TX lines for passive capture and provides RUN/RESET/power-relay control via USB.
-* **USB:** Firmware upload path for all three controllers (ClearCore, Nano Every, Teensy sniffer). PlatformIO handles builds and uploads. Development-time serial diagnostics are captured through the sniffer rather than direct USB echo.
+* **Inter-board link:** ClearCore and Nano Every (XPB) talk over UDP via W5500 Ethernet modules. The host PC binds the same UDP port to passively capture all traffic for the test harness.
+* **USB:** Firmware upload path for both controllers (ClearCore, Nano Every). PlatformIO handles builds and uploads.
 * **Thermocouple inputs:** Two MAX31855 channels populated — sump (primary PID feedback) and seal (secondary monitoring).
 * **LCD interface:** Parallel/SPI (per display configuration) from Nano Every to the Newhaven module. Include contrast potentiometer and backlight control guidance in the wiring diagram.
 * **SD card interface:** SPI bus running at 3.3 V logic via the SN74LVC245AN transceiver. Document chip-select usage, any required pull-ups, and SD card insertion/removal guidance for in-field operators.
@@ -78,8 +77,8 @@ Document any resulting differences in motor tuning, acceleration limits, and saf
 
 ## Programming and Debugging
 
-* Firmware is built and uploaded via PlatformIO (`platformio.ini` defines `clearcore`, `XPB`, and `ttl-sniffer` environments). See [docs/PROJECT_HANDOFF.md](docs/PROJECT_HANDOFF.md) for build/upload commands.
-* The Teensy sniffer captures all TTL traffic between CC and XPB passively; USB debug echo is disabled on both production boards to avoid edge-loss issues.
+* Firmware is built and uploaded via PlatformIO (`platformio.ini` defines `clearcore` and `XPB` environments). See [docs/PROJECT_HANDOFF.md](docs/PROJECT_HANDOFF.md) for build/upload commands.
+* Inter-board frames are passively captured by the host PC over UDP; the firmware tees outgoing traffic to the PC IP so a single bind sees both directions.
 * Evaluate adding in-system programming headers (SWD/JTAG) or external debug connectors during the PCB refinement phase to shorten iteration cycles.
 * Capture the exact PlatformIO environment, ClearCore firmware revisions, and bootloader versions used for release builds.
 
@@ -119,7 +118,7 @@ Additional details to capture as the design matures:
 ## Visual Assets & Diagrams
 
 * Compile pinout diagrams covering ClearCore COM ports, Nano Every headers, and the SD card interface once the wiring harnesses are frozen.
-* Add wiring and block diagrams illustrating the TTL-to-RS-485 migration path for service teams.
+* Add wiring and block diagrams for the W5500 Ethernet modules and the host-PC capture topology.
 * Capture enclosure photos that highlight mounting points, emergency stop hardware, and cable routing for technicians and auditors.
 
 This README will be expanded as more hardware information becomes available and the control software evolves.

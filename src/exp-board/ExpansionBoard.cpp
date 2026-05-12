@@ -1,3 +1,22 @@
+
+
+
+// ---------------------------------------------------------------------------
+// Send protocol ready notice to ClearCore (PHASH, steps, loops)
+// ---------------------------------------------------------------------------
+
+
+#include "ExpansionBoard.h"
+#include <stdio.h>
+
+void ExpansionBoard::sendProtoReady_() {
+    if (stepCount_ == 0) return;
+    char line[96];
+    snprintf(line, sizeof(line),
+        "NOTICE;PROTO_READY;NAME=%s;PHASH=%lu;STEPS=%u;LOOPS=%u",
+        protocolName_, (unsigned long)progHash_, (unsigned)stepCount_, (unsigned)loopCount_);
+    comms_.sendMessage(line, MessageType::NORMAL);
+}
 #include "ExpansionBoard.h"
 #include <Arduino.h>
 #include <SPI.h>
@@ -216,12 +235,12 @@ bool ExpansionBoard::begin() {
     dbgln("\nUSB Serial Monitor Connected!");
 
     // UART to ClearCore (not on SPI) – safe to bring up early
-    ttlComms_.begin();
+    comms_.begin();
     delay(200);
     dbgln("Connecting with CC..");
     // Ask CC to suppress stale-STAT E-STOP while XPB finishes boot work.
     // CC may take up to 5s for USB serial wait + boot init, so use 15s.
-    ttlComms_.sendCommand("QUIESCE;SECS=15");
+    comms_.sendCommand("QUIESCE;SECS=15");
 
     // --- SPI bus & SD first (prevents other devices from holding MISO) ---
     spiQuiesceAll_();
@@ -250,14 +269,13 @@ bool ExpansionBoard::begin() {
     // Sensors
     dbg("Initializing MAX31855 sensor - TC1...");
     delay(500); // stabilize
-    if (!tc1_.begin()) { dbgln("ERROR."); while (1) delay(10); }
-    else dbgln("DONE");
-    tc1_.setFaultChecks(MAX31855_FAULT_ALL);
+    tc1_.begin();
+    dbgln("DONE");
 
     dbg("Initializing MAX31855 sensor - TC2...");
     delay(250);
-    if (!tc2_.begin()) { dbgln("ERROR."); }
-    else { dbgln("DONE"); tc2_.setFaultChecks(MAX31855_FAULT_ALL); }
+    tc2_.begin();
+    dbgln("DONE");
 
     // Protocol + Resume (only if SD OK)
     if (sdOk) {
@@ -306,7 +324,7 @@ bool ExpansionBoard::begin() {
             dbgln("[PROTOCOL] Standing by for CC REQ:PROTO");
             protoState_ = ProtoTxState::WaitingReq;
             //isProtoLoadedOntoCC_ = false;
-            
+
             // Decide now whether we should auto-resume AFTER CC requests + receives protocol
             if (haveStoredResume_ && storedPhash_ == progHash_) {
                 // scrub virgin resume as you already do, then:
@@ -322,6 +340,9 @@ bool ExpansionBoard::begin() {
                 dbgln("[RESUME] No valid stored resume or PHASH mismatch");
                 needResumeAfterProto_ = false;
             }
+
+            // Announce protocol to CC for PHASH drift detection
+            sendProtoReady_();
         } else {
             dbgln("No protocol loaded from SD - nothing to upload");
             protoState_ = ProtoTxState::SDFail;
@@ -339,9 +360,8 @@ bool ExpansionBoard::begin() {
     sinceBoot = 0;
     dbgln("Awaiting CC traffic...");
 
-    // DEBUGGING ONLY
-    heater_.begin();                 // maybe only when a test / preheat starts?
-    heater_.setTargetTemp(0);         // stay off until CC sends setpoint
+    // PID lives on CC now; XPB only reports temps and caches setpoint for LCD.
+    lastSpC_ = 0;
 
     publishSwitchState_(true);
 
@@ -382,7 +402,15 @@ void ExpansionBoard::logicalReset() {
     ccEstop_     = false;
     ccEstopCode_ = 0;
 
-    // --- Protocol TX state (keep steps_/stepCount_/protocolName_/progHash_) ---
+    // --- Protocol TX state -------------------------------------------
+    // Resume contract:
+    //   * Cold boot (power loss / first plug-in)  -> RA/RB consulted to
+    //     resume the in-flight step+loop; CSV re-read happens in begin().
+    //   * Manual RST (this path)                  -> RA/RB are wiped by
+    //     the EXEC handler before this function runs, AND we re-read
+    //     /protocol.csv here so an operator who swapped the SD card
+    //     before pressing RST gets the new protocol on the next boot
+    //     cycle without needing to fully power-cycle the rig.
     protoState_    = ProtoTxState::WaitingReq;
     protoSince_    = 0;
     lastProtoRef_  = 0;
@@ -392,19 +420,39 @@ void ExpansionBoard::logicalReset() {
     targetMet_     = false;
     everRan_       = false;
 
+    {
+        // Re-init SD before re-reading: the cold-boot path quiesces SPI
+        // and re-runs SD.begin() first; without this, loadProtocolFromSD_
+        // can fail spuriously after the post-reset SPI churn (LCD, TCs,
+        // Ethernet), surfacing as "Protocol Missing on SD Card".
+        spiQuiesceAll_();
+        const bool sdOk = sdInitWithRetry_(3, 40);
+        const bool reloaded = sdOk && loadProtocolFromSD_("/protocol.csv");
+        successfulProtoLoadFromSD_ = reloaded;
+        if (reloaded) {
+            dbgln("[RESET] Protocol re-loaded from SD");
+            logProtocol_();
+        } else {
+            dbgln(sdOk
+                  ? "[RESET] Protocol RE-LOAD FAILED (CSV parse) — SD recovery loop will retry"
+                  : "[RESET] SD re-init FAILED — SD recovery loop will retry");
+            // stepCount_/protocolName_/progHash_ have been zeroed by the
+            // failed parse; the recovery timer in tick() will retry.
+        }
+    }
+
     // --- Resume tracking (already cleared by EXEC handler, reinforce) ---
     haveStoredResume_ = false;
     storedPhash_      = 0;
     storedStep_       = 0;
     storedLoopCur_    = 0;
     storedLoopTot_    = 0;
-    // successfulProtoLoadFromSD_ stays true — protocol IS in RAM
 
     // --- Preheat / heater ---
     preheatActive_ = false;
     preheatSpC_    = 0;
     preheatTmr_    = 0;
-    heater_.setTargetTemp(0);
+    lastSpC_       = 0;
 
     // --- USB sim ---
     usbSimHold_        = false;
@@ -436,18 +484,17 @@ void ExpansionBoard::logicalReset() {
 
     // --- Timers ---
     heartbeatTmr_ = 0;
-    pidTmr_        = 0;
     sdRecoveryTmr_ = 0;
 
-    // --- TTL comms ---
-    ttlComms_.resetState();
+    // --- Comms ---
+    comms_.resetState();
 
     // --- Post-reset actions ---
     // E-STOP UI mask (same as post-XPB-reset-flag path in begin())
     estopUiMaskUntilMs_ = millis() + 8000UL;
 
     // Tell CC to suppress stale-STAT E-STOP during transition
-    ttlComms_.sendCommand("QUIESCE;SECS=10");
+    comms_.sendCommand("QUIESCE;SECS=10");
 
     // Immediately publish switch state so CC gets fresh RUN/RST
     publishSwitchState_(true);
@@ -462,8 +509,8 @@ void ExpansionBoard::logicalReset() {
  */
 void ExpansionBoard::tick() {
     // ----- Comms housekeeping -----
-    ttlComms_.checkForMessages();
-    ttlComms_.checkRetries();
+    comms_.checkForMessages();
+    comms_.checkRetries();
 
     // Soft "no link yet" note after 10s with no CC traffic at all
     if (!ccAnySeen_ && !warnedNoLink_ && sinceBoot > 10000) {
@@ -514,14 +561,14 @@ void ExpansionBoard::tick() {
                     
                     // PR_* messages go TO ClearCore, not processed locally
                     if (frame.startsWith("PR_")) {
-                        // Send over TTL to ClearCore
-                        ttlComms_.sendCommand(frame.c_str(), MessageType::CRITICAL);
+                        // Send over the wire to ClearCore
+                        comms_.sendCommand(frame.c_str(), MessageType::CRITICAL);
                         dbgkv("[USB->CC] Sending: ", frame);
                     } 
                     // Everything else is injected locally for testing
                     else {
                         usbInjecting_ = true;
-                        ttlComms_.onMessageReceived(frame);   // call directly so we can mark it as injected
+                        comms_.onMessageReceived(frame);   // call directly so we can mark it as injected
                         usbInjecting_ = false;
                         dbgkv("[USB INJECT] ", frame);
                     }
@@ -555,6 +602,31 @@ void ExpansionBoard::tick() {
     runSw_.update(); resetSw_.update();
     if (runSw_.changed() || resetSw_.changed()) publishSwitchState_();
     else if (millis() - lastSwPublishMs_ > 60000UL) publishSwitchState_(true);
+
+    // ----- LINK-LOSS RECOVERY -----
+    // While CC has been silent (>3s, same threshold as the LostComms LCD),
+    // periodically tear down + re-init the W5500/UDP socket. WIZnet sockets
+    // can soft-lock when the L2 link drops underneath an open socket
+    // (router reboot, cable bounce). The reinit is the only way to recover
+    // without power-cycling the board.
+    if (comms_.rxAgeMs() > 3000U) {
+        if (linkRecoveryTmr_ > 5000U) {
+            linkRecoveryTmr_ = 0;
+            dbgln("[LINK] Recovery watchdog -- reinit UDP");
+            comms_.reinitUdp();
+        }
+    } else {
+        linkRecoveryTmr_ = 0;
+    }
+    // Operator escape hatch: pressing RESET while the link is silent forces
+    // an immediate reinit. Useful when the watchdog cadence is too slow or
+    // the operator needs to confirm intent. No effect when link is healthy
+    // (CC handles RESET via the published switch state as normal).
+    if (resetSw_.fell() && comms_.rxAgeMs() > 3000U) {
+        dbgln("[LINK] RESET button -- manual UDP reinit");
+        comms_.reinitUdp();
+        linkRecoveryTmr_ = 0;
+    }
     
     // ----- SENSORS / CONTROL -----
     updateData();  // MAX31855, etc.
@@ -565,24 +637,15 @@ void ExpansionBoard::tick() {
         if (resetUiRemaining_ > 0) --resetUiRemaining_;
     }
 
-    // Heater PID cadence
-    if (pidTmr_ >= 500) {
-        pidTmr_ = 0;
-        int outVal;
-        double pv = isnan(latestSumpC_) ? 0.0 : latestSumpC_; // PID tracks sump temp
-        (void)heater_.compute(pv, outVal);
-    }
-
     // STAT heartbeat to ClearCore
     if (heartbeatTmr_ >= 1000) {
         heartbeatTmr_ = 0;
-        char line[80];
-        const int out = heater_.lastOut();
+        char line[64];
         const int tempC = isnan(latestSumpC_) ? 0 : (int)latestSumpC_;
         const int sealC = isnan(latestSealC_) ? 0 : (int)latestSealC_;
-        snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d;SUMP=%d;SEAL=%d", 
-                 hbSeq_++, out, tempC, sealC);
-        ttlComms_.sendMessage(line, MessageType::INFO);
+        snprintf(line, sizeof(line), "STAT;SEQ=%u;SUMP=%d;SEAL=%d",
+                 hbSeq_++, tempC, sealC);
+        comms_.sendMessage(line, MessageType::INFO);
     }
 
     // --- Non-blocking SD recovery (runs only when boot SD init failed) ---
@@ -663,7 +726,7 @@ void ExpansionBoard::tick() {
     renderUi_(page);
 
     // Final retry pump
-    ttlComms_.checkRetries();
+    comms_.checkRetries();
 
     // expire SIM hold
     if (usbSimHold_ && usbSimHoldUntilMs_ != 0 &&
@@ -679,20 +742,15 @@ void ExpansionBoard::setDataInterval(uint16_t milli_secs) {
 }
 
 /**
- * @brief Read MAX31855 in °C with fault reporting.
- * @copydetails ExpansionBoard::readTC()
+ * @brief Read MAX31855 in °C; NAN on fault.
  */
-double ExpansionBoard::readTC(Adafruit_MAX31855 &TC, const char *label) {
-    double c = TC.readCelsius();
+double ExpansionBoard::readTC(Max31855Min &TC, const char *label) {
+    float c = TC.readCelsius();
     if (isnan(c)) {
-        uint8_t e = TC.readError();
-        dbg(label); dbgln(" fault(s):");
-        if (e & MAX31855_FAULT_OPEN)      dbgln("  • open circuit");
-        if (e & MAX31855_FAULT_SHORT_GND) dbgln("  • short to GND");
-        if (e & MAX31855_FAULT_SHORT_VCC) dbgln("  • short to VCC");
+        dbg(label); dbgln(" fault");
         return NAN;
     }
-    return c;
+    return (double)c;
 }
 
 /**
@@ -793,8 +851,18 @@ void ExpansionBoard::renderNormal_() {
 
     // Line 0: left = protocol name OR runtime; right = CC state
     if (lcdToggle_ || stepTotalMs_ == 0) {
-        // Show protocol name when toggle is active OR no countdown running
-        strncpy(buff, protocolName_, LCDDriver::kNumCols);
+        // Show protocol name when toggle is active OR no countdown running.
+        // Two ways the rig can be "without a runnable protocol":
+        //   (a) XPB never parsed one off the SD card (stepCount_ == 0)
+        //   (b) XPB parsed one but CC hasn't acknowledged receiving it
+        //       this boot (protoState_ != Complete)
+        // Either way the operator should see "NO PROTOCOL" instead of
+        // a stale name that implies a runnable protocol exists.
+        if (stepCount_ == 0 || protoState_ != ProtoTxState::Complete) {
+            strncpy(buff, "NO PROTOCOL", LCDDriver::kNumCols);
+        } else {
+            strncpy(buff, protocolName_, LCDDriver::kNumCols);
+        }
         buff[LCDDriver::kNumCols] = '\0';
     } else {
         char countdown[16];
@@ -828,7 +896,7 @@ void ExpansionBoard::renderNormal_() {
         lcd_.setLineLR(3, left, dwellRight);
     } else {
         // RTM view
-        int sp  = (int)lround(heater_.setpoint());
+        int sp  = (int)lastSpC_;
         if (sp > 0) {
             snprintf(buff, sizeof(buff), "Heat:%3d\xDF""C RPM:%4d", sp, (int)ccRpm_);
         } else {
@@ -930,7 +998,7 @@ void ExpansionBoard::publishSwitchState_(bool force, int ref = -1) {
     } else {
         snprintf(msg, sizeof(msg), "SW;RUN=%d;RST=%d", runActive, resetActive);
     }
-    ttlComms_.sendMessage(msg, MessageType::INFO);   // telemetry / response; no ACK expected
+    comms_.sendMessage(msg, MessageType::INFO);   // telemetry / response; no ACK expected
 
     lastSwPublishMs_ = millis();
 }
@@ -1017,9 +1085,9 @@ bool ExpansionBoard::loadProtocolFromSD_(const char *path) {
 
     // 2) LOOP_COUNT=...
     line = csv.readStringUntil('\n');
-    if (!line.startsWith("LOOP_COUNT=")) { csv.close(); return false; }
+    if (!line.startsWith("LOOP_COUNT=")) { dbgln("CSV: no LOOPS"); csv.close(); return false; }
     String lc = line.substring(strlen("LOOP_COUNT=")); stripCommas(lc);
-    if (!isDigits(lc)) { csv.close(); return false; }
+    if (!isDigits(lc)) { dbgln("CSV: bad LOOPS"); csv.close(); return false; }
     loopCount_ = lc.toInt(); if (loopCount_ == 0) loopCount_ = 1;
 
     // 3) Skip header row
@@ -1122,7 +1190,7 @@ bool ExpansionBoard::uploadProtocolToCC_() {
              (unsigned)stepCount_, 
              (unsigned long)progHash_);
     
-    ttlComms_.sendMessage(msg, MessageType::CRITICAL);
+    comms_.sendMessage(msg, MessageType::CRITICAL);
     protoState_ = ProtoTxState::BegSent;
     protoStepSent_ = 0;
     protoSince_ = 0;
@@ -1132,17 +1200,17 @@ bool ExpansionBoard::uploadProtocolToCC_() {
     // plus CC parse + response time ≈ 150-200ms total.
     {
         const unsigned long deadline = millis() + 500;
-        while (millis() < deadline && ttlComms_.isWaitingForAck()) {
+        while (millis() < deadline && comms_.isWaitingForAck()) {
             delay(10);
-            ttlComms_.checkForMessages();
-            ttlComms_.checkRetries();
+            comms_.checkForMessages();
+            comms_.checkRetries();
         }
     }
 
     // Verify CC acknowledged PR_BEG before flooding PR_DAT chunks
-    if (ttlComms_.isWaitingForAck()) {
+    if (comms_.isWaitingForAck()) {
         dbgln("[PROTO] PR_BEG not ACKed by CC — aborting upload");
-        ttlComms_.cancelPending();   // prevent orphaned retries
+        comms_.cancelPending();   // prevent orphaned retries
         protoState_ = ProtoTxState::WaitingReq;
         return false;
     }
@@ -1158,27 +1226,27 @@ bool ExpansionBoard::uploadProtocolToCC_() {
                 steps_[i].rpmAccel_, 
                 steps_[i].dwellS_,
                 steps_[i].tempC_);
-        ttlComms_.sendMessage(msg, MessageType::IMPORTANT);
+        comms_.sendMessage(msg, MessageType::IMPORTANT);
         protoStepSent_ = i + 1;
         delay(50);
-        ttlComms_.checkForMessages();
+        comms_.checkForMessages();
     }
     
     // 3. Send PR_END  
     snprintf(msg, sizeof(msg), "PR_END;CRC=%lu", (unsigned long)0);
-    ttlComms_.sendMessage(msg, MessageType::CRITICAL);
+    comms_.sendMessage(msg, MessageType::CRITICAL);
     protoState_ = ProtoTxState::EndSent;
     protoSince_ = 0;
     //delay(100);
-    //ttlComms_.checkForMessages();
+    //comms_.checkForMessages();
 
     return true;
 }
 
 /**
- * @brief Handle decoded TTL frames from ClearCore and update owner state.
+ * @brief Handle decoded frames from ClearCore and update owner state.
  */
-void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
+void ExpansionBoard::ExpansionBoardComms::onMessageReceived(const String& data) {
     // === centralize REF detection; use presence, not value ===
     const int refPos = data.indexOf(F(";REF="));              
     const bool hasRef = (refPos > 0);                         
@@ -1227,8 +1295,8 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
 
             // Send current heater state
             char line[64];
-            snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d",
-                    owner_->hbSeq_++, owner_->heater_.lastOut());
+            snprintf(line, sizeof(line), "STAT;SEQ=%u;SUMP=0;SEAL=0",
+                    owner_->hbSeq_++);
             sendMessage(line, MessageType::INFO);
 
             // Publish current switch state
@@ -1550,10 +1618,10 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
         if (!owner_->ccReady_) {
             owner_->ccReady_ = true;
 
-            // send initial STAT so CC immediately sees our OUT (telemetry; no ACK)
+            // send initial STAT so CC immediately sees fresh telemetry (no ACK)
             char line[64];
-            snprintf(line, sizeof(line), "STAT;SEQ=%u;OUT=%03d",
-                     owner_->hbSeq_++, owner_->heater_.lastOut());
+            snprintf(line, sizeof(line), "STAT;SEQ=%u;SUMP=0;SEAL=0",
+                     owner_->hbSeq_++);
             sendMessage(line, MessageType::INFO);
 
             // Offer resume if we truly have one (notice; no ACK)
@@ -1605,33 +1673,14 @@ void ExpansionBoard::ExpansionBoardTTL::onMessageReceived(const String& data) {
 
 /**
  * @brief Count and occasionally warn about bad checksums.
- * @copydetails ExpansionBoard::ExpansionBoardTTL::onBadChecksum()
+ * @copydetails ExpansionBoard::ExpansionBoardComms::onBadChecksum()
  */
-void ExpansionBoard::ExpansionBoardTTL::onBadChecksum(const String&) {
+void ExpansionBoard::ExpansionBoardComms::onBadChecksum(const String&) {
     ++badCrcCount_;
     if (badCrcCount_ % 10 == 1 && owner_) {
-        owner_->dbgln("WARN: TTL bad checksum (rate-limited)");
+        owner_->dbgln("WARN: bad checksum (rate-limited)");
     }
 }
 
-/// HeatingController
-/**
- * @brief Set heater setpoint.
- * @copydetails ExpansionBoard::HeatingController::setTargetTemp()
- */
-void ExpansionBoard::HeatingController::setTargetTemp(double celsius) {
-    sp_ = celsius;
-    active_ = (celsius > 0);
-}
-
-/**
- * @brief Execute one PID compute and output integer result.
- * @copydetails ExpansionBoard::HeatingController::compute()
- */
-bool ExpansionBoard::HeatingController::compute(double processValue, int &outInt) {
-    pv_ = processValue;
-    if (!active_) { out_ = 0; outInt = 0; return true; }
-    bool did = pid_.Compute();
-    if (did) outInt = (int)lround(out_);
-    return did;
-}
+/// HeatingController removed: PID moved to CC. setHeaterTarget() now caches
+/// lastSpC_ for LCD display only.

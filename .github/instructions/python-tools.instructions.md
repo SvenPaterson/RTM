@@ -15,7 +15,6 @@ Applies to host tooling scripts in tools.
 - Keep output deterministic and log-friendly for post-run analysis.
 
 ## Required documentation updates
-- Update [docs/ttl_sniffer_debug.md](../../docs/ttl_sniffer_debug.md) when capture/control script behavior changes.
 - Update [docs/PROJECT_HANDOFF.md](../../docs/PROJECT_HANDOFF.md) when host workflow or operator sequencing changes.
 - Update [tools/requirements.txt](../../tools/requirements.txt) when dependencies change.
 

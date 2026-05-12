@@ -13,7 +13,6 @@ Applies to test harness scripts, wrappers, and test documentation.
 - Preserve compatibility wrappers unless intentionally deprecating with documented migration.
 - Ensure logs capture command invocation, timing assumptions, and final status.
 - Prefer additive scenario coverage over breaking existing operator workflows.
-- Verify the active COM target before running hardware commands; do not assume a previously used port is still the sniffer.
 
 ## Required documentation updates
 - Update [test/README](../../test/README) for any new mode, flag, default, threshold, or workflow change.

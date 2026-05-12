@@ -1,3 +1,6 @@
+// === Includes: project headers ===
+#include "LCDDriver.h"
+
 // ExpansionBoard.h
 #pragma once
 
@@ -8,23 +11,17 @@
 
 // === Includes: third-party libs ===
 #include <elapsedMillis.h>
-#include <PID_v1.h>
-#include <Bounce2.h>
-#include "Adafruit_MAX31855.h"
 
 // === Includes: project headers ===
 #include "LCDDriver.h"
-#include "TTLComms.h"
+#include "Max31855Min.h"
+#include "MiniDebounce.h"
+#include "RtmComms.h"
 #include "RtmNet.h"
 
-#ifndef RTM_LINK_ETHERNET
-#define RTM_LINK_ETHERNET 0
-#endif
 
-#if RTM_LINK_ETHERNET
 #include <Ethernet3.h>
 #include <EthernetUdp3.h>
-#endif
 
 // === MCU-specific (guarded) ===
 #if defined(ARDUINO_ARCH_AVR)
@@ -58,17 +55,21 @@ public:
     void setDataInterval(uint16_t milli_secs);
 
     /**
-     * @brief Set heater setpoint in °C.
+     * @brief Set heater setpoint in °C (display only; PID lives on CC).
      * @param temp Target temperature (°C). 0 disables PID output.
      */
-    void setHeaterTarget(double temp) { heater_.setTargetTemp(temp); }
+    void setHeaterTarget(double temp) { lastSpC_ = (temp > 0) ? (uint16_t)(temp + 0.5) : 0; }
 
-    ExpansionBoard() : ttlComms_(this) {}
+    ExpansionBoard() : comms_(this) {}
 
     /// @brief Reset all runtime state to "just booted, protocol in RAM, waiting for CC."
     void logicalReset();
 
 private:
+    /**
+     * @brief Send protocol ready notice to ClearCore (PHASH, steps, loops).
+     */
+    void sendProtoReady_();
 
     // ---------- Boot & Reset ----------
     bool          resetUiActive_ = false;
@@ -110,6 +111,8 @@ private:
     bool          ccHbSeen_{false};
     uint16_t      hbSeq_ = 0;
 
+    elapsedMillis linkRecoveryTmr_;     // debounces UDP socket reinit attempts
+
     bool  ccAlarmActive_ = false;
     char  ccAlarmMsg_[LCDDriver::kNumCols + 1] = {0};
 
@@ -148,8 +151,8 @@ private:
     static constexpr uint8_t W5500_RST_   = 20;  // A6
 
     // ---------- User Input ----------
-    Bounce runSw_;
-    Bounce resetSw_;
+    MiniDebounce runSw_;
+    MiniDebounce resetSw_;
     /**
      * @brief Publish debounced RUN/RESET switch state to ClearCore.
      * @param force When true, publish regardless of last sent state.
@@ -210,20 +213,17 @@ private:
     uint16_t storedStep_{0}, storedLoopCur_{0}, storedLoopTot_{0};
 
     // ---------- Sensors ----------
-    Adafruit_MAX31855 tc1_{TC1_CS_};
-    Adafruit_MAX31855 tc2_{TC2_CS_};
+    Max31855Min   tc1_{TC1_CS_};
+    Max31855Min   tc2_{TC2_CS_};
     uint16_t      kDataIntervalMs_ = 100;
     elapsedMillis dataTmr_;
     double        latestSealC_ = NAN;
     double        latestSumpC_ = NAN;
 
     /**
-     * @brief Read one MAX31855 in °C and report faults to Serial.
-     * @param TC MAX31855 instance.
-     * @param label Label used in fault prints (e.g., "TC1").
-     * @return Temperature in °C, or NAN on fault.
+     * @brief Read one MAX31855 in °C; NAN on fault.
      */
-    double readTC(Adafruit_MAX31855 &TC, const char *label);
+    double readTC(Max31855Min &TC, const char *label);
 
     /**
      * @brief Update onboard sensor readings on a timed cadence.
@@ -286,7 +286,7 @@ private:
     Step     steps_[kMaxProtocolSteps_];
     uint8_t  stepCount_   {0};
     uint32_t loopCount_   {1};
-    char     protocolName_[21] = "Test Code";
+    char     protocolName_[21] = "NO PROTOCOL";
     uint32_t progHash_    {0};
     uint32_t totalLoops_  {1};
     bool     targetMet_   {false};
@@ -336,41 +336,17 @@ private:
     uint32_t  stepRemainingMs_{0};
     uint32_t  pausedElapsedMs_{0};      //!< dwell elapsed before pause
 
-    // ---------- Comms adapter (Serial1 TTL) ----------
+    // ---------- Comms adapter (UDP over Ethernet) ----------
     /**
-     * @brief TTL serial adapter bound to ExpansionBoard (routes callbacks to owner).
+     * @brief UDP comms adapter bound to ExpansionBoard (routes callbacks to owner).
      */
-    class ExpansionBoardTTL : public TTLComms {
+    class ExpansionBoardComms : public RtmComms {
     public:
         /**
          * @brief Construct with back-reference to owning ExpansionBoard.
          */
-        explicit ExpansionBoardTTL(ExpansionBoard *owner) : owner_(owner) {}
+        explicit ExpansionBoardComms(ExpansionBoard *owner) : owner_(owner) {}
 
-#if !RTM_LINK_ETHERNET
-        /**
-         * @brief Initialize the UART and common base plumbing.
-         * @note Uses Serial1 @ 9600 baud for ClearCore.
-         */
-        void begin() {
-            Serial1.begin(9600);
-            delay(100);
-            // flush garbage
-            while (Serial1.available()) { Serial1.read(); }
-            beginBase();
-        }
-        
-        /** @brief Send raw bytes to the TTL link (Serial1). */
-        void serialSend(const char* data) override {
-            Serial1.print(data);
-        }
-        /** @brief @return true if bytes are available on Serial1 RX. */
-        bool serialAvailable()  override { return Serial1.available(); }
-        /** @brief Read one byte from Serial1 RX. */
-        char serialRead()       override { return Serial1.read(); }
-        /** @brief Peek next byte from Serial1 RX without consuming. */
-        int  serialPeek()       override { return Serial1.peek(); }
-#else  // RTM_LINK_ETHERNET — Phase 4/5 transport: UDP via W5500 (Ethernet3).
         /**
          * @brief Initialize the W5500 + UDP socket and common base plumbing.
          * @note Caller MUST have parked the SPI CS pins (LCD/SD/TCx) HIGH
@@ -379,29 +355,34 @@ private:
          *       ExpansionBoard::begin() handles both via spiQuiesceAll_().
          */
         void begin() {
-            // Hardware reset of W5500 — required every boot. Stale socket
-            // state otherwise causes silent UDP RX failure.
-            pinMode(W5500_RST_, OUTPUT);
-            digitalWrite(W5500_RST_, LOW);
-            delay(10);
-            digitalWrite(W5500_RST_, HIGH);
-            delay(100);
-            pinMode(W5500_CS_, OUTPUT);
-            digitalWrite(W5500_CS_, HIGH);
-
-            // Ethernet3: setCsPin must come BEFORE begin(). Default is 10
-            // which collides with TC2 on this board.
-            Ethernet.setCsPin(W5500_CS_);
-            uint8_t mac[6];
-            for (uint8_t i = 0; i < 6; ++i) mac[i] = RtmNet::kXpbMac[i];
-            IPAddress ip(RtmNet::kXpbIp[0], RtmNet::kXpbIp[1],
-                         RtmNet::kXpbIp[2], RtmNet::kXpbIp[3]);
-            Ethernet.begin(mac, ip);
+            bringUpW5500_();
             udp_.begin(RtmNet::kUdpPort);
             txLen_ = 0;
             rxHead_ = rxTail_ = 0;
+            lastRxMs_ = millis();
             beginBase();
         }
+
+        /**
+         * @brief Tear down + re-init the W5500 and UDP socket.
+         * @details Recovery path for the WIZnet soft-lock failure mode
+         *          observed when the L2 link drops underneath an open
+         *          socket (router reboot, cable bounce). Pulses W5500 RST,
+         *          re-runs Ethernet.begin(mac,ip), reopens udp on kUdpPort.
+         *          Caller is responsible for cadence (don't thrash —
+         *          the watchdog in ExpansionBoard::tick() debounces to 5s).
+         */
+        void reinitUdp() {
+            udp_.stop();
+            bringUpW5500_();
+            udp_.begin(RtmNet::kUdpPort);
+            txLen_ = 0;
+            rxHead_ = rxTail_ = 0;
+            lastRxMs_ = millis();   // arm next stale window from now
+        }
+
+        /** @brief Milliseconds since last successful UDP RX from any peer. */
+        uint32_t rxAgeMs() const { return millis() - lastRxMs_; }
 
         /** @brief Buffer until '\n', then ship one datagram per frame. */
         void serialSend(const char* data) override {
@@ -432,7 +413,6 @@ private:
             if (rxHead_ == rxTail_) return -1;
             return (uint8_t)rxBuf_[rxTail_];
         }
-#endif  // RTM_LINK_ETHERNET
         
         /**
          * @brief Frame handler: process decoded messages from ClearCore.
@@ -450,7 +430,7 @@ private:
     
     protected:
         /**
-         * @brief Optional USB log hook used by TTLComms for RX tracing.
+         * @brief Optional USB log hook used by RtmComms for RX tracing.
          */
         void usbLog(const char *s) override {
 #if XPB_DEBUG
@@ -464,10 +444,13 @@ private:
         ExpansionBoard *owner_{nullptr};
         uint32_t badCrcCount_{0};
 
-#if RTM_LINK_ETHERNET
         EthernetUDP udp_;
         IPAddress   peerIp_{RtmNet::kCcIp[0], RtmNet::kCcIp[1],
                             RtmNet::kCcIp[2], RtmNet::kCcIp[3]};
+#if RTM_TEE_TO_PC
+        IPAddress   pcIp_{RtmNet::kPcIp[0], RtmNet::kPcIp[1],
+                          RtmNet::kPcIp[2], RtmNet::kPcIp[3]};
+#endif
 
         // TX line-buffer: one datagram per framed line. 192 B covers
         // MAX_MSG_LEN (160) plus checksum/REF overhead.
@@ -487,11 +470,20 @@ private:
             udp_.beginPacket(peerIp_, RtmNet::kUdpPort);
             udp_.write((const uint8_t*)txBuf_, txLen_);
             udp_.endPacket();
+#if RTM_TEE_TO_PC
+            // Tee a copy to the PC observer so harness/capture works
+            // through any unmanaged switch (which only forwards unicast
+            // peer-to-peer frames to the addressed port).
+            udp_.beginPacket(pcIp_, RtmNet::kUdpPort);
+            udp_.write((const uint8_t*)txBuf_, txLen_);
+            udp_.endPacket();
+#endif
             txLen_ = 0;
         }
         void pumpRx_() {
             int sz = udp_.parsePacket();
             while (sz > 0) {
+                lastRxMs_ = millis();   // any RX resets stale watchdog
                 while (sz > 0) {
                     uint8_t next = (uint8_t)((rxHead_ + 1) % kRxRingSize);
                     if (next == rxTail_) {
@@ -508,60 +500,37 @@ private:
                 sz = udp_.parsePacket();
             }
         }
-#endif  // RTM_LINK_ETHERNET
 
-    };
-    ExpansionBoardTTL ttlComms_;
-    elapsedMillis heartbeatTmr_;
+        /**
+         * @brief Hardware-reset the W5500 and call Ethernet.begin().
+         * @details Shared by begin() (boot path) and reinitUdp() (recovery
+         *          path). Holds RST low 10ms, high 100ms (per W5500 errata)
+         *          before re-asserting CS pin and re-binding the static IP.
+         */
+        void bringUpW5500_() {
+            pinMode(W5500_RST_, OUTPUT);
+            digitalWrite(W5500_RST_, LOW);
+            delay(10);
+            digitalWrite(W5500_RST_, HIGH);
+            delay(100);
+            pinMode(W5500_CS_, OUTPUT);
+            digitalWrite(W5500_CS_, HIGH);
 
-    // ---------- Heater control ----------
-    /**
-     * @brief Simple PID-based heater controller.
-     * @details Wraps PID_v1 with °C setpoint and 0–150 output range.
-     */
-    class HeatingController {
-    public:
-        /**
-         * @brief Construct with reference to comms (reserved forq future use).
-         */
-        HeatingController(TTLComms &comms) 
-        : comms_(comms), pid_(&pv_, &out_, &sp_, Kp_, Ki_, Kd_, DIRECT) {}
-        
-        /**
-         * @brief Initialize PID (sample time 500ms, automatic mode, output 0–150).
-         */
-        void begin() {
-            pid_.SetSampleTime(500); // 0.5s
-            pid_.SetMode(AUTOMATIC);
-            pid_.SetOutputLimits(0, 150);
+            Ethernet.setCsPin(W5500_CS_);
+            uint8_t mac[6];
+            for (uint8_t i = 0; i < 6; ++i) mac[i] = RtmNet::kXpbMac[i];
+            IPAddress ip(RtmNet::kXpbIp[0], RtmNet::kXpbIp[1],
+                         RtmNet::kXpbIp[2], RtmNet::kXpbIp[3]);
+            Ethernet.begin(mac, ip);
         }
 
-        /**
-         * @brief Set the heater setpoint (°C). Zero disables output.
-         * @param celsius Target temperature in °C.
-         */
-        void setTargetTemp(double celsius);
+        uint32_t lastRxMs_{0};   // millis() of most recent UDP packet RX
 
-        /**
-         * @brief Run one PID compute step.
-         * @param processValue Current PV in °C.
-         * @param outInt Output (0–150) written on successful compute.
-         * @return true if PID computed a new output this call.
-         */
-        bool compute (double processValue, int &outInt);
-
-        int    lastOut()    const { return (int)lround(out_); }
-        double setpoint()   const { return sp_; }
-        double pv()         const { return pv_; }
-    
-    private:
-        TTLComms &comms_;
-        double sp_ = 0, pv_ = 0, out_ = 0;
-        double Kp_ = 60, Ki_ = 40, Kd_ = 25;
-        PID pid_;
-        bool active_ = false;
     };
-    HeatingController heater_{ttlComms_};
-    elapsedMillis pidTmr_;
+    ExpansionBoardComms comms_;
+    elapsedMillis heartbeatTmr_;
+
+    // ---------- Heater (PID lives on CC; XPB caches setpoint for LCD only) ----------
+    uint16_t lastSpC_{0};   // last CMD;SP=... from CC, 0 = heater off
 };
 

@@ -9,6 +9,15 @@
   },
   "version": "1.6.0",
   "frameworks": "arduino",
-  "platforms": "*"
+  "platforms": "*",
+  "build": {
+    "srcFilter": [
+      "+<*>",
+      "-<Dhcp.cpp>",
+      "-<Dns.cpp>",
+      "-<EthernetClient.cpp>",
+      "-<EthernetServer.cpp>"
+    ]
+  }
 }
 

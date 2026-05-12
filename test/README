@@ -1,158 +1,48 @@
+RTM Test Harness
+================
 
-Test Harness Overview
-=====================
+The harness is a small pytest suite that passively listens to the rig's UDP
+traffic on the host PC. There is no firmware actuation surface — RUN/RESET
+must be driven from the front panel, and power is wall-switched.
 
-The scripts in this folder exercise the Teensy-based sniffer rig that proxies
-RUN/RESET control lines and captures telemetry between the ClearCore (CC) and
-Expansion Board (XPB). Use the unified CLI to drive each scenario:
+Layout
+------
+- ``test/rig/parser.py``       — wire frame → typed dataclass
+- ``test/rig/monitor.py``      — UDP listener thread + frame queue
+- ``test/rig/assertions.py``   — ``wait_for`` / ``expect`` helpers
+- ``test/scenarios/``          — pytest scenarios (one file per S-numbered case)
+- ``test/log/<YYYY>/<MM>/<DD>/<HHMMSS>_pytest.log`` — per-session log
 
-	python test/rig_control.py --help
+Network setup
+-------------
+- ClearCore: ``10.0.0.10``
+- XPB:       ``10.0.0.11``
+- Host PC:   ``10.0.0.100``  (must be set on the interface bound to the rig)
+- UDP port:  ``8888``
 
-Common Options
---------------
+Both boards tee every TX to the host PC IP, so a single UDP bind on the PC
+sees both directions through any unmanaged switch.
 
-* ``--port``: Serial port for the Teensy (auto-detected when possible).
-* ``--baud``: USB CDC baud rate (default 460800).
-* ``--no-drop-first-line``: Keep the first decoded frame (dropped by default to avoid startup noise).
+Running
+-------
+From repo root:
 
-COM target verification (required)
-----------------------------------
+::
 
-Before any hardware run, confirm which serial port is the active sniffer. COM numbers can shift after
-re-enumeration, USB hub changes, or power switching.
+    python -m pytest test/scenarios/ -v
 
-Example check:
+Markers:
 
-```
-python -c "from serial.tools import list_ports; [print(f'{p.device} | {p.description} | {p.hwid}') for p in list_ports.comports()]"
-```
+- ``live_rig`` — requires the rig to be powered and on the network.
+- ``manual``   — requires operator action (e.g. press RUN/RESET).
+- ``slow``     — long-running scenarios.
 
-Use the detected sniffer COM port explicitly with ``--port`` for all test commands.
+Skip the manual ones with ``-m "not manual"``.
 
-Available Modes
----------------
-
-* ``reset-pulse``: Assert RESET low for a programmable duration and log the recovery.
-* ``reset-pulse-multi``: Run multiple reset-pulse cycles back-to-back to stress-test SD/protocol reliability across reboots.
-* ``run-pulse``: Toggle RUN low to start a drive cycle and capture CC/XBP heartbeats.
-* ``reset-cancel``: Fire multiple sub-threshold RESET pulses to confirm cancel behavior.
-* ``power --state on|off``: Toggle the sniffer-controlled board power relay for hard reset / cold boot validation.
-* ``protocol-upload``: Walk through SD card staging, protocol ingestion, and automatic runtime validation. Adds preheat margin for heat protocols (``--preheat-s``, default 90 s).
-* ``run-gate``: Automated five-step RUN-gate validation from CODE_REVIEW.md §7 — verifies boot masking, gate release, resume auto-start (RUN ON), manual-reset clears resume, and resume with RUN OFF (AUTOSTART=0).
-* ``run-protocol``: (T9) Run a loaded protocol to completion and log RPM vs step. Reads the protocol CSV to auto-compute RUN pulse duration. When the protocol includes a ``TempC`` column with values > 0, a configurable preheat margin (``--preheat-s``, default 90 s) is added to the RUN hold.
-* ``run-cycle``: (T2) Double-pulse RUN test — IDLE → RUNNING → PAUSED → RUNNING → PAUSED, with automated verdict.
-* ``comms-health``: (T8) Passive comms health check — verify HB and STAT cadence stay within 2 s tolerance.
-* ``cold-boot``: (T1) Power-cycle via sniffer relay, verify full boot sequence (QUIESCE → PROTO_RX=OK → IDLE HBs).
-* ``heat-flags``: (T10) Two-phase heating validation — Phase A confirms no-heat protocol skips PREHEAT and heater stays OFF; Phase B (operator swaps SD to HEAT_TEST.csv) verifies PREHEAT entry, CMD;SP sent, and PID drives output. Interactive (requires SD swap).
-* ``heat-lifecycle``: (T11) Four-phase heater lifecycle validation — Phase A: heater ON during RUNNING (PREHEAT + PID active); Phase B: heater OFF on PAUSED (CMD;SP=0 + OUT=000); Phase C: preheat on resume from pause (re-heat before motion); Phase D: heater OFF on COMPLETED (CMD;SP=0 + OUT=000). Requires heat protocol SD card already loaded (run T10 first or pre-load). Interactive.
-
-Automated Test Suite
---------------------
-
-``run_suite.py`` drives the individual ``rig_control.py`` verbs in sequence,
-collects pass/fail verdicts, and prints a summary table.
-
-Quick mode (default — no power-cycle tests):
-
-```
-python test/run_suite.py --port COM7
-python test/run_suite.py --port COM7 --quick
-```
-
-Quick suite runs: T8 comms-health, T2 run-cycle, T5 reset-cancel.
-
-Full mode (includes power-cycle and cold-boot):
-
-```
-python test/run_suite.py --port COM7 --full
-```
-
-Full suite adds: T4 reset-pulse, T6 reset-pulse-multi (×3), T1 cold-boot.
-
-Manual Tests
-------------
-
-The following tests require operator observation and are not automated:
-
-* **M1 — LCD inspection**: Verify home-screen layout: rows show STATE, TEMP,
-  HEATER, STEP, and TIME values that update when running.
-* **M2 — Soft reset transition**: Trigger a coordinated reset; confirm the LCD
-  transitions directly to the Normal page (state, temp, step) without lingering
-  on intermediate screens.
-* **M3 — E-STOP recovery**: Disconnect/reconnect TTL cable while running; verify
-  XPB detects E-STOP, CC receives CMD;PAUSE, and system pauses gracefully.
-* **M4 — Heater PID**: Start a protocol with a temperature target; verify STAT;OUT
-  values ramp up and stabilize near the setpoint over ~60 s.
-  Semi-automated via ``heat-flags`` verb (T10): Phase A validates no-heat → heater OFF;
-  Phase B validates heat protocol → PREHEAT + CMD;SP + PID output.  Use ``--auto`` to
-  skip the interactive SD-swap prompt when the heat protocol SD is already inserted.
-* **M5 — SD card removal**: Remove the SD card while idle; verify "Protocol Missing
-  on SD" appears and the system rejects RUN attempts.
-* **M6 — Motor movement**: (Deferred) Requires ClearCore motor docs review to
-  design verification protocol.
-* **M7 — Thermal alarm**: Verify over-temperature E-STOP fires when sump exceeds
-  150 °C absolute ceiling or runs away > 35 °C above setpoint for 3 consecutive
-  STAT frames. Cannot safely simulate on live hardware — verify via TTL injection
-  or code inspection.
-
-RUN-gate validation sequence
-----------------------------
-
-Validates the ClearCore RUN-gate firmware by running five sequential checks:
-
-1. **Step 1:** Reset preamble (RESET pulse + power-cycle to clear stale SD resume), then cold-boot
-   with RUN held low — CC must stay IDLE (gate masks the latched line).
-2. **Step 2:** Release RUN, then re-assert — CC transitions IDLE→RUNNING→PAUSED.
-3. **Step 3:** Create a resume snapshot during RUNNING, hard power-cut with RUN held ON — XPB sends
-   ``CMD;RESUME=AUTO;AUTOSTART=1`` and CC accepts it, system enters RUNNING. Post-ACK verification
-   only counts RUNNING/PREHEAT heartbeats after ``ACK;RESUME=OK``, then holds RUNNING for 15 s so
-   the operator can visually confirm the LCD transition.
-4. **Step 4:** Issue RESET pulse to clear resume state, cold-boot with RUN held — verify no
-   ``CMD;RESUME=AUTO`` sent and system stays IDLE.
-5. **Step 5:** Build new resume state, hard power-cut, cold-boot with RUN **OFF** — XPB sends
-   ``CMD;RESUME=AUTO;AUTOSTART=0``, CC loads position but stays IDLE; then toggle RUN ON and
-   verify system enters RUNNING from the resume point (not step 1).
-
-Pass/fail is determined from observable TTL telemetry (``HB;STATE=``, ``CMD;RESUME=``,
-``ACK;RESUME=``, ``NOTICE;PROTO_RX=OK``).  Use ``--skip-step-3`` for a quick steps 1-2 run.
-
-Example:
-
-```
-python test/rig_control.py run-gate --port COM7
-python test/rig_control.py run-gate --port COM7 --skip-step-3
-python test/rig_control.py run-gate --port COM7 --boot-wait-s 40 --hb-window-s 15
-```
-
-Hard reset sequence (power cycle)
----------------------------------
-
-Use the power mode to perform a true board hard reset and capture boot traffic:
-
-```
-python test/rig_control.py power --state off --capture-s 4
-python test/rig_control.py power --state on --capture-s 8 --drop-first-line
-```
-
-Reset-pulse stress test
------------------------
-
-Run multiple consecutive reset-pulse cycles to check whether protocol reload from
-SD survives repeated soft-resets:
-
-```
-python test/rig_control.py reset-pulse-multi --port COM7
-python test/rig_control.py reset-pulse-multi --port COM7 --count 10
-python test/rig_control.py reset-pulse-multi --port COM7 --count 3 --boot-wait-s 40
-```
-
-Summary is printed at the end with pass/fail per iteration. Each iteration checks
-for ``NOTICE;PROTO_RX=OK`` or ``HB;STATE=IDLE`` as evidence of successful protocol
-reload.
-
-For complete project resume context, see [docs/PROJECT_HANDOFF.md](../docs/PROJECT_HANDOFF.md)
-and [CODE_REVIEW.md](../CODE_REVIEW.md).
-
-Legacy entry points such as ``reset_pulse_test.py`` now forward to the CLI above,
-so existing shortcuts continue to work while new scenarios can be added as
-additional subcommands.
+Conventions
+-----------
+- Each test gets a fresh ``Monitor`` (function scope) — frame buffer and clock
+  start at zero per test.
+- Pass/fail is determined from observable UDP telemetry (``HB;STATE=…``,
+  ``STAT;…``, ``NOTICE;…``, ``PR_*``) — never from internal firmware state.
+- On failure, dump the last N frames so the log file is enough to diagnose.

@@ -3,8 +3,7 @@
 
 Bind to the rig UDP port (8888 by default) and log every received
 datagram with a millisecond timestamp, the source IP/port, and the
-payload (stripped of trailing newline, ASCII-escaped). Replaces the
-Teensy TTL sniffer once Phase 5 cuts the production link over to UDP.
+payload (stripped of trailing newline, ASCII-escaped).
 
 Output is always streamed to stdout. With --log <path> a CSV is also
 appended:
