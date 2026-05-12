@@ -78,7 +78,7 @@ Document any resulting differences in motor tuning, acceleration limits, and saf
 
 ## Programming and Debugging
 
-* Firmware is built and uploaded via PlatformIO (`platformio.ini` defines `clearcore`, `exp-board`, and `ttl-sniffer` environments). See [docs/PROJECT_HANDOFF.md](docs/PROJECT_HANDOFF.md) for build/upload commands.
+* Firmware is built and uploaded via PlatformIO (`platformio.ini` defines `clearcore`, `XPB`, and `ttl-sniffer` environments). See [docs/PROJECT_HANDOFF.md](docs/PROJECT_HANDOFF.md) for build/upload commands.
 * The Teensy sniffer captures all TTL traffic between CC and XPB passively; USB debug echo is disabled on both production boards to avoid edge-loss issues.
 * Evaluate adding in-system programming headers (SWD/JTAG) or external debug connectors during the PCB refinement phase to shorten iteration cycles.
 * Capture the exact PlatformIO environment, ClearCore firmware revisions, and bootloader versions used for release builds.

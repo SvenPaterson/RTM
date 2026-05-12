@@ -50,7 +50,6 @@ bool ClearCoreRTM::begin() {
 
     /* TTL Comms */
     ttlComms_.begin();
-    ttlComms_.setRxUsbLogging(false, "XPB");  // disabled: sniffer captures TTL traffic
     dbgln("TTL Ready");
 
     // listen for XPB ready

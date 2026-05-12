@@ -217,7 +217,6 @@ bool ExpansionBoard::begin() {
 
     // UART to ClearCore (not on SPI) – safe to bring up early
     ttlComms_.begin();
-    ttlComms_.setRxUsbLogging(false, "CC"); // disabled: sniffer captures TTL traffic
     delay(200);
     dbgln("Connecting with CC..");
     // Ask CC to suppress stale-STAT E-STOP while XPB finishes boot work.
@@ -489,15 +488,7 @@ void ExpansionBoard::tick() {
             // Got a full line
             usbLine.trim();
             if (usbLine.length()) {
-                if (usbLine.equalsIgnoreCase("LOG=0")) {
-                    ttlComms_.setRxUsbLogging(false, "CC");
-                    dbg("[USB] RX log OFF");
-                }
-                else if (usbLine.equalsIgnoreCase("LOG=1")) {
-                    ttlComms_.setRxUsbLogging(true, "CC");
-                    dbg("[USB] RX log ON");
-                }
-                else if (usbLine.startsWith("SIM=")) {
+                if (usbLine.startsWith("SIM=")) {
                     String arg = usbLine.substring(4); arg.trim();
                     if (arg.equalsIgnoreCase("0") || arg.equalsIgnoreCase("OFF")) {
                         usbSimHold_ = false;

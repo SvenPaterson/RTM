@@ -27,7 +27,16 @@
 #include "ClearCoreElapsedMillis.h"
 #include "SPI.h"
 #include "TTLComms.h"
+#include "RtmNet.h"
 #include <type_traits>
+
+#ifndef RTM_LINK_ETHERNET
+#define RTM_LINK_ETHERNET 0
+#endif
+
+#if RTM_LINK_ETHERNET
+#include <Ethernet.h>
+#endif
 
 // ClearCore (and other Arduino cores) define min/max macros that clash with
 // <algorithm> templates in <array> on GCC. Undef them before any STL headers
@@ -250,6 +259,7 @@ private:
     class ClearCoreTTL : public TTLComms {
     public:
         explicit ClearCoreTTL(ClearCoreRTM *owner) : owner_(owner) {}
+#if !RTM_LINK_ETHERNET
         void begin() {
             ConnectorCOM1.Mode(Connector::TTL);
             ConnectorCOM1.Speed(9600);
@@ -278,6 +288,110 @@ private:
         int serialPeek() override {
             return ConnectorCOM1.CharPeek();
         }
+#else  // RTM_LINK_ETHERNET — Phase 4/5 transport: UDP via built-in Teknic Ethernet.
+        // ----- UDP byte-transport bridging TTLComms.serialSend/Available/Read/Peek -----
+        // TX: buffer characters until '\n' (or near overflow), then ship as
+        //     one datagram to peer IP:port — preserves TTLComms's frame
+        //     boundaries.
+        // RX: pumpRx_() drains udp.parsePacket()/read() into a ring buffer
+        //     consumed by serialAvailable/Read/Peek. Caller invokes
+        //     pumpRx_() once per tick alongside checkForMessages().
+        void begin() {
+            // Static IP setup. Teknic Ethernet stack is built-in; no CS pin
+            // dance needed (unlike the W5500 on the XPB).
+            uint8_t mac[6];
+            for (uint8_t i = 0; i < 6; ++i) mac[i] = RtmNet::kCcMac[i];
+            IPAddress ip(RtmNet::kCcIp[0], RtmNet::kCcIp[1],
+                         RtmNet::kCcIp[2], RtmNet::kCcIp[3]);
+            Ethernet.begin(mac, ip);
+            udp_.begin(RtmNet::kUdpPort);
+            txLen_ = 0;
+            rxHead_ = rxTail_ = 0;
+            beginBase();
+        }
+
+        void serialSend(const char* data) override {
+            while (*data) {
+                if (txLen_ >= sizeof(txBuf_)) {
+                    flushTx_();
+                }
+                txBuf_[txLen_++] = *data;
+                if (*data == '\n') {
+                    flushTx_();
+                }
+                ++data;
+            }
+        }
+
+        bool serialAvailable() override {
+            pumpRx_();
+            return rxHead_ != rxTail_;
+        }
+
+        char serialRead() override {
+            pumpRx_();
+            if (rxHead_ == rxTail_) return -1;
+            char c = rxBuf_[rxTail_];
+            rxTail_ = (rxTail_ + 1) % kRxRingSize;
+            return c;
+        }
+
+        int serialPeek() override {
+            pumpRx_();
+            if (rxHead_ == rxTail_) return -1;
+            return (uint8_t)rxBuf_[rxTail_];
+        }
+
+    private:
+        EthernetUDP udp_;
+        IPAddress   peerIp_{RtmNet::kXpbIp[0], RtmNet::kXpbIp[1],
+                            RtmNet::kXpbIp[2], RtmNet::kXpbIp[3]};
+
+        // TX line-buffer: one datagram per framed line. 192 bytes covers
+        // MAX_MSG_LEN (160) plus checksum/REF overhead.
+        static constexpr size_t kTxBufSize = 192;
+        char     txBuf_[kTxBufSize]{};
+        uint16_t txLen_{0};
+
+        // RX ring buffer fed by pumpRx_(). Power-of-two size for cheap mod.
+        static constexpr size_t kRxRingSize = 256;
+        char     rxBuf_[kRxRingSize]{};
+        uint16_t rxHead_{0};  // write index
+        uint16_t rxTail_{0};  // read index
+
+        void flushTx_() {
+            if (txLen_ == 0) return;
+            udp_.beginPacket(peerIp_, RtmNet::kUdpPort);
+            udp_.write((const uint8_t*)txBuf_, txLen_);
+            udp_.endPacket();
+            txLen_ = 0;
+        }
+
+        void pumpRx_() {
+            int sz = udp_.parsePacket();
+            while (sz > 0) {
+                // Read up to sz bytes into the ring. Drop on overflow rather
+                // than block — framing layer handles dropped frames via
+                // ACK/REF retries.
+                while (sz > 0) {
+                    uint16_t next = (rxHead_ + 1) % kRxRingSize;
+                    if (next == rxTail_) {
+                        // overflow — discard remaining datagram
+                        while (sz-- > 0) (void)udp_.read();
+                        break;
+                    }
+                    int b = udp_.read();
+                    if (b < 0) break;
+                    rxBuf_[rxHead_] = (char)b;
+                    rxHead_ = next;
+                    --sz;
+                }
+                sz = udp_.parsePacket();
+            }
+        }
+
+    public:
+#endif  // RTM_LINK_ETHERNET
         
         // Handle received messages
         /* void onMessageReceived(const String& data) override {

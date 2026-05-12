@@ -2,6 +2,12 @@
 #include "TTLComms.h"
 #include <ctype.h>
 
+// Verbose [TX]/[RX] USB echo paths. Off by default — they only matter when
+// stepping through framing problems on a USB-attached host.
+#ifndef TTL_VERBOSE_LOG
+#define TTL_VERBOSE_LOG 0
+#endif
+
 #define XPB_TX_ECHO_USB 1
 
 // 1) Command sender: always carries REF and expects an ACK/response
@@ -37,19 +43,16 @@ void TTLComms::sendCommand(const char* base, MessageType type) {
     const uint8_t checksum = this->calculateXOR(payload);
     snprintf(msg, sizeof(msg), "%s:%02X\n", payload, checksum);
 
-    // TX echo
-    if (logRx_) {
-        char line[96];
-        if (rxTag_) snprintf(line, sizeof(line), "[TX %s] %s", rxTag_, msg);
-        else        snprintf(line, sizeof(line), "[TX] %s", msg);
-        usbLog(line);
-    }
-
     // Send
     serialSend(msg);
 
     // Arm pending (ACK expected)
-    pendingMsg_    = { String(msg), millis(), 0, maxRetries, true, ref };
+    pendingMsg_.sentTime   = millis();
+    pendingMsg_.retryCount = 0;
+    pendingMsg_.maxRetries = maxRetries;
+    pendingMsg_.needsAck   = true;
+    pendingMsg_.ref        = ref;
+    snprintf(pendingMsg_.encoded, sizeof(pendingMsg_.encoded), "%s", msg);
     waitingForAck_ = true;
     ackTimeoutMs_  = toMs;
     pendingRef_    = ref;
@@ -92,20 +95,17 @@ void TTLComms::sendMessage(const char* data, MessageType type) {
     const uint8_t checksum = this->calculateXOR(payload);
     snprintf(msg, sizeof(msg), "%s:%02X\n", payload, checksum);
 
-    // TX echo
-    if (logRx_) {
-        char line[96];
-        if (rxTag_) snprintf(line, sizeof(line), "[TX %s] %s", rxTag_, msg);
-        else        snprintf(line, sizeof(line), "[TX] %s", msg);
-        usbLog(line);
-    }
-
     // Send
     serialSend(msg);
 
     // Only arm pending for ACK classes
     if (wantsAck) {
-        pendingMsg_    = { String(msg), millis(), 0, maxRetries, true, usedRef };
+        pendingMsg_.sentTime   = millis();
+        pendingMsg_.retryCount = 0;
+        pendingMsg_.maxRetries = maxRetries;
+        pendingMsg_.needsAck   = true;
+        pendingMsg_.ref        = usedRef;
+        snprintf(pendingMsg_.encoded, sizeof(pendingMsg_.encoded), "%s", msg);
         waitingForAck_ = true;
         ackTimeoutMs_  = toMs;
         pendingRef_    = usedRef;
@@ -126,7 +126,7 @@ void TTLComms::checkRetries() {
             pendingMsg_.retryCount++;
             pendingMsg_.sentTime = millis();
             
-            serialSend(pendingMsg_.encoded.c_str());
+            serialSend(pendingMsg_.encoded);
         }
         else {
             waitingForAck_ = false;
@@ -140,17 +140,27 @@ void TTLComms::checkForMessages() {
         if (c == '\r') continue;
 
         if (c == '\n') {
-            if (validateMessage(incomingMsg_)) {
-                processMessage(incomingMsg_);
-            } else { // This is a bandaid because we can't figure out why two lines are glued on boot...
-                // Attempt to salvage two glued frames like "...:4FACK;...:63"
-                if (!trySplitGluedFrames_(incomingMsg_)) {
-                    onBadChecksum(incomingMsg_);  // existing rate-limited warning
+            // Null-terminate the scratch buffer and wrap as a String only
+            // for the existing String-based validate/process path. The
+            // String wrap copies once; no heap thrash on per-byte append.
+            incomingBuf_[incomingLen_] = '\0';
+            String line = incomingBuf_;
+            if (validateMessage(line)) {
+                processMessage(line);
+            } else {
+#if !RTM_LINK_ETHERNET
+                // TTL-only: attempt to salvage two glued frames like
+                // "...:4FACK;...:63" — boot-time artifact of Serial1 timing.
+                if (!trySplitGluedFrames_(line)) {
+                    onBadChecksum(line);
                 }
+#else
+                onBadChecksum(line);
+#endif
             }
-            incomingMsg_ = "";
-        } else if (incomingMsg_.length() < MAX_MSG_LEN) {
-            incomingMsg_ += c;
+            incomingLen_ = 0;
+        } else if (incomingLen_ < MAX_MSG_LEN) {
+            incomingBuf_[incomingLen_++] = c;
         }
     }
 }
@@ -265,14 +275,6 @@ void TTLComms::processMessage(const String& msg) {
         return;
     }
 
-    // Optional RX log on the receiver’s USB
-    if (logRx_) {
-        char line[96];
-        if (rxTag_) snprintf(line, sizeof(line), "[RX %s] %s", rxTag_, data.c_str());
-        else        snprintf(line, sizeof(line), "[RX] %s", data.c_str());
-        usbLog(line);
-    }
-
     // --- Correlate replies to pending command (explicit ACK or data reply) ---
     if (waitingForAck_) {
         // 1) Explicit ACK;…;REF=n
@@ -330,13 +332,10 @@ double TTLComms::kvGetDouble(const String &frame, const char *key, double defVal
         return s.length() ? s.toFloat() : defVal;
     }
 
-void TTLComms::setRxUsbLogging(bool enabled, const char *peerTag) {
-    logRx_ = enabled;
-    rxTag_ = peerTag;
-}
-
 // Try to split two glued frames like "...:4FACK;QUIESCE;...:63"
 // Returns true if it split and dispatched both parts.
+// TTL-only: UDP datagrams have hard frame boundaries (one packet per frame).
+#if !RTM_LINK_ETHERNET
 bool TTLComms::trySplitGluedFrames_(const String &line) {
     const int n = line.length();
     for (int i = 0; i + 3 < n; ++i) {
@@ -373,3 +372,4 @@ bool TTLComms::trySplitGluedFrames_(const String &line) {
     }
     return false;
 }
+#endif  // !RTM_LINK_ETHERNET

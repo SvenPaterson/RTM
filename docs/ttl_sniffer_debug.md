@@ -114,7 +114,7 @@ a deterministic log you can diff against the post-fix run.
    // Example: add T=<stepRemainingSeconds> to the STAT line
    dbgkv("T", stepRemainingMs_ / 1000);
    ```
-3. **Build & deploy** — `pio run -e exp-board` (or whichever target), then flash via
+3. **Build & deploy** — `pio run -e XPB` (or whichever target), then flash via
    the Upload task or manual upload.  Do **not** remove any existing fields; only add.
 4. **Capture** — run a scripted scenario that exercises the suspect transition:
    ```

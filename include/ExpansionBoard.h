@@ -15,6 +15,16 @@
 // === Includes: project headers ===
 #include "LCDDriver.h"
 #include "TTLComms.h"
+#include "RtmNet.h"
+
+#ifndef RTM_LINK_ETHERNET
+#define RTM_LINK_ETHERNET 0
+#endif
+
+#if RTM_LINK_ETHERNET
+#include <Ethernet3.h>
+#include <EthernetUdp3.h>
+#endif
 
 // === MCU-specific (guarded) ===
 #if defined(ARDUINO_ARCH_AVR)
@@ -132,6 +142,10 @@ private:
     static constexpr uint8_t RUN_SW_PIN_  = 2;
     static constexpr uint8_t RESET_SW_PIN_= 3;
     static constexpr uint8_t SD_CS_       = 4;
+    // W5500 (only used when RTM_LINK_ETHERNET=1, but constants are
+    // always defined so spiQuiesceAll_() can park them unconditionally).
+    static constexpr uint8_t W5500_CS_    = 21;  // A7
+    static constexpr uint8_t W5500_RST_   = 20;  // A6
 
     // ---------- User Input ----------
     Bounce runSw_;
@@ -333,6 +347,7 @@ private:
          */
         explicit ExpansionBoardTTL(ExpansionBoard *owner) : owner_(owner) {}
 
+#if !RTM_LINK_ETHERNET
         /**
          * @brief Initialize the UART and common base plumbing.
          * @note Uses Serial1 @ 9600 baud for ClearCore.
@@ -355,6 +370,69 @@ private:
         char serialRead()       override { return Serial1.read(); }
         /** @brief Peek next byte from Serial1 RX without consuming. */
         int  serialPeek()       override { return Serial1.peek(); }
+#else  // RTM_LINK_ETHERNET — Phase 4/5 transport: UDP via W5500 (Ethernet3).
+        /**
+         * @brief Initialize the W5500 + UDP socket and common base plumbing.
+         * @note Caller MUST have parked the SPI CS pins (LCD/SD/TCx) HIGH
+         *       BEFORE invoking begin(), and MUST have already pulsed the
+         *       W5500 RST low/high for hardware reset (per Phase 2 lessons).
+         *       ExpansionBoard::begin() handles both via spiQuiesceAll_().
+         */
+        void begin() {
+            // Hardware reset of W5500 — required every boot. Stale socket
+            // state otherwise causes silent UDP RX failure.
+            pinMode(W5500_RST_, OUTPUT);
+            digitalWrite(W5500_RST_, LOW);
+            delay(10);
+            digitalWrite(W5500_RST_, HIGH);
+            delay(100);
+            pinMode(W5500_CS_, OUTPUT);
+            digitalWrite(W5500_CS_, HIGH);
+
+            // Ethernet3: setCsPin must come BEFORE begin(). Default is 10
+            // which collides with TC2 on this board.
+            Ethernet.setCsPin(W5500_CS_);
+            uint8_t mac[6];
+            for (uint8_t i = 0; i < 6; ++i) mac[i] = RtmNet::kXpbMac[i];
+            IPAddress ip(RtmNet::kXpbIp[0], RtmNet::kXpbIp[1],
+                         RtmNet::kXpbIp[2], RtmNet::kXpbIp[3]);
+            Ethernet.begin(mac, ip);
+            udp_.begin(RtmNet::kUdpPort);
+            txLen_ = 0;
+            rxHead_ = rxTail_ = 0;
+            beginBase();
+        }
+
+        /** @brief Buffer until '\n', then ship one datagram per frame. */
+        void serialSend(const char* data) override {
+            while (*data) {
+                if (txLen_ >= sizeof(txBuf_)) {
+                    flushTx_();
+                }
+                txBuf_[txLen_++] = *data;
+                if (*data == '\n') {
+                    flushTx_();
+                }
+                ++data;
+            }
+        }
+        bool serialAvailable() override {
+            pumpRx_();
+            return rxHead_ != rxTail_;
+        }
+        char serialRead() override {
+            pumpRx_();
+            if (rxHead_ == rxTail_) return -1;
+            char c = rxBuf_[rxTail_];
+            rxTail_ = (uint8_t)((rxTail_ + 1) % kRxRingSize);
+            return c;
+        }
+        int serialPeek() override {
+            pumpRx_();
+            if (rxHead_ == rxTail_) return -1;
+            return (uint8_t)rxBuf_[rxTail_];
+        }
+#endif  // RTM_LINK_ETHERNET
         
         /**
          * @brief Frame handler: process decoded messages from ClearCore.
@@ -385,6 +463,52 @@ private:
     private:
         ExpansionBoard *owner_{nullptr};
         uint32_t badCrcCount_{0};
+
+#if RTM_LINK_ETHERNET
+        EthernetUDP udp_;
+        IPAddress   peerIp_{RtmNet::kCcIp[0], RtmNet::kCcIp[1],
+                            RtmNet::kCcIp[2], RtmNet::kCcIp[3]};
+
+        // TX line-buffer: one datagram per framed line. 192 B covers
+        // MAX_MSG_LEN (160) plus checksum/REF overhead.
+        static constexpr uint8_t kTxBufSize = 192;
+        char     txBuf_[kTxBufSize]{};
+        uint8_t  txLen_{0};
+
+        // RX ring buffer fed by pumpRx_(). 256 covers the worst-case
+        // back-to-back PR_DAT proto frames before the framing layer drains.
+        static constexpr uint8_t kRxRingSize = 255;  // <256 keeps uint8_t indices safe
+        char     rxBuf_[kRxRingSize]{};
+        uint8_t  rxHead_{0};
+        uint8_t  rxTail_{0};
+
+        void flushTx_() {
+            if (txLen_ == 0) return;
+            udp_.beginPacket(peerIp_, RtmNet::kUdpPort);
+            udp_.write((const uint8_t*)txBuf_, txLen_);
+            udp_.endPacket();
+            txLen_ = 0;
+        }
+        void pumpRx_() {
+            int sz = udp_.parsePacket();
+            while (sz > 0) {
+                while (sz > 0) {
+                    uint8_t next = (uint8_t)((rxHead_ + 1) % kRxRingSize);
+                    if (next == rxTail_) {
+                        // overflow — discard remaining datagram
+                        while (sz-- > 0) (void)udp_.read();
+                        break;
+                    }
+                    int b = udp_.read();
+                    if (b < 0) break;
+                    rxBuf_[rxHead_] = (char)b;
+                    rxHead_ = next;
+                    --sz;
+                }
+                sz = udp_.parsePacket();
+            }
+        }
+#endif  // RTM_LINK_ETHERNET
 
     };
     ExpansionBoardTTL ttlComms_;

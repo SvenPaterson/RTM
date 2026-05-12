@@ -52,7 +52,7 @@ Run from repository root. COM ports: COM8 = ClearCore, COM9 = Expansion Board (N
 
 ```bash
 platformio run -e clearcore -t upload          # uploads to COM8
-platformio run -e exp-board -t upload          # uploads to COM9
+platformio run -e XPB -t upload                # uploads to COM9
 platformio run -e ttl-sniffer -t upload
 ```
 

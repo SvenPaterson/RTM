@@ -4,7 +4,10 @@
 #include <Arduino.h>
 
 struct PendingMessage {
-    String      encoded; // full "DATA:CHK\n"
+    // Encoded "DATA:CHK\n" frame, NUL-terminated. Fixed buffer avoids the
+    // dynamic String allocation that previously dominated AVR flash cost.
+    // Sized to MAX_MSG_LEN (160) + ':' + 2 hex + '\n' + NUL = 165, rounded.
+    char        encoded[168];
     uint32_t    sentTime;
     uint8_t     retryCount;
     uint8_t     maxRetries;
@@ -28,14 +31,13 @@ public:
     virtual int  serialPeek() = 0;
     
     // Common functionality
-    void beginBase() { incomingMsg_.reserve(MAX_MSG_LEN + 8); } // preallocate memory
+    void beginBase() { incomingLen_ = 0; }
     void sendMessage(const char* data, bool needsAck = false);
     void sendMessage(const char* data, MessageType type);
     // Convenience for commands that should carry a REF and expect an ACK/response
     void sendCommand(const char* base, MessageType type = MessageType::IMPORTANT);
     void checkRetries();
     void checkForMessages();
-    void setRxUsbLogging(bool enabled, const char *peerTag = nullptr);
     bool isWaitingForAck() const { return waitingForAck_; }
     /// Cancel in-flight pending message (stops retries without flushing RX)
     void cancelPending() { pendingMsg_ = {}; waitingForAck_ = false; pendingRef_ = 0; }
@@ -54,7 +56,7 @@ public:
         waitingForAck_ = false;
         nextRef_       = 1;
         pendingRef_    = 0;
-        incomingMsg_   = "";
+        incomingLen_   = 0;
         // Flush hardware RX buffer
         while (serialAvailable()) { (void)serialRead(); }
     }
@@ -74,8 +76,16 @@ private:
     static constexpr uint32_t ACK_TIMEOUT_MS = 500;
     static constexpr uint8_t MAX_RETRIES = 5;
 
+#ifndef RTM_LINK_ETHERNET
+#define RTM_LINK_ETHERNET 0
+#endif
+#if !RTM_LINK_ETHERNET
+    // TTL-only: salvage two frames glued during boot (timing artifact of
+    // the Serial1 link). UDP datagrams have hard frame boundaries so this
+    // path is dead under RTM_LINK_ETHERNET=1.
     bool trySplitGluedFrames_(const String &line);
-    
+#endif
+
     PendingMessage pendingMsg_;
     bool waitingForAck_ = false;
     uint16_t ackTimeoutMs_ = ACK_TIMEOUT_MS;
@@ -83,8 +93,8 @@ private:
     uint16_t pendingRef_ = 0;   // REF of the in-flight cmd (if any)
 
     static constexpr size_t MAX_MSG_LEN = 160;
-    String incomingMsg_ = ""; 
-
-    bool        logRx_ = false;
-    const char *rxTag_ = nullptr;
+    // Fixed RX scratch buffer (replaces String to drop heap traffic in the
+    // hot path; the framing layer is line-bounded at MAX_MSG_LEN anyway).
+    char     incomingBuf_[MAX_MSG_LEN + 1] = {0};
+    uint16_t incomingLen_ = 0;
 };
