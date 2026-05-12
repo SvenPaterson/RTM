@@ -330,10 +330,30 @@ void DisplayController::computeHeaterOutput(const unsigned int& interval) {
     else {
         armHeaters();
         double deltaT = _sump_temp - _setpoint_temp;
-        
-        if (_PIDTimer > 3600000 && deltaT < -5) {
-            errorScreen("Sump temp not rising, check heaters");
+
+        // Rate-of-progress watchdog: only meaningful while we are still
+        // climbing toward setpoint. Once within _HEAT_PROGRESS_BAND of
+        // setpoint we are regulating, not heating up, so disable the check.
+        if (deltaT < -_HEAT_PROGRESS_BAND) {
+            if (!_heatProgressActive) {
+                _heatProgressActive = true;
+                _heatProgressBaseline = _sump_temp;
+                _heatProgressTimer = 0;
+            }
+            else if (_sump_temp >= _heatProgressBaseline + _HEAT_PROGRESS_MIN_RISE) {
+                // Made progress this window -> rebase and restart the clock.
+                _heatProgressBaseline = _sump_temp;
+                _heatProgressTimer = 0;
+            }
+            else if (_heatProgressTimer > _HEAT_PROGRESS_WINDOW_MS) {
+                errorScreen("Sump temp not rising, check heaters");
+            }
         }
+        else {
+            // At/near setpoint: stand the watchdog down.
+            _heatProgressActive = false;
+        }
+
         if (deltaT > _deltaT_safety) {
             errorScreen("Thermal runaway!");
         }
@@ -351,10 +371,10 @@ void DisplayController::turnOffHeaters() {
         digitalWrite(_heat_output_pin, LOW);
         digitalWrite(_heat_safety_pin, LOW);
         _areHeatersArmed = false;
-        // Reset so the "sump temp not rising" watchdog measures elapsed
-        // heating time, not time since the last PID compute (which would
-        // free-run during unheated dwells and falsely trip on resume).
         _PIDTimer = 0;
+        // Stand down the rate-of-progress watchdog while unheated; it will
+        // be re-baselined the next time heaters are commanded on.
+        _heatProgressActive = false;
     } 
 }
 
@@ -362,6 +382,10 @@ void DisplayController::armHeaters() {
     if (!_areHeatersArmed) {
         _areHeatersArmed = true;
         digitalWrite(_heat_safety_pin, HIGH);
+        // Force the rate-of-progress watchdog to re-baseline on the next
+        // computeHeaterOutput() tick, so the window measures heating that
+        // happened *after* heaters were re-armed.
+        _heatProgressActive = false;
     }
 }
 

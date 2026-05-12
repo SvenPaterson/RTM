@@ -275,6 +275,15 @@ class DisplayController {
         double _cw_torque, _ccw_torque;
 
         elapsedMillis _PIDTimer, _heatSafetyTimer;
+        elapsedMillis _heatProgressTimer;
+        double _heatProgressBaseline = 0.0;
+        bool _heatProgressActive = false;
+        // Rate-of-progress watchdog: while heaters are armed and sump is
+        // below setpoint by more than _HEAT_PROGRESS_BAND, require at least
+        // _HEAT_PROGRESS_MIN_RISE of rise per _HEAT_PROGRESS_WINDOW_MS.
+        static constexpr uint32_t _HEAT_PROGRESS_WINDOW_MS = 600000UL; // 10 min
+        static constexpr double   _HEAT_PROGRESS_MIN_RISE = 1.0;       // deg (F or C)
+        static constexpr double   _HEAT_PROGRESS_BAND     = 2.0;       // deg below setpoint
         uint8_t _heat_safety_pin, _heat_output_pin;
         uint8_t _heat_bus_pin;
         double _setpoint_temp, _input, _output;
