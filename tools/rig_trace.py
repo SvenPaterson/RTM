@@ -5,7 +5,7 @@ Merges three event sources into a single timestamped stream:
 
     [CC ]  ClearCore USB serial (default COM8)
     [XPB]  Expansion-board USB serial (default COM9, optional)
-    [NET]  UDP frames on port 8888 (CC<->XPB<->PC heartbeat/protocol)
+    [NET]  UDP observer frames on port 8889 (CC<->XPB heartbeat/protocol tees)
 
 All lines share one monotonically-increasing relative timestamp so you
 can see exactly when CC's dbgln() output happened relative to the HBs
@@ -29,7 +29,8 @@ Notes:
 - Source tags are fixed-width so columns line up nicely:
       [+12345 ms] [CC ] STATE -> RUNNING
       [+12347 ms] [NET] CC->XPB  10.0.0.10  HB;SEQ=42;...
-- This tool is read-only. It does not transmit anything on the wire.
+- This tool sends only the lightweight PC observer beacon needed to enable
+    firmware debug teeing; it does not send control commands.
 """
 
 from __future__ import annotations
@@ -56,12 +57,16 @@ HOSTS = {
     "10.0.0.11": "XPB",
     "10.0.0.100": "PC",
 }
+OBSERVER_TARGETS = ("10.0.0.10", "10.0.0.11")
+OBSERVER_BEACON = b"OBS;PC=1\n"
 
 DEFAULT_CC_PORT = "COM8"
 DEFAULT_CC_BAUD = 9600
 DEFAULT_XPB_PORT = None  # opt-in, since it conflicts with the uploader
 DEFAULT_XPB_BAUD = 115200
-DEFAULT_UDP_PORT = 8888
+DEFAULT_FIRMWARE_PORT = 8888
+DEFAULT_UDP_PORT = 8889
+DEFAULT_OBSERVER_INTERVAL_S = 1.0
 
 
 # ----- helpers --------------------------------------------------------------
@@ -142,9 +147,11 @@ def serial_reader(
 
 def udp_reader(
     port: int,
+    firmware_port: int,
     out_q: "queue.Queue[tuple[float, str, str]]",
     start_mono: float,
     stop_evt: threading.Event,
+    observer_interval_s: float | None,
 ) -> None:
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -155,8 +162,20 @@ def udp_reader(
         out_q.put((time.monotonic() - start_mono, "NET", f"<bind failed: {exc}>"))
         return
     out_q.put((time.monotonic() - start_mono, "NET", f"<listening on :{port}>"))
+    next_observer = time.monotonic()
+    observer_warned = False
     try:
         while not stop_evt.is_set():
+            now = time.monotonic()
+            if observer_interval_s is not None and now >= next_observer:
+                try:
+                    for host in OBSERVER_TARGETS:
+                        sock.sendto(OBSERVER_BEACON, (host, firmware_port))
+                except OSError as exc:
+                    if not observer_warned:
+                        out_q.put((now - start_mono, "NET", f"<observer beacon failed: {exc}>"))
+                        observer_warned = True
+                next_observer = now + observer_interval_s
             try:
                 data, addr = sock.recvfrom(2048)
             except socket.timeout:
@@ -189,12 +208,18 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="Expansion-board COM port (default disabled; e.g. COM9)")
     p.add_argument("--xpb-baud", type=int, default=DEFAULT_XPB_BAUD)
     p.add_argument("--udp-port", type=int, default=DEFAULT_UDP_PORT)
+    p.add_argument("--firmware-port", type=int, default=DEFAULT_FIRMWARE_PORT,
+                   help=f"Firmware control port to beacon (default {DEFAULT_FIRMWARE_PORT})")
     p.add_argument("--log", type=Path, default=None,
                    help="Optional path to also write timestamped lines to.")
     p.add_argument("--duration-s", type=float, default=None,
                    help="Stop after N seconds. Default: run until Ctrl-C.")
     p.add_argument("--no-udp", action="store_true",
                    help="Disable UDP capture (useful if port is already bound).")
+    p.add_argument("--observer-interval-s", type=float, default=DEFAULT_OBSERVER_INTERVAL_S,
+                   help="Seconds between observer beacons to CC/XPB (default 1.0).")
+    p.add_argument("--no-observer-beacon", action="store_true",
+                   help="Do not announce this PC as a debug observer.")
     return p.parse_args(argv)
 
 
@@ -225,7 +250,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not args.no_udp:
         t = threading.Thread(
             target=udp_reader,
-            args=(args.udp_port, out_q, start_mono, stop_evt),
+            args=(
+                args.udp_port,
+                args.firmware_port,
+                out_q,
+                start_mono,
+                stop_evt,
+                None if args.no_observer_beacon else args.observer_interval_s,
+            ),
             daemon=True,
         )
         t.start()

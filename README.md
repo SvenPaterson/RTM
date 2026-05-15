@@ -39,7 +39,7 @@ The RTM (Rotary Test Machine) controls a rotary seal test stand capable of execu
 | Temperature sensing | **MAX31855 thermocouple interface** | Two channels populated: sump thermocouple (primary) and seal thermocouple (secondary). |
 | Storage | **microSD card** | Profile storage and optional data logging. Interface level-shifted to 3.3 V using SN74LVC245AN bus transceiver. |
 | Level shifting | **SN74LVC245AN** | Provides 5 V ↔ 3.3 V translation between controllers and SD interface. |
-| Board-to-board link | **UDP over Ethernet (W5500)** | Static IPs: ClearCore 10.0.0.10, XPB 10.0.0.11, host PC 10.0.0.100, port 8888. Frames are line-oriented ASCII with an XOR checksum suffix. |
+| Board-to-board link | **UDP over Ethernet (W5500)** | Static IPs: ClearCore 10.0.0.10, XPB 10.0.0.11, host PC 10.0.0.100. Production frames use UDP 8888; debug observer copies use UDP 8889 only while a PC tool is beaconing. Frames are line-oriented ASCII with an XOR checksum suffix. |
 
 ## Power Distribution
 
@@ -51,7 +51,7 @@ The RTM (Rotary Test Machine) controls a rotary seal test stand capable of execu
 
 ## I/O and Interfaces
 
-* **Inter-board link:** ClearCore and Nano Every (XPB) talk over UDP via W5500 Ethernet modules. The host PC binds the same UDP port to passively capture all traffic for the test harness.
+* **Inter-board link:** ClearCore and Nano Every (XPB) talk over UDP via W5500 Ethernet modules. Host tools beacon on UDP 8888 and listen on UDP 8889; while the beacon is fresh, the boards tee directed-broadcast debug copies for capture without putting the PC in the production CC↔XPB path.
 * **USB:** Firmware upload path for both controllers (ClearCore, Nano Every). PlatformIO handles builds and uploads.
 * **Thermocouple inputs:** Two MAX31855 channels populated — sump (primary PID feedback) and seal (secondary monitoring).
 * **LCD interface:** Parallel/SPI (per display configuration) from Nano Every to the Newhaven module. Include contrast potentiometer and backlight control guidance in the wiring diagram.

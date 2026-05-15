@@ -27,12 +27,16 @@ static constexpr uint8_t kPcIp [4] = { 10, 0, 0, 100 };
 // disambiguate direction; a single port keeps capture trivial.
 static constexpr uint16_t kUdpPort = 8888;
 
-// Tee outbound frames to the PC observer at kPcIp on every send.
-// Cheap (one extra UDP send per frame) but makes harness/capture work
-// over any unmanaged switch — switches learn MACs and only forward
-// peer-to-peer frames to the addressed port, so without the tee the
-// PC never sees CC↔XPB chatter. Disable by setting to 0 to drop the
-// extra send on production stands where PC observation isn't wanted.
+// PC observation uses a separate capture port so directed-broadcast debug
+// copies do not land on the peer board's production UDP socket.
+static constexpr uint16_t kObserverPort = 8889;
+static constexpr uint8_t kObserverBroadcastIp[4] = { 10, 0, 0, 255 };
+static constexpr const char *kObserverBeacon = "OBS;PC=1";
+static constexpr uint8_t kObserverBeaconLen = 8;
+static constexpr uint32_t kObserverTtlMs = 3000UL;
+
+// Compile-time master switch for PC observation support. When enabled,
+// boards tee debug copies only while a host tool is actively beaconing.
 #ifndef RTM_TEE_TO_PC
 #define RTM_TEE_TO_PC 1
 #endif

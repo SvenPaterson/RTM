@@ -23,12 +23,15 @@ repository.
 ## Inter-board transport
 - UDP over Ethernet (W5500 modules on both boards).
 - Static IPs: ClearCore = 10.0.0.10, XPB = 10.0.0.11, host PC = 10.0.0.100.
-- Port: 8888.
+- Production port: 8888.
+- PC observer capture port: 8889.
 - Frame format: line-oriented ASCII, `KIND;K1=V1;...:CC\n`, where `CC` is XOR
   checksum of every byte before `:`.
 - Cadences: HB from CC every 250 ms, STAT from XPB every 1000 ms.
-- `RTM_TEE_TO_PC=1` makes both boards unicast every TX to the host PC, so a
-  single PC bind sees both directions through any unmanaged switch.
+- `RTM_TEE_TO_PC=1` compiles in PC observation support. Host tools send
+  `OBS;PC=1` to CC/XPB once per second on UDP 8888; each board tees debug
+  copies to directed broadcast `10.0.0.255:8889` while the beacon is fresh
+  (3s TTL). Without a beacon, only the production CC↔XPB unicast path runs.
 
 ## Build and upload
 COM ports: COM8 = ClearCore, COM9 = Expansion Board (Nano Every).

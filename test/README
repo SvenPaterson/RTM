@@ -18,10 +18,14 @@ Network setup
 - ClearCore: ``10.0.0.10``
 - XPB:       ``10.0.0.11``
 - Host PC:   ``10.0.0.100``  (must be set on the interface bound to the rig)
-- UDP port:  ``8888``
+- Production UDP port:  ``8888``
+- Observer UDP port:    ``8889``
 
-Both boards tee every TX to the host PC IP, so a single UDP bind on the PC
-sees both directions through any unmanaged switch.
+The monitor sends a lightweight observer beacon once per second to CC and XPB
+on port 8888. While the beacon is fresh, both boards tee directed-broadcast
+debug copies on port 8889, so a single UDP bind on the PC sees both directions
+through any unmanaged switch. If the PC or harness is absent, the boards use
+only the production CC↔XPB unicast path.
 
 Running
 -------
@@ -30,6 +34,9 @@ From repo root:
 ::
 
     python -m pytest test/scenarios/ -v
+
+  Use ``--rig-port`` to override the observer capture port and
+  ``--rig-firmware-port`` to override the board control/beacon port.
 
 Markers:
 

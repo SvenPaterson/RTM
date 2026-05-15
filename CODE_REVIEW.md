@@ -1,5 +1,14 @@
 # Boot-Up Serial Review Findings
 
+## 0. Session checkpoint (2026-05-15)
+### Current status
+- **Bug #16 — PC observer tee could stall production UDP path when host was absent**: The CC↔XPB link uses direct static unicast on UDP 8888, but `RTM_TEE_TO_PC=1` also sent every frame to host `10.0.0.100`. On the XPB W5500 path, UDP send waits for `SEND_OK` or `TIMEOUT`, so an absent PC could delay the main loop, switch polling, and stale-link recovery. Mitigation implemented: PC observation is now runtime-gated by `OBS;PC=1` beacons from host tools, and active tee packets are directed-broadcast on UDP 8889 so the debug observer cannot ARP-block or duplicate frames into the critical CC↔XPB port.【F:include/RtmNet.h】【F:include/ExpansionBoard.h】【F:include/ClearCoreRTM.h】【F:tools/udp_capture.py】【F:tools/rig_trace.py】【F:tools/udp_probe.py】【F:test/rig/monitor.py】
+- Build validation: ClearCore and XPB PlatformIO builds pass. XPB size after the change is 45,343 B flash and 3,022 B RAM.
+
+### Next actions
+1. Bench-test with CC+XPB on the router and PC unplugged: RUN/RST must still work.
+2. Reconnect PC and run `python tools/udp_capture.py --duration-s 30` to confirm observer beacon enables capture without reflashing.
+
 ## 0. Session checkpoint (2026-04-17)
 ### Current status
 - **Bug #15 — Dwell countdown resets on pause/resume** (XPB display): When the operator paused and resumed a protocol, the XPB LCD countdown timer reset to the full step duration instead of continuing from where it left off. Root cause: three interacting issues — (1) CC sends a transient `STATE=RESUME` heartbeat between PAUSED and RUNNING, which cleared the XPB's `wasPaused` flag; (2) `SW_AGE` resets near zero before the first PAUSED HB arrives, causing uint32 underflow in the elapsed-time calculation; (3) even with an offset approach the new SW_AGE was always smaller than the saved elapsed, underflowing again. Fixed with v3 approach: on RUNNING→PAUSED, compute elapsed from `stepTotalMs_ - stepRemainingMs_` (values still valid from last RUNNING tick) and save as `pausedElapsedMs_`. On resume, repopulate `stepTotalMs_` from the protocol via `refreshStepCountdown_(true)`, shrink by `pausedElapsedMs_`, then `refreshStepCountdown_(false)` to recompute remaining.【F:src/exp-board/ExpansionBoard.cpp†L1587】【F:include/ExpansionBoard.h】

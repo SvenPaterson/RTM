@@ -2,14 +2,14 @@
 
 Importing `Monitor` here keeps every scenario file boilerplate-free —
 each test just declares `def test_x(monitor): ...` and gets a started
-listener bound to the rig UDP port.
+listener bound to the rig observer UDP port.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from test.rig.monitor import DEFAULT_BIND, DEFAULT_PORT, Monitor
+from test.rig.monitor import DEFAULT_BIND, DEFAULT_FIRMWARE_PORT, DEFAULT_PORT, Monitor
 from test.rig.teensy import DEFAULT_PORT as TEENSY_DEFAULT_PORT
 from test.rig.teensy import Teensy
 
@@ -20,7 +20,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store",
         type=int,
         default=DEFAULT_PORT,
-        help="UDP port the rig boards send on (default: 8888).",
+        help="UDP observer port the rig boards tee to (default: 8889).",
+    )
+    parser.addoption(
+        "--rig-firmware-port",
+        action="store",
+        type=int,
+        default=DEFAULT_FIRMWARE_PORT,
+        help="UDP firmware control port to beacon (default: 8888).",
     )
     parser.addoption(
         "--rig-bind",
@@ -48,8 +55,9 @@ def monitor(request: pytest.FixtureRequest) -> Monitor:
     `t_ms` and `since_ms` straightforward.
     """
     port = request.config.getoption("--rig-port")
+    firmware_port = request.config.getoption("--rig-firmware-port")
     bind = request.config.getoption("--rig-bind")
-    mon = Monitor(bind=bind, port=port)
+    mon = Monitor(bind=bind, port=port, firmware_port=firmware_port)
     mon.start()
     yield mon
     mon.stop()

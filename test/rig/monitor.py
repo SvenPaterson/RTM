@@ -1,7 +1,8 @@
 """UDP listener thread + queryable frame buffer for the RTM rig.
 
-A `Monitor` binds the rig UDP port (default 8888) and decodes every
-inbound datagram into a typed `Frame` (see `parser.py`). Frames are
+A `Monitor` binds the rig observer UDP port (default 8889), beacons the
+boards on the production port (default 8888), and decodes every
+inbound tee datagram into a typed `Frame` (see `parser.py`). Frames are
 appended to an in-memory list under a lock; tests pull from it via
 `snapshot()` / `wait_for()` (see `assertions.py`).
 
@@ -36,10 +37,14 @@ from .parser import (
 )
 
 
-DEFAULT_PORT = 8888
+DEFAULT_FIRMWARE_PORT = 8888
+DEFAULT_PORT = 8889
 DEFAULT_BIND = "0.0.0.0"
 RECV_BUFSIZE = 2048
 SOCK_TIMEOUT_S = 0.25     # poll interval — also the worst-case stop latency
+OBSERVER_TARGETS = ("10.0.0.10", "10.0.0.11")
+OBSERVER_BEACON = b"OBS;PC=1\n"
+OBSERVER_INTERVAL_S = 1.0
 
 
 @dataclass
@@ -64,11 +69,15 @@ class Monitor:
         *,
         bind: str = DEFAULT_BIND,
         port: int = DEFAULT_PORT,
+        firmware_port: int = DEFAULT_FIRMWARE_PORT,
         verify_checksum: bool = True,
+        observer_beacon: bool = True,
     ) -> None:
         self._bind = bind
         self._port = port
+        self._firmware_port = firmware_port
         self._verify_checksum = verify_checksum
+        self._observer_beacon = observer_beacon
 
         self._sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
@@ -119,7 +128,12 @@ class Monitor:
     def _run(self) -> None:
         sock = self._sock
         assert sock is not None
+        next_observer = time.monotonic()
         while not self._stop.is_set():
+            now = time.monotonic()
+            if self._observer_beacon and now >= next_observer:
+                self._send_observer_beacon(sock)
+                next_observer = now + OBSERVER_INTERVAL_S
             try:
                 data, addr = sock.recvfrom(RECV_BUFSIZE)
             except socket.timeout:
@@ -144,6 +158,13 @@ class Monitor:
                 continue
             with self._lock:
                 self._frames.append(frame)
+
+    def _send_observer_beacon(self, sock: socket.socket) -> None:
+        for host in OBSERVER_TARGETS:
+            try:
+                sock.sendto(OBSERVER_BEACON, (host, self._firmware_port))
+            except OSError:
+                return
 
     def _record_error(self, t_ms: float, src_ip: str, payload: bytes, msg: str) -> None:
         with self._lock:

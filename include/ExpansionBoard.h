@@ -449,7 +449,10 @@ private:
                             RtmNet::kCcIp[2], RtmNet::kCcIp[3]};
 #if RTM_TEE_TO_PC
         IPAddress   pcIp_{RtmNet::kPcIp[0], RtmNet::kPcIp[1],
-                          RtmNet::kPcIp[2], RtmNet::kPcIp[3]};
+              RtmNet::kPcIp[2], RtmNet::kPcIp[3]};
+    IPAddress   pcTeeIp_{RtmNet::kObserverBroadcastIp[0], RtmNet::kObserverBroadcastIp[1],
+                 RtmNet::kObserverBroadcastIp[2], RtmNet::kObserverBroadcastIp[3]};
+    uint32_t pcObserverUntilMs_{0};
 #endif
 
         // TX line-buffer: one datagram per framed line. 192 B covers
@@ -471,18 +474,23 @@ private:
             udp_.write((const uint8_t*)txBuf_, txLen_);
             udp_.endPacket();
 #if RTM_TEE_TO_PC
-            // Tee a copy to the PC observer so harness/capture works
-            // through any unmanaged switch (which only forwards unicast
-            // peer-to-peer frames to the addressed port).
-            udp_.beginPacket(pcIp_, RtmNet::kUdpPort);
-            udp_.write((const uint8_t*)txBuf_, txLen_);
-            udp_.endPacket();
+            if (pcObserverActive_()) {
+                udp_.beginPacket(pcTeeIp_, RtmNet::kObserverPort);
+                udp_.write((const uint8_t*)txBuf_, txLen_);
+                if (!udp_.endPacket()) pcObserverUntilMs_ = 0;
+            }
 #endif
             txLen_ = 0;
         }
         void pumpRx_() {
             int sz = udp_.parsePacket();
             while (sz > 0) {
+#if RTM_TEE_TO_PC
+                if (consumePcObserverPacket_(sz)) {
+                    sz = udp_.parsePacket();
+                    continue;
+                }
+#endif
                 lastRxMs_ = millis();   // any RX resets stale watchdog
                 while (sz > 0) {
                     uint8_t next = (uint8_t)((rxHead_ + 1) % kRxRingSize);
@@ -500,6 +508,37 @@ private:
                 sz = udp_.parsePacket();
             }
         }
+
+#if RTM_TEE_TO_PC
+        bool pcObserverActive_() const {
+            return (int32_t)(millis() - pcObserverUntilMs_) < 0;
+        }
+
+        bool isPcIp_(const IPAddress &ip) const {
+            return ip[0] == RtmNet::kPcIp[0] && ip[1] == RtmNet::kPcIp[1] &&
+                   ip[2] == RtmNet::kPcIp[2] && ip[3] == RtmNet::kPcIp[3];
+        }
+
+        bool consumePcObserverPacket_(int sz) {
+            if (!isPcIp_(udp_.remoteIP())) return false;
+
+            char prefix[RtmNet::kObserverBeaconLen];
+            uint8_t n = 0;
+            while (sz > 0) {
+                int b = udp_.read();
+                if (b < 0) break;
+                if (n < RtmNet::kObserverBeaconLen) prefix[n++] = (char)b;
+                --sz;
+            }
+
+            bool match = (n == RtmNet::kObserverBeaconLen);
+            for (uint8_t i = 0; match && i < RtmNet::kObserverBeaconLen; ++i) {
+                match = (prefix[i] == RtmNet::kObserverBeacon[i]);
+            }
+            if (match) pcObserverUntilMs_ = millis() + RtmNet::kObserverTtlMs;
+            return true;
+        }
+#endif
 
         /**
          * @brief Hardware-reset the W5500 and call Ethernet.begin().

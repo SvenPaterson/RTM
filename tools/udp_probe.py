@@ -45,8 +45,12 @@ except ImportError:
 
 DEFAULT_HOST = "10.0.0.11"   # XPB
 DEFAULT_PORT = 8888
+DEFAULT_OBSERVER_PORT = 8889
 DEFAULT_BIND = "0.0.0.0"
 DEFAULT_PAYLOAD = "PING"
+OBSERVER_TARGETS = ("10.0.0.10", "10.0.0.11")
+OBSERVER_BEACON = b"OBS;PC=1\n"
+DEFAULT_OBSERVER_INTERVAL_S = 1.0
 
 
 @dataclass
@@ -171,14 +175,36 @@ def echo_probe(host: str, port: int, payload: bytes,
     return result
 
 
-def listen_only(bind_addr: str, bind_port: int, duration_s: float) -> None:
+def send_observer_beacon(sock: socket.socket, firmware_port: int) -> None:
+    for host in OBSERVER_TARGETS:
+        sock.sendto(OBSERVER_BEACON, (host, firmware_port))
+
+
+def listen_only(
+    bind_addr: str,
+    bind_port: int,
+    duration_s: float,
+    firmware_port: int,
+    observer_interval_s: Optional[float],
+) -> None:
     """Passive listener: print everything seen on the bound port."""
     sock = make_socket(bind_addr, bind_port, timeout_s=0.5)
     print(f"Listening on {bind_addr}:{bind_port} for {duration_s}s ...")
     deadline = time.perf_counter() + duration_s
+    next_observer = time.perf_counter()
+    observer_warned = False
     count = 0
     try:
         while time.perf_counter() < deadline:
+            now = time.perf_counter()
+            if observer_interval_s is not None and now >= next_observer:
+                try:
+                    send_observer_beacon(sock, firmware_port)
+                except OSError as exc:
+                    if not observer_warned:
+                        print(f"observer beacon failed: {exc}", file=sys.stderr)
+                        observer_warned = True
+                next_observer = now + observer_interval_s
             try:
                 data, src = sock.recvfrom(1024)
                 ts = time.strftime("%H:%M:%S")
@@ -213,6 +239,12 @@ def main(argv: list[str]) -> int:
                    help=f"Local bind port (default {DEFAULT_PORT}; matches firmware)")
     p.add_argument("--listen", action="store_true",
                    help="Listen-only mode (no sends)")
+    p.add_argument("--observer-port", type=int, default=DEFAULT_OBSERVER_PORT,
+                   help=f"Listen-mode observer port (default {DEFAULT_OBSERVER_PORT})")
+    p.add_argument("--observer-interval-s", type=float, default=DEFAULT_OBSERVER_INTERVAL_S,
+                   help="Listen-mode seconds between observer beacons (default 1.0)")
+    p.add_argument("--no-observer-beacon", action="store_true",
+                   help="Listen mode: do not announce this PC as a debug observer.")
     p.add_argument("--listen-secs", type=float, default=10.0,
                    help="Listen-only duration in seconds (default 10)")
     p.add_argument("-q", "--quiet", action="store_true",
@@ -237,7 +269,14 @@ def main(argv: list[str]) -> int:
 
     try:
         if args.listen:
-            listen_only(args.bind, args.bind_port, args.listen_secs)
+            bind_port = args.observer_port if args.bind_port == DEFAULT_PORT else args.bind_port
+            listen_only(
+                args.bind,
+                bind_port,
+                args.listen_secs,
+                args.port,
+                None if args.no_observer_beacon else args.observer_interval_s,
+            )
             return 0
 
         print(f"Probing {args.host}:{args.port} from {args.bind}:{args.bind_port} "

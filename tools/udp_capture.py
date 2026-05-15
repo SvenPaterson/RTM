@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """udp_capture.py — Passive UDP listener for the CC↔XPB Ethernet link.
 
-Bind to the rig UDP port (8888 by default) and log every received
-datagram with a millisecond timestamp, the source IP/port, and the
-payload (stripped of trailing newline, ASCII-escaped).
+Bind to the rig observer UDP port (8889 by default), beacon the boards on
+the production port (8888 by default), and log every received datagram with
+a millisecond timestamp, the source IP/port, and the payload (stripped of
+trailing newline, ASCII-escaped).
 
 Output is always streamed to stdout. With --log <path> a CSV is also
 appended:
@@ -22,11 +23,10 @@ appended:
 Usage:
     python tools/udp_capture.py                       # stdout only, default port
     python tools/udp_capture.py --log capture.csv     # tee to CSV
-    python tools/udp_capture.py --port 8888 --duration-s 30
+    python tools/udp_capture.py --duration-s 30
 
-Requires Python 3.8+, no third-party deps. Compatible with running
-`tools/udp_probe.py` or the firmware nettest sketches simultaneously
-(the bind uses SO_REUSEADDR).
+Requires Python 3.8+, no third-party deps. The bind uses SO_REUSEADDR so
+parallel receive-only tools can share the observer port when the OS allows it.
 """
 
 from __future__ import annotations
@@ -47,9 +47,13 @@ HOSTS = {
     "10.0.0.11": "XPB",
     "10.0.0.100": "PC",
 }
+OBSERVER_TARGETS = ("10.0.0.10", "10.0.0.11")
+OBSERVER_BEACON = b"OBS;PC=1\n"
 
-DEFAULT_PORT = 8888
+DEFAULT_FIRMWARE_PORT = 8888
+DEFAULT_PORT = 8889
 DEFAULT_BIND = "0.0.0.0"
+DEFAULT_OBSERVER_INTERVAL_S = 1.0
 RECV_BUFSIZE = 2048
 CSV_HEADER = (
     "timestamp_iso",
@@ -106,21 +110,39 @@ def open_socket(bind_addr: str, port: int) -> socket.socket:
     return sock
 
 
+def send_observer_beacon(sock: socket.socket, firmware_port: int) -> None:
+    for host in OBSERVER_TARGETS:
+        sock.sendto(OBSERVER_BEACON, (host, firmware_port))
+
+
 def capture_loop(
     sock: socket.socket,
     *,
+    firmware_port: int,
     duration_s: float | None,
     csv_writer: csv.writer | None,
     csv_file: TextIO | None,
+    observer_interval_s: float | None,
 ) -> int:
     """Receive datagrams until duration elapses or Ctrl-C. Returns count."""
     start = time.monotonic()
     received = 0
     deadline = start + duration_s if duration_s is not None else None
+    next_observer = start
+    observer_warned = False
 
     while True:
-        if deadline is not None and time.monotonic() >= deadline:
+        now = time.monotonic()
+        if deadline is not None and now >= deadline:
             break
+        if observer_interval_s is not None and now >= next_observer:
+            try:
+                send_observer_beacon(sock, firmware_port)
+            except OSError as exc:
+                if not observer_warned:
+                    print(f"[udp_capture] observer beacon failed: {exc}", file=sys.stderr)
+                    observer_warned = True
+            next_observer = now + observer_interval_s
         try:
             data, addr = sock.recvfrom(RECV_BUFSIZE)
         except socket.timeout:
@@ -171,7 +193,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--port",
         type=int,
         default=DEFAULT_PORT,
-        help=f"UDP port to listen on (default: {DEFAULT_PORT})",
+        help=f"UDP observer port to listen on (default: {DEFAULT_PORT})",
+    )
+    p.add_argument(
+        "--firmware-port",
+        type=int,
+        default=DEFAULT_FIRMWARE_PORT,
+        help=f"Firmware control port to beacon (default: {DEFAULT_FIRMWARE_PORT})",
     )
     p.add_argument(
         "--log",
@@ -185,6 +213,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Stop after N seconds. Default: run until Ctrl-C.",
     )
+    p.add_argument(
+        "--observer-interval-s",
+        type=float,
+        default=DEFAULT_OBSERVER_INTERVAL_S,
+        help="Seconds between observer beacons to CC/XPB (default: 1.0).",
+    )
+    p.add_argument(
+        "--no-observer-beacon",
+        action="store_true",
+        help="Do not announce this PC as a debug observer.",
+    )
     return p.parse_args(argv)
 
 
@@ -195,6 +234,12 @@ def main(argv: list[str] | None = None) -> int:
         f"[udp_capture] listening on {args.bind}:{args.port}"
         + (f" for {args.duration_s:.1f}s" if args.duration_s else " (Ctrl-C to stop)")
     )
+    if not args.no_observer_beacon:
+        print(
+            "[udp_capture] observer beacon enabled "
+            f"every {args.observer_interval_s:.1f}s to {', '.join(OBSERVER_TARGETS)}:"
+            f"{args.firmware_port}"
+        )
     if args.log:
         print(f"[udp_capture] writing CSV to {args.log}")
 
@@ -211,9 +256,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         count = capture_loop(
             sock,
+            firmware_port=args.firmware_port,
             duration_s=args.duration_s,
             csv_writer=csv_writer,
             csv_file=csv_file,
+            observer_interval_s=None if args.no_observer_beacon else args.observer_interval_s,
         )
     except KeyboardInterrupt:
         print("\n[udp_capture] stopped by user")
