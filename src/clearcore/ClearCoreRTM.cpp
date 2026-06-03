@@ -75,6 +75,8 @@ bool ClearCoreRTM::begin() {
 
     // Initialize with empty protocol - will receive from XPB
     state_ = State::BOOT;
+    runGateReleased_ = false;
+    resetGateReleased_ = false;
 
     // MOVED TO handleBoot()
     //dbgln("Awaiting protocol from XPB...");
@@ -135,6 +137,9 @@ void ClearCoreRTM::tick() {
     if (xpbStaleTmr_ > 5000UL) {
         if (linkRecoveryTmr_ > 5000UL) {
             linkRecoveryTmr_ = 0;
+            if (linkDownActive_) {
+                ++linkReinitCount_;
+            }
             dbgln("[LINK] Recovery watchdog -- reinit UDP");
             comms_.reinitUdp();
         }
@@ -148,6 +153,39 @@ void ClearCoreRTM::tick() {
     bool resetActive  = resetActiveRemote_;
     const bool runRoseLow  = runLineLow && !prevRunActive_;
     const bool runWentHigh = !runLineLow && prevRunActive_;
+    const bool resetRoseLow = resetActive && !prevResetActive_;
+    const bool resetWentHigh = !resetActive && prevResetActive_;
+
+    const uint32_t staleAgeMs = (uint32_t)xpbStaleTmr_;
+    const bool linkDownNow = commsHealthy_ && (staleAgeMs > 3000UL);
+    if (linkDownNow && !linkDownActive_) {
+        linkDownActive_ = true;
+        linkDownSinceMs_ = Milliseconds();
+        linkReinitCount_ = 0;
+
+        char line[128];
+        snprintf(line, sizeof(line),
+                 "NOTICE;LINK=DOWN;WHO=CC;AGE=%lu;OBS=%u;STATE=%s;EREASON=%02X",
+                 (unsigned long)staleAgeMs,
+                 (unsigned)(comms_.observerActive() ? 1U : 0U),
+                 stateToString(state_),
+                 (unsigned)estopReason_);
+        comms_.sendMessage(line, MessageType::IMPORTANT);
+        dbgln("[LINK] DOWN (CC): XPB STAT stale >3s");
+    } else if (!linkDownNow && linkDownActive_) {
+        const uint32_t downMs = Milliseconds() - linkDownSinceMs_;
+        char line[96];
+        snprintf(line, sizeof(line),
+                 "NOTICE;LINK=UP;WHO=CC;DOWN_MS=%lu;REINITS=%u",
+                 (unsigned long)downMs,
+                 (unsigned)linkReinitCount_);
+        comms_.sendMessage(line, MessageType::IMPORTANT);
+        dbgln("[LINK] UP (CC): XPB STAT restored");
+
+        linkDownActive_ = false;
+        linkDownSinceMs_ = 0;
+        linkReinitCount_ = 0;
+    }
 
     // first check for E-Stop
     if (eStopActive && state_ != State::EStop) {
@@ -160,6 +198,11 @@ void ClearCoreRTM::tick() {
         runGateReleased_   = true;   // XPB line returned high, treat future low transitions as intentional
         latchedRunPending_ = false;
         dbgln("[RUN] Gate released: XPB RUN returned high");
+    }
+
+    if (!resetGateReleased_ && !resetActive) {
+        resetGateReleased_ = true;
+        dbgln("[RESET] Gate released: XPB RESET returned high");
     }
 
     bool runRiseManual = false;
@@ -178,12 +221,24 @@ void ClearCoreRTM::tick() {
     if (state_ != State::BOOT && state_ != State::PROTO_LOADING) {
 
         // --- RESET rising edge (as you had) ---
-        if (resetActive && !prevResetActive_ && state_ != State::EStop) {
-            if (state_ != State::Running) {
-                preReset_ = state_;
+        if (resetRoseLow && state_ != State::EStop) {
+            if (!resetGateReleased_) {
+                dbgln("[RESET] Ignoring RESET held low across boot/reset; release to middle to re-arm");
+            } else {
+                if (state_ == State::Running) {
+                    motor.MoveStopDecel((1000 * kStepsPerRev) / 60);
+                    if (protocolUsesHeat_) sendHeaterOff_();
+                    preReset_ = State::Paused;
+                    dbgln("[RESET] ARM from RUNNING -> safe stop; cancel returns PAUSED");
+                } else {
+                    preReset_ = state_;
+                }
                 state_ = State::ResetRequested;
                 resetTmr_ = 0;
             }
+        }
+        if (resetWentHigh) {
+            resetGateReleased_ = true;
         }
         prevResetActive_ = resetActive;
 
@@ -379,6 +434,7 @@ bool ClearCoreRTM::promoteRun_(RunTrigger trigger) {
 void ClearCoreRTM::handleBoot(bool resetActive, bool justEntered_) {
     if (justEntered_) {
         runGateReleased_   = false;   // active-low RUN stays masked until XPB grants it again
+        resetGateReleased_ = false;   // RESET must be seen released-high before a new arm edge is accepted
         latchedRunPending_ = false;
         heartbeatSystemEnabled_ = true;  // keep HBs alive so XPB doesn't show LostComms
 
@@ -604,6 +660,9 @@ void ClearCoreRTM::handleReset(bool resetActive, bool justEntered_) {
             prevState_ = State::Debug; // force a mismatch, check o3 to see if this makes sense anymore!
         }
         state_ = preReset_;           // restore previous state
+        if (preReset_ == State::Paused) {
+            dbgln("[RESET] CANCEL -> PAUSED");
+        }
         resetPhase_ = ResetPhase::Idle;
         return;
     }
@@ -768,9 +827,15 @@ void ClearCoreRTM::logicalReset() {
 
     // --- User input ---
     runGateReleased_   = false;
+    resetGateReleased_ = false;
     latchedRunPending_ = false;
     prevRunActive_     = false;
     prevResetActive_   = false;
+
+    // --- Link diagnostics ---
+    linkDownActive_ = false;
+    linkDownSinceMs_ = 0;
+    linkReinitCount_ = 0;
 
     // --- HLFB ---
     measuredRpm_   = 0;

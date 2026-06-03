@@ -1,8 +1,0 @@
-# rig_trace started 2026-05-12T15:21:39.079
-[rig_trace] start 2026-05-12T15:21:39.079  cc=COM8 xpb=- udp=8888
-[+      1.7 ms] [NET] <listening on :8888>
-[+      2.5 ms] [CC ] <opened COM8 @ 9600>
-[+   2273.6 ms] [CC ] [SW←XPB] run=0 rst=0
-[+   5623.8 ms] [CC ] [CC] Auto-cleared E-STOP (stale-STAT recovered)
-[+   5623.8 ms] [CC ] STATE -> IDLE
-[+   5623.8 ms] [CC ] IDLE: Heatbeet system enabled

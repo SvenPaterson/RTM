@@ -215,12 +215,52 @@ namespace {  // anonymous namespace: TU-private helpers for Resume logic
     }
 }
 
+const char *ExpansionBoard::protoStateName_(ProtoTxState s) const {
+    switch (s) {
+        case ProtoTxState::Idle:        return "Idle";
+        case ProtoTxState::WaitingReq:  return "WaitingReq";
+        case ProtoTxState::SDFail:      return "SDFail";
+        case ProtoTxState::BegSent:     return "BegSent";
+        case ProtoTxState::Sending:     return "Sending";
+        case ProtoTxState::EndSent:     return "EndSent";
+        case ProtoTxState::AwaitResult: return "AwaitResult";
+        case ProtoTxState::Complete:    return "Complete";
+        case ProtoTxState::Failed:      return "Failed";
+        case ProtoTxState::Timeout:     return "Timeout";
+    }
+    return "Unknown";
+}
+
+void ExpansionBoard::setProtoState_(ProtoTxState next, const char *reason) {
+    if (protoState_ == next) {
+        return;
+    }
+#if XPB_PROTO_TRACE
+    const ProtoTxState prev = protoState_;
+    char line[128];
+    snprintf(line, sizeof(line),
+             "[PROTO] %s -> %s reason=%s",
+             protoStateName_(prev),
+             protoStateName_(next),
+             reason ? reason : "n/a");
+    if (Serial) {
+        Serial.println(line);
+    }
+#endif
+    protoState_ = next;
+    if (next == ProtoTxState::WaitingReq) {
+        protoReadyTmr_ = 0;
+    }
+}
+
 /**
  * @brief Initialize all board subsystems and start comms/UI.
  * @copydetails ExpansionBoard::begin()
  */
 bool ExpansionBoard::begin() {
-    Serial.begin(9600);
+    // 115200 keeps XPB serial consistent with XPB_DEBUG and rig_trace's
+    // default --xpb-baud, so observer captures don't silently garble.
+    Serial.begin(115200);
 
     // ---- USB console attach policy ----
     // Default: no wait. Nano Every auto-resets on USB/DTR anyway.
@@ -232,21 +272,40 @@ bool ExpansionBoard::begin() {
         unsigned long t0 = millis();
         while (!Serial && (millis() - t0 < XPB_WAIT_USB_MS)) { /* spin */ }
     }
+#if XPB_PROTO_TRACE
+    if (Serial) Serial.println("[BOOT] serial ready");
+#endif
     dbgln("\nUSB Serial Monitor Connected!");
 
     // UART to ClearCore (not on SPI) – safe to bring up early
+#if XPB_PROTO_TRACE
+    if (Serial) Serial.println("[COMMS] begin enter");
+#endif
     comms_.begin();
+#if XPB_PROTO_TRACE
+    if (Serial) Serial.println("[COMMS] begin exit");
+#endif
     delay(200);
     dbgln("Connecting with CC..");
-    // Ask CC to suppress stale-STAT E-STOP while XPB finishes boot work.
-    // CC may take up to 5s for USB serial wait + boot init, so use 15s.
-    comms_.sendCommand("QUIESCE;SECS=15");
+    // Defer QUIESCE until tick() sees CC traffic. Sending here has
+    // occasionally blocked during early boot while link/socket settle.
+#if XPB_PROTO_TRACE
+    if (Serial) Serial.println("[BOOT] quiesce queued");
+#endif
+    quiesceSecsPending_ = 15;
+    quiesceSent_ = false;
 
     // --- SPI bus & SD first (prevents other devices from holding MISO) ---
     spiQuiesceAll_();
+#if XPB_PROTO_TRACE
+    if (Serial) Serial.println("[BOOT] sd init start");
+#endif
     dbgln("[XPB] Starting SD init (cold boot)");
     bool sdOk = sdInitWithRetry_();  // default: 10 tries, 100ms backoff (header)
     dbgln(sdOk ? "[XPB] SD init OK (cold boot)" : "[XPB] SD init FAIL (cold boot)");
+#if XPB_PROTO_TRACE
+    if (Serial) Serial.println(sdOk ? "[BOOT] sd init ok" : "[BOOT] sd init fail");
+#endif
 
     // --- E-STOP UI mask on boot and after intentional XPB reset ---
     if ((int32_t)(millis() - estopUiMaskUntilMs_) >= 0) {
@@ -259,7 +318,16 @@ bool ExpansionBoard::begin() {
     }
 
     // LCD AFTER SD so the LCD CS can't hold MISO low during SD init
-    if (!lcd_.begin()) { dbgln("FATAL: LCD initialization failed!"); return false; }
+    if (!lcd_.begin()) {
+#if XPB_PROTO_TRACE
+        if (Serial) Serial.println("[BOOT] lcd init fail");
+#endif
+        dbgln("FATAL: LCD initialization failed!");
+        return false;
+    }
+#if XPB_PROTO_TRACE
+    if (Serial) Serial.println("[BOOT] lcd init ok");
+#endif
     lastUi_ = static_cast<UiPage>(0xFF);
 
     // Switches
@@ -279,11 +347,25 @@ bool ExpansionBoard::begin() {
 
     // Protocol + Resume (only if SD OK)
     if (sdOk) {
+#if XPB_PROTO_TRACE
+        if (Serial) Serial.println("[BOOT] proto load start");
+#endif
         successfulProtoLoadFromSD_ = loadProtocolFromSD_("/protocol.csv");
         if (!successfulProtoLoadFromSD_) {
             dbgln("Protocol load FAILED");
+#if XPB_PROTO_TRACE
+            if (Serial) Serial.println("[BOOT] proto load fail");
+#endif
         } else {
             dbgln("Protocol loaded OK");
+#if XPB_PROTO_TRACE
+            char pl[96];
+            snprintf(pl, sizeof(pl),
+                     "[BOOT] proto ok steps=%u loops=%lu",
+                     (unsigned)stepCount_,
+                     (unsigned long)loopCount_);
+            if (Serial) Serial.println(pl);
+#endif
             logProtocol_();   // optional debug dump
         }
 
@@ -322,7 +404,10 @@ bool ExpansionBoard::begin() {
         // === DO NOT AUTO-UPLOAD FROM HERE ===
         if (stepCount_ > 0) {
             dbgln("[PROTOCOL] Standing by for CC REQ:PROTO");
-            protoState_ = ProtoTxState::WaitingReq;
+            setProtoState_(ProtoTxState::WaitingReq, "BOOT_READY_WAIT_REQ");
+#if XPB_PROTO_TRACE
+            if (Serial) Serial.println("[BOOT] wait REQ:PROTO");
+#endif
             //isProtoLoadedOntoCC_ = false;
 
             // Decide now whether we should auto-resume AFTER CC requests + receives protocol
@@ -343,22 +428,38 @@ bool ExpansionBoard::begin() {
 
             // Announce protocol to CC for PHASH drift detection
             sendProtoReady_();
+#if XPB_PROTO_TRACE
+            if (Serial) Serial.println("[BOOT] proto ready sent");
+#endif
         } else {
             dbgln("No protocol loaded from SD - nothing to upload");
-            protoState_ = ProtoTxState::SDFail;
+            setProtoState_(ProtoTxState::SDFail, "BOOT_NO_PROTOCOL");
             needResumeAfterProto_ = false;
+#if XPB_PROTO_TRACE
+            if (Serial) Serial.println("[BOOT] no protocol cached");
+#endif
         }
 
 
     } else {
         dbgln("SD init failed - no protocol available");
+#if XPB_PROTO_TRACE
+        if (Serial) Serial.println("[BOOT] skip proto (sd fail)");
+#endif
     }
 
     ccAnySeen_ = false;
+    quiesceSent_ = false;
     warnedNoLink_ = false;
     linkState_ = LinkState::NoLink;
+    linkDownActive_ = false;
+    linkDownSinceMs_ = 0;
+    linkReinitCount_ = 0;
     sinceBoot = 0;
     dbgln("Awaiting CC traffic...");
+#if XPB_PROTO_TRACE
+    if (Serial) Serial.println("[BOOT] begin done");
+#endif
 
     // PID lives on CC now; XPB only reports temps and caches setpoint for LCD.
     lastSpC_ = 0;
@@ -386,6 +487,9 @@ void ExpansionBoard::logicalReset() {
     sinceBoot         = 0;
     warnedNoLink_     = false;
     linkState_        = LinkState::NoLink;
+    linkDownActive_   = false;
+    linkDownSinceMs_  = 0;
+    linkReinitCount_  = 0;
 
     // --- CC heartbeat mirror ---
     ccHbAgeTmr_    = 0;
@@ -411,7 +515,7 @@ void ExpansionBoard::logicalReset() {
     //     /protocol.csv here so an operator who swapped the SD card
     //     before pressing RST gets the new protocol on the next boot
     //     cycle without needing to fully power-cycle the rig.
-    protoState_    = ProtoTxState::WaitingReq;
+    setProtoState_(ProtoTxState::WaitingReq, "LOGICAL_RESET");
     protoSince_    = 0;
     lastProtoRef_  = 0;
     protoStepSent_ = 0;
@@ -493,8 +597,9 @@ void ExpansionBoard::logicalReset() {
     // E-STOP UI mask (same as post-XPB-reset-flag path in begin())
     estopUiMaskUntilMs_ = millis() + 8000UL;
 
-    // Tell CC to suppress stale-STAT E-STOP during transition
-    comms_.sendCommand("QUIESCE;SECS=10");
+    // Defer reset QUIESCE until we observe CC traffic in tick().
+    quiesceSecsPending_ = 10;
+    quiesceSent_ = false;
 
     // Immediately publish switch state so CC gets fresh RUN/RST
     publishSwitchState_(true);
@@ -509,15 +614,71 @@ void ExpansionBoard::logicalReset() {
  */
 void ExpansionBoard::tick() {
     // ----- Comms housekeeping -----
+#if XPB_PROTO_TRACE
+    if (Serial) Serial.print('T');
+#endif
     comms_.checkForMessages();
+#if XPB_PROTO_TRACE
+    if (Serial) Serial.print('M');
+#endif
     comms_.checkRetries();
+#if XPB_PROTO_TRACE
+    if (Serial) Serial.println('R');
+#endif
 
     // Soft "no link yet" note after 10s with no CC traffic at all
     if (!ccAnySeen_ && !warnedNoLink_ && sinceBoot > 10000) {
         linkState_ = LinkState::NoLink;
         dbgln("INFO: No CC traffic yet (>10s). Continuing without link.");
+#if XPB_PROTO_TRACE
+        if (Serial) Serial.println("[LINK] no CC traffic >10s");
+#endif
     }
     linkState_ = ccAnySeen_ ? LinkState::Alive : LinkState::NoLink;
+
+        // Send deferred QUIESCE only after CC traffic is visible.
+        // This avoids early-boot TX blocking while still preserving the
+        // intent of suppressing stale-STAT E-STOP once link is active.
+        if (quiesceSecsPending_ > 0 && ccAnySeen_ && !quiesceSent_) {
+        char line[32];
+        snprintf(line, sizeof(line), "QUIESCE;SECS=%u", (unsigned)quiesceSecsPending_);
+    #if XPB_PROTO_TRACE
+        if (Serial) Serial.println("[BOOT] quiesce deferred send");
+    #endif
+        comms_.sendCommand(line, MessageType::IMPORTANT);
+        quiesceSent_ = true;
+        quiesceSecsPending_ = 0;
+    #if XPB_PROTO_TRACE
+        if (Serial) Serial.println("[BOOT] quiesce deferred sent");
+    #endif
+        }
+
+#if XPB_PROTO_TRACE
+    static elapsedMillis traceBeatMs;
+    if (traceBeatMs > 2000) {
+        traceBeatMs = 0;
+        char hb[112];
+        snprintf(hb, sizeof(hb),
+                 "[TICK] sb=%lu st=%s cc=%u rx=%lu gate=%u",
+                 (unsigned long)sinceBoot,
+                 protoStateName_(protoState_),
+                 (unsigned)(ccAnySeen_ ? 1U : 0U),
+                 (unsigned long)comms_.rxAgeMs(),
+                 (unsigned)(ccProtoReq_ ? 1U : 0U));
+        if (Serial) Serial.println(hb);
+    }
+#endif
+
+    // While waiting for CC's REQ:PROTO, periodically re-announce protocol
+    // metadata so a dropped startup notice cannot leave the handoff silent.
+    if (protoState_ == ProtoTxState::WaitingReq && stepCount_ > 0 &&
+        protoReadyTmr_ >= kProtoReadyResendMs) {
+        protoReadyTmr_ = 0;
+        sendProtoReady_();
+#if XPB_PROTO_TRACE
+        if (Serial) Serial.println("[PROTO] periodic PROTO_READY");
+#endif
+    }
 
     // ----- USB injection / commands -----
     #if XPB_INJECT_FROM_USB
@@ -609,9 +770,40 @@ void ExpansionBoard::tick() {
     // can soft-lock when the L2 link drops underneath an open socket
     // (router reboot, cable bounce). The reinit is the only way to recover
     // without power-cycling the board.
-    if (comms_.rxAgeMs() > 3000U) {
+    const uint32_t rxAgeMs = comms_.rxAgeMs();
+    if (!linkDownActive_ && rxAgeMs > 3000U) {
+        linkDownActive_ = true;
+        linkDownSinceMs_ = millis();
+        linkReinitCount_ = 0;
+
+        char line[112];
+        snprintf(line, sizeof(line),
+                 "NOTICE;LINK=DOWN;WHO=XPB;AGE=%lu;OBS=%u",
+                 (unsigned long)rxAgeMs,
+                 (unsigned)(comms_.observerActive() ? 1U : 0U));
+        comms_.sendMessage(line, MessageType::IMPORTANT);
+        dbgln("[LINK] DOWN (XPB): CC RX stale >3s");
+    } else if (linkDownActive_ && rxAgeMs <= 3000U) {
+        const uint32_t downMs = millis() - linkDownSinceMs_;
+        char line[112];
+        snprintf(line, sizeof(line),
+                 "NOTICE;LINK=UP;WHO=XPB;DOWN_MS=%lu;REINITS=%u",
+                 (unsigned long)downMs,
+                 (unsigned)linkReinitCount_);
+        comms_.sendMessage(line, MessageType::IMPORTANT);
+        dbgln("[LINK] UP (XPB): CC RX restored");
+
+        linkDownActive_ = false;
+        linkDownSinceMs_ = 0;
+        linkReinitCount_ = 0;
+    }
+
+    if (rxAgeMs > 3000U) {
         if (linkRecoveryTmr_ > 5000U) {
             linkRecoveryTmr_ = 0;
+            if (linkDownActive_) {
+                ++linkReinitCount_;
+            }
             dbgln("[LINK] Recovery watchdog -- reinit UDP");
             comms_.reinitUdp();
         }
@@ -622,7 +814,10 @@ void ExpansionBoard::tick() {
     // an immediate reinit. Useful when the watchdog cadence is too slow or
     // the operator needs to confirm intent. No effect when link is healthy
     // (CC handles RESET via the published switch state as normal).
-    if (resetSw_.fell() && comms_.rxAgeMs() > 3000U) {
+    if (resetSw_.fell() && rxAgeMs > 3000U) {
+        if (linkDownActive_) {
+            ++linkReinitCount_;
+        }
         dbgln("[LINK] RESET button -- manual UDP reinit");
         comms_.reinitUdp();
         linkRecoveryTmr_ = 0;
@@ -660,7 +855,7 @@ void ExpansionBoard::tick() {
             dbgln("[SD] Recovery: card init OK");
             if (loadProtocolFromSD_("/protocol.csv")) {
                 successfulProtoLoadFromSD_ = true;
-                protoState_ = ProtoTxState::WaitingReq;
+                setProtoState_(ProtoTxState::WaitingReq, "SD_RECOVERY_OK");
                 ccProtoReq_ = false;  // allow next REQ:PROTO to trigger upload
                 dbgln("[SD] Recovery: protocol loaded");
             } else {
@@ -674,12 +869,12 @@ void ExpansionBoard::tick() {
         protoState_ == ProtoTxState::EndSent ||
         protoState_ == ProtoTxState::AwaitResult) {
         if (protoSince_ > kProtoAckTimeoutMs_) {
-            protoState_ = ProtoTxState::Timeout;
+            setProtoState_(ProtoTxState::Timeout, "PROTO_ACK_TIMEOUT");
         }
     }
     else if (protoState_ == ProtoTxState::Sending) {
         if (protoSince_ > kProtoSilenceTimeoutMs) {
-            protoState_ = ProtoTxState::Timeout;
+            setProtoState_(ProtoTxState::Timeout, "PROTO_SILENCE_TIMEOUT");
         }
     }
 
@@ -1078,7 +1273,13 @@ bool ExpansionBoard::loadProtocolFromSD_(const char *path) {
 
     // 1) PROTOCOL_NAME=...
     String line = csv.readStringUntil('\n');
-    if (!line.startsWith("PROTOCOL_NAME=")) { csv.close(); return false; }
+    if (!line.startsWith("PROTOCOL_NAME=")) {
+    #if XPB_PROTO_TRACE
+        if (Serial) Serial.println("[PROTO] CSV parse fail: expected PROTOCOL_NAME on line 1");
+    #endif
+        csv.close();
+        return false;
+    }
     String nameVal = line.substring(strlen("PROTOCOL_NAME=")); stripCommas(nameVal);
     strncpy(protocolName_, nameVal.c_str(), sizeof(protocolName_) - 1);
     protocolName_[sizeof(protocolName_) - 1] = '\0';
@@ -1099,8 +1300,22 @@ bool ExpansionBoard::loadProtocolFromSD_(const char *path) {
         String row = csv.readStringUntil('\n'); row.trim();
         if (!row.length()) continue;
 
-        int c1 = row.indexOf(',');                 if (c1 < 0) { csv.close(); return false; }
-        int c2 = row.indexOf(',', c1 + 1);         if (c2 < 0) { csv.close(); return false; }
+        int c1 = row.indexOf(',');
+        if (c1 < 0) {
+#if XPB_PROTO_TRACE
+            if (Serial) Serial.println("[PROTO] CSV parse fail: missing comma #1 in data row");
+#endif
+            csv.close();
+            return false;
+        }
+        int c2 = row.indexOf(',', c1 + 1);
+        if (c2 < 0) {
+#if XPB_PROTO_TRACE
+            if (Serial) Serial.println("[PROTO] CSV parse fail: missing comma #2 in data row");
+#endif
+            csv.close();
+            return false;
+        }
         int c3 = row.indexOf(',', c2 + 1);         // may be -1
 
         String s1 = row.substring(0, c1);          s1.trim();   // RPM
@@ -1111,8 +1326,20 @@ bool ExpansionBoard::loadProtocolFromSD_(const char *path) {
         String s4 = (c3 < 0) ? String() : row.substring(c3+1);  // TEMP_C (optional)
         s4.trim();
 
-        if (!validSigned(s1) || !isDigits(s2) || !isDigits(s3)) { csv.close(); return false; }
-        if (s4.length() && !isDigits(s4)) { csv.close(); return false; }
+        if (!validSigned(s1) || !isDigits(s2) || !isDigits(s3)) {
+#if XPB_PROTO_TRACE
+            if (Serial) Serial.println("[PROTO] CSV parse fail: invalid RPM/ACCEL/DWELL in data row");
+#endif
+            csv.close();
+            return false;
+        }
+        if (s4.length() && !isDigits(s4)) {
+#if XPB_PROTO_TRACE
+            if (Serial) Serial.println("[PROTO] CSV parse fail: invalid TEMP_C in data row");
+#endif
+            csv.close();
+            return false;
+        }
 
         Step &st = steps_[stepCount_++];
         st.rpmTarget_ = s1.toInt();
@@ -1191,7 +1418,7 @@ bool ExpansionBoard::uploadProtocolToCC_() {
              (unsigned long)progHash_);
     
     comms_.sendMessage(msg, MessageType::CRITICAL);
-    protoState_ = ProtoTxState::BegSent;
+    setProtoState_(ProtoTxState::BegSent, "PR_BEG_SENT");
     protoStepSent_ = 0;
     protoSince_ = 0;
 
@@ -1211,7 +1438,7 @@ bool ExpansionBoard::uploadProtocolToCC_() {
     if (comms_.isWaitingForAck()) {
         dbgln("[PROTO] PR_BEG not ACKed by CC — aborting upload");
         comms_.cancelPending();   // prevent orphaned retries
-        protoState_ = ProtoTxState::WaitingReq;
+        setProtoState_(ProtoTxState::WaitingReq, "PR_BEG_NO_ACK");
         return false;
     }
     
@@ -1235,7 +1462,7 @@ bool ExpansionBoard::uploadProtocolToCC_() {
     // 3. Send PR_END  
     snprintf(msg, sizeof(msg), "PR_END;CRC=%lu", (unsigned long)0);
     comms_.sendMessage(msg, MessageType::CRITICAL);
-    protoState_ = ProtoTxState::EndSent;
+    setProtoState_(ProtoTxState::EndSent, "PR_END_SENT");
     protoSince_ = 0;
     //delay(100);
     //comms_.checkForMessages();
@@ -1258,14 +1485,14 @@ void ExpansionBoard::ExpansionBoardComms::onMessageReceived(const String& data) 
         if (owner_) owner_->lastProtoRef_ = refVal;
 
         if (owner_ && owner_->protoState_ == ProtoTxState::BegSent) {
-            owner_->protoState_ = ProtoTxState::Sending;
+            owner_->setProtoState_(ProtoTxState::Sending, "ACK_AFTER_PR_BEG");
             owner_->protoSince_ = 0;
             // (optional) owner_->dbgln("[PROTO] PR_BEG ACK → Sending");
         }
 
         // If we already sent PR_END, any ACK is our cue to await final NOTICE
         if (owner_ && owner_->protoState_ == ProtoTxState::EndSent) {
-            owner_->protoState_ = ProtoTxState::AwaitResult;
+            owner_->setProtoState_(ProtoTxState::AwaitResult, "ACK_AFTER_PR_END");
             owner_->protoSince_ = 0;
             // (optional) owner_->dbgln("[PROTO] PR_END ACK → AwaitResult");
         }
@@ -1323,6 +1550,17 @@ void ExpansionBoard::ExpansionBoardComms::onMessageReceived(const String& data) 
         }
 
         if (owner_) {
+#if XPB_PROTO_TRACE
+            char trace[144];
+            snprintf(trace, sizeof(trace),
+                     "[PROTO] REQ:PROTO rx ref=%u state=%s steps=%u gate=%u",
+                     (unsigned)refVal,
+                     owner_->protoStateName_(owner_->protoState_),
+                     (unsigned)owner_->stepCount_,
+                     (unsigned)(owner_->ccProtoReq_ ? 1U : 0U));
+            if (Serial) Serial.println(trace);
+#endif
+
             // Always attempt upload: CC only sends REQ:PROTO when it
             // doesn't have a protocol loaded, so repeating is correct.
             // ccProtoReq_ guards against reentrant calls from
@@ -1352,7 +1590,7 @@ void ExpansionBoard::ExpansionBoardComms::onMessageReceived(const String& data) 
         if (rx == "OK") {
             if (owner_) {
                 owner_->ccProtoReq_ = false;
-                owner_->protoState_ = ProtoTxState::Complete;
+                owner_->setProtoState_(ProtoTxState::Complete, "NOTICE_PROTO_RX_OK");
 
                 // PHASH check  (strtoul: toInt() overflows for hashes > INT_MAX)
                 const String sPH = kvGet(data, "PHASH=");
@@ -1399,7 +1637,7 @@ void ExpansionBoard::ExpansionBoardComms::onMessageReceived(const String& data) 
             if (owner_) {
                 //owner_->isProtoLoadedOntoCC_ = false;
                 owner_->ccProtoReq_ = false;
-                owner_->protoState_ = ProtoTxState::Failed;
+                owner_->setProtoState_(ProtoTxState::Failed, "NOTICE_PROTO_RX_FAIL");
             }
             // (Optional) store an error reason for the UI
             return;

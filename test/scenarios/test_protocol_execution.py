@@ -30,6 +30,7 @@ import pytest
 
 from test.rig.monitor import Monitor
 from test.rig.parser import Frame, GenericFrame, HbFrame
+from test.rig.scenario import reset_to_idle
 from test.rig.teensy import Teensy
 
 
@@ -110,6 +111,9 @@ def _group_hbs_by_step(hbs: Iterable[HbFrame]) -> Dict[int, List[HbFrame]]:
 
 @pytest.mark.live_rig
 @pytest.mark.slow
+@pytest.mark.full
+@pytest.mark.stateful
+@pytest.mark.requires_hlfb_quick
 def test_hlfb_quick_executes_each_step(
     monitor: Monitor, teensy: Teensy
 ) -> None:
@@ -117,37 +121,13 @@ def test_hlfb_quick_executes_each_step(
 
     # --- Phase 0: hard reset to guarantee a clean IDLE start ------------
     # Test may be re-run after a prior pass left CC in COMPLETED, or
-    # mid-run in PAUSED. A >5 s RST pulse drives the full reload chain
-    # (EXEC -> XPB_RESET -> REQ:PROTO -> PR_BEG/DAT/END -> IDLE) so we
-    # always begin from a known good state with HLFB_QUICK loaded.
-    teensy.set_run(0)
-    monitor.clear()
-    reset_t = monitor.elapsed_ms
-    _log.info("Pulsing RST for %d ms to clear any prior run state",
-              RST_PULSE_MS)
-    teensy.pulse_reset(RST_PULSE_MS)
-    _log.info("Waiting up to %.1fs for reload chain + IDLE",
-              RST_RELOAD_SETTLE_S)
-    deadline = time.monotonic() + RST_RELOAD_SETTLE_S
-    reached_idle = False
-    while time.monotonic() < deadline:
-        hbs = [
-            f for f in monitor.snapshot(since_ms=reset_t, src_ip=CC_IP)
-            if isinstance(f, HbFrame)
-        ]
-        if hbs and hbs[-1].state == "IDLE":
-            reached_idle = True
-            break
-        time.sleep(0.5)
-    if not reached_idle:
-        last = hbs[-1] if hbs else None
-        last_str = _fmt_frame(last) if last else "(none)"
-        pytest.fail(
-            f"VERDICT: RESET_DID_NOT_REACH_IDLE — after {RST_PULSE_MS} ms "
-            f"RST pulse, CC did not reach IDLE within "
-            f"{RST_RELOAD_SETTLE_S:.1f}s. Last HB: {last_str}"
-        )
-    _log.info("Reset OK: CC reached IDLE after reload")
+    # mid-run in PAUSED. Normalize through the shared reset/reload helper
+    # so the loaded protocol and final IDLE state are both explicit.
+    reset_to_idle(
+        monitor, teensy, _log,
+        timeout_s=RST_RELOAD_SETTLE_S,
+        require_hlfb_quick=True,
+    )
 
     # --- Phase 1: baseline + protocol-loaded check ----------------------
     teensy.set_run(0)

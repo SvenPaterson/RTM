@@ -10,17 +10,16 @@ the gate re-armed by every reset. Concretely:
     3. Drop RUN. Expect RUNNING -> PAUSED.
     4. RAISE RUN AGAIN (without dropping). Expect PAUSED -> RUNNING
        (resume edge) — verifies the rising edge from PAUSED is honored.
-    5. Pulse RST again *while RUN is still high*. Expect CC to come
-       back to IDLE — the held-high RUN must NOT be interpreted as a
-       fresh start; the gate re-arms and waits for an edge.
-    6. Drop RUN, then raise it. Expect IDLE -> RUNNING (proves edge
-       re-arm worked).
+    5. From RUNNING, release RUN to middle (low) first, then pulse RST.
+       This matches the physical rocker path (RUN -> middle -> RESET).
+       Expect CC to come back to IDLE with no auto-start.
+    6. Raise RUN again. Expect IDLE -> RUNNING (proves edge re-arm
+       worked after reset from the physical operator path).
     7. Final cleanup: drop RUN, expect RUNNING -> PAUSED.
 
 This is the test that catches the worst class of regressions —
-"hardware reset and the rig auto-starts even though the operator's
-hand is on RUN." Per the legacy run_gate verdict, that case is a
-hard FAIL.
+"hardware reset and the rig auto-starts without a fresh RUN edge."
+Per the legacy run_gate verdict, that case is a hard FAIL.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import Counter
-from typing import Iterable, List
+from typing import Iterable, List, Tuple
 
 import pytest
 
@@ -84,25 +83,36 @@ def _wait_for_state(
     return []
 
 
-def _wait_for_proto_rx_ok(
+def _wait_for_reload_idle(
     monitor: Monitor, since_ms: float, timeout_s: float
-) -> List[Frame]:
+) -> Tuple[List[Frame], List[HbFrame], List[HbFrame]]:
     deadline = time.monotonic() + timeout_s
+    proto_rx: List[Frame] = []
+    idle_hbs: List[HbFrame] = []
+    leak_hbs: List[HbFrame] = []
     while time.monotonic() < deadline:
         snap = monitor.snapshot(since_ms=since_ms, src_ip=CC_IP)
-        hits = [
-            f for f in snap
-            if isinstance(f, GenericFrame) and f.kind == "NOTICE"
-            and f.fields.get("PROTO_RX") == "OK"
-        ]
-        if hits:
-            return hits
+        hbs = [f for f in snap if isinstance(f, HbFrame)]
+        if not proto_rx:
+            proto_rx = [
+                f for f in snap
+                if isinstance(f, GenericFrame) and f.kind == "NOTICE"
+                and f.fields.get("PROTO_RX") == "OK"
+            ]
+        leak_hbs = [h for h in hbs if h.state in ("RUNNING", "RESUME")]
+        if leak_hbs:
+            return proto_rx, idle_hbs, leak_hbs
+        idle_hbs = [h for h in hbs if h.state == "IDLE"]
+        if proto_rx and idle_hbs:
+            return proto_rx, idle_hbs, leak_hbs
         time.sleep(0.25)
-    return []
+    return proto_rx, idle_hbs, leak_hbs
 
 
 @pytest.mark.live_rig
 @pytest.mark.slow
+@pytest.mark.full
+@pytest.mark.stateful
 def test_run_gate_after_reset(monitor: Monitor, teensy: Teensy) -> None:
     """Full RUN-edge gate gauntlet across two resets."""
 
@@ -126,13 +136,31 @@ def test_run_gate_after_reset(monitor: Monitor, teensy: Teensy) -> None:
     _log.info("Step 1: RST while RUN held LOW; expect IDLE post-reload")
     rst1_t = monitor.elapsed_ms
     teensy.pulse_reset(RST_PULSE_MS)
-    proto_rx = _wait_for_proto_rx_ok(monitor, rst1_t, POST_RST_CAPTURE_S)
+    proto_rx, idle_hbs, early_bad = _wait_for_reload_idle(
+        monitor, rst1_t, POST_RST_CAPTURE_S)
     if not proto_rx:
         snap = monitor.snapshot(since_ms=rst1_t)
         pytest.fail(
             "VERDICT: STEP1_NO_RELOAD — first RST didn't complete reload "
             f"within {POST_RST_CAPTURE_S:.0f}s.\n"
             f"  Transcript:\n  {_dump(snap)}"
+        )
+    if early_bad:
+        snap = monitor.snapshot(since_ms=rst1_t)
+        pytest.fail(
+            f"VERDICT: GATE_LEAK_AT_BOOT — after reset with RUN held "
+            f"low, CC entered {early_bad[0].state} before reaching IDLE "
+            f"(would auto-start with no operator edge).\n"
+            f"  Transcript:\n  {_dump(snap)}"
+        )
+    if not idle_hbs:
+        snap = monitor.snapshot(since_ms=rst1_t)
+        hbs = [f for f in snap if isinstance(f, HbFrame) and f.src_ip == CC_IP]
+        last_state = hbs[-1].state if hbs else "NONE"
+        pytest.fail(
+            f"VERDICT: STEP1_NO_IDLE — after reset, CC's last HB was "
+            f"STATE={last_state}; expected IDLE within "
+            f"{POST_RST_CAPTURE_S:.0f}s.\n  Transcript:\n  {_dump(snap)}"
         )
     # Give CC ~2 s to settle into IDLE and observe HBs.
     time.sleep(2.0)
@@ -200,19 +228,46 @@ def test_run_gate_after_reset(monitor: Monitor, teensy: Teensy) -> None:
         )
     time.sleep(RUN_HOLD_S)
 
-    # --- Step 5: RST while RUN is HIGH; expect IDLE, no auto-start ----
-    _log.info("Step 5: RST while RUN held HIGH; expect IDLE, gate must "
-              "re-arm and ignore the held-high level")
+    # --- Step 5: physical reset path RUN->middle then RST --------------
+    _log.info("Step 5: physical reset path: drop RUN to middle, then RST")
+    edge_t = monitor.elapsed_ms
+    teensy.set_run(0)
+    if not _wait_for_state(monitor, edge_t, "PAUSED", EDGE_SETTLE_S):
+        snap = monitor.snapshot(since_ms=edge_t)
+        pytest.fail(
+            f"VERDICT: STEP5_NO_PAUSED_FOR_RESET — RUN dropped before "
+            f"reset path but no STATE=PAUSED within {EDGE_SETTLE_S:.1f}s.\n"
+            f"  Transcript:\n  {_dump(snap)}"
+        )
+
+    _log.info("Step 5: pulse RST from middle (RUN low); expect IDLE")
     rst2_t = monitor.elapsed_ms
-    teensy.pulse_reset(RST_PULSE_MS)  # RUN stays high throughout
-    proto_rx2 = _wait_for_proto_rx_ok(monitor, rst2_t, POST_RST_CAPTURE_S)
+    teensy.pulse_reset(RST_PULSE_MS)
+    proto_rx2, idle_hbs2, early_bad2 = _wait_for_reload_idle(
+        monitor, rst2_t, POST_RST_CAPTURE_S)
     if not proto_rx2:
         snap = monitor.snapshot(since_ms=rst2_t)
-        teensy.set_run(0)
         pytest.fail(
             "VERDICT: STEP5_NO_RELOAD — second RST didn't complete "
             f"reload within {POST_RST_CAPTURE_S:.0f}s.\n"
             f"  Transcript:\n  {_dump(snap)}"
+        )
+    if early_bad2:
+        snap = monitor.snapshot(since_ms=rst2_t)
+        pytest.fail(
+            f"VERDICT: GATE_LEAK_AFTER_PHYSICAL_RESET — after physical "
+            f"RUN->RST path, CC entered {early_bad2[0].state} before "
+            f"reaching IDLE.\n"
+            f"  Transcript:\n  {_dump(snap)}"
+        )
+    if not idle_hbs2:
+        snap = monitor.snapshot(since_ms=rst2_t)
+        hbs = [f for f in snap if isinstance(f, HbFrame) and f.src_ip == CC_IP]
+        last_state = hbs[-1].state if hbs else "NONE"
+        pytest.fail(
+            f"VERDICT: STEP5_NO_IDLE — after physical RUN->RST path, CC last "
+            f"HB STATE={last_state}; expected IDLE within "
+            f"{POST_RST_CAPTURE_S:.0f}s.\n  Transcript:\n  {_dump(snap)}"
         )
     time.sleep(2.0)
     post_rst2 = monitor.snapshot(since_ms=rst2_t, src_ip=CC_IP)
@@ -221,35 +276,31 @@ def test_run_gate_after_reset(monitor: Monitor, teensy: Teensy) -> None:
     bad2 = [h for h in steady2 if h.state in ("RUNNING", "RESUME")]
     if bad2:
         snap = monitor.snapshot(since_ms=rst2_t)
-        teensy.set_run(0)
         pytest.fail(
-            f"VERDICT: GATE_LEAK_RUN_HELD_HIGH — after RST with RUN held "
-            f"HIGH, CC entered {bad2[0].state} (auto-started off the "
-            f"held level instead of waiting for a fresh edge). Last 5 "
+            f"VERDICT: GATE_LEAK_AFTER_PHYSICAL_RESET — after physical "
+            f"RUN->RST path, CC entered {bad2[0].state}. Last 5 "
             f"HB states: {[h.state for h in steady2]}.\n"
             f"  Transcript:\n  {_dump(snap)}"
         )
     if not steady2 or steady2[-1].state != "IDLE":
         snap = monitor.snapshot(since_ms=rst2_t)
-        teensy.set_run(0)
         pytest.fail(
-            f"VERDICT: STEP5_NO_IDLE — after RST-with-RUN-high, CC last "
+            f"VERDICT: STEP5_NO_IDLE — after physical RUN->RST path, CC last "
             f"HB STATE={steady2[-1].state if steady2 else 'NONE'}; "
             f"expected IDLE.\n  Transcript:\n  {_dump(snap)}"
         )
-    _log.info("Step 5 OK: CC at IDLE despite RUN held high — gate re-armed")
+    _log.info("Step 5 OK: CC at IDLE after physical RUN->RST sequence")
 
-    # --- Step 6: drop RUN, raise it -> RUNNING -------------------------
-    _log.info("Step 6: drop+raise RUN; expect IDLE -> RUNNING (fresh edge)")
-    teensy.set_run(0)
-    time.sleep(0.75)
+    # --- Step 6: raise RUN -> RUNNING ----------------------------------
+    _log.info("Step 6: raise RUN; expect IDLE -> RUNNING (fresh edge)")
     edge_t = monitor.elapsed_ms
     teensy.set_run(1)
     if not _wait_for_state(monitor, edge_t, "RUNNING", EDGE_SETTLE_S):
         snap = monitor.snapshot(since_ms=edge_t)
         teensy.set_run(0)
         pytest.fail(
-            f"VERDICT: STEP6_NO_RESTART — fresh RUN edge after gate "
+            f"VERDICT: STEP6_NO_RESTART — fresh RUN edge after physical "
+            f"reset path "
             f"re-arm did not start RUNNING within {EDGE_SETTLE_S:.1f}s.\n"
             f"  Transcript:\n  {_dump(snap)}"
         )
@@ -276,6 +327,6 @@ def test_run_gate_after_reset(monitor: Monitor, teensy: Teensy) -> None:
               XPB_IP, len(xpb), dict(Counter(f.kind for f in xpb)))
     _log.info(
         "VERDICT: PASS — RUN-edge gate held across two resets: "
-        "no auto-start with RUN-low after RST, no auto-start with "
-        "RUN-high after RST, edges trigger start/pause/resume cleanly."
+        "no auto-start after physical RUN->RST path, and "
+        "edges trigger start/pause/resume cleanly."
     )

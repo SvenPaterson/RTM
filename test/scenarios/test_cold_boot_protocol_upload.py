@@ -44,6 +44,7 @@ import pytest
 
 from test.rig.monitor import Monitor
 from test.rig.parser import Frame, GenericFrame, HbFrame
+from test.rig.scenario import operator_prompt
 
 
 _log = logging.getLogger("rig.proto_upload.cold_boot")
@@ -74,23 +75,13 @@ def _dump(frames: Iterable[Frame]) -> str:
     return "\n  ".join(rows) if rows else "(none)"
 
 
-def _operator_prompt(message: str) -> None:
-    banner = f"\n{'=' * 60}\n>>> {message}\n{'=' * 60}\n"
-    sys.stderr.write(banner)
-    sys.stderr.flush()
-    try:
-        input()
-    except EOFError:
-        pytest.skip("stdin closed — interactive test cannot proceed "
-                    "(use `pytest -s` to enable input)")
-
-
 @pytest.mark.manual
 @pytest.mark.live_rig
 @pytest.mark.slow
+@pytest.mark.manual_power
 def test_cold_boot_protocol_upload(monitor: Monitor) -> None:
     """Operator-triggered reset. Auto-detects boot, captures handshake."""
-    _operator_prompt(
+    operator_prompt(
         "RESET both boards now (CC barrel-jack reseat OR power-cycle, "
         "and Nano RST button), then press Enter. Order does not matter."
     )

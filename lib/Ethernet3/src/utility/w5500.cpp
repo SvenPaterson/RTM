@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <Arduino.h>
 #include "Arduino.h"
 
 #include "utility/w5500.h"
@@ -21,7 +22,17 @@
 W5500Class w5500;
 
 // SPI details
-SPISettings wiznet_SPI_settings(8000000, MSBFIRST, SPI_MODE0);
+// RTM patch (2026-05-19): Wireshark capture (Len=120/206/256 garbage payloads
+// from XPB, AVR flash-pattern bytes \x90\xXX in observer tee) proved the
+// XPB W5500 SPI transactions were corrupting both TX and RX buffers at the
+// upstream default of 8 MHz with the current jumper-wire bring-up on Nano
+// Every. Cap the clock so we cleanly clear the noise margin; can be raised
+// per-board later once layout/decoupling is verified. Override at build
+// time with -DRTM_W5500_SPI_HZ=<hz> if a board can run faster.
+#ifndef RTM_W5500_SPI_HZ
+#define RTM_W5500_SPI_HZ 4000000UL
+#endif
+SPISettings wiznet_SPI_settings(RTM_W5500_SPI_HZ, MSBFIRST, SPI_MODE0);
 uint8_t SPI_CS;
 
 void W5500Class::init(uint8_t socketNumbers, uint8_t ss_pin)
@@ -78,13 +89,26 @@ void W5500Class::init(uint8_t socketNumbers, uint8_t ss_pin)
   }
 }
 
+// RTM patch: cap the double-read convergence loop to ~16 attempts. The
+// stock library spins forever waiting for two consecutive reads to match,
+// which hangs the MCU outright if SPI is noisy or the W5500 is wedged.
+// 16 attempts is far beyond what the W5500 ever needs on a healthy bus
+// (typically 1-2). If we never converge we return the latest read and let
+// the caller proceed -- a brief over/under-report is recoverable, a hang
+// is not.
+#ifndef RTM_W5500_FSR_MAX_ATTEMPTS
+#define RTM_W5500_FSR_MAX_ATTEMPTS 16
+#endif
+
 uint16_t W5500Class::getTXFreeSize(SOCKET s)
 {
     uint16_t val=0, val1=0;
+    uint8_t attempts = 0;
     do {
         val1 = readSnTX_FSR(s);
         if (val1 != 0)
             val = readSnTX_FSR(s);
+        if (++attempts >= RTM_W5500_FSR_MAX_ATTEMPTS) break;
     }
     while (val != val1);
     return val;
@@ -93,10 +117,12 @@ uint16_t W5500Class::getTXFreeSize(SOCKET s)
 uint16_t W5500Class::getRXReceivedSize(SOCKET s)
 {
     uint16_t val=0,val1=0;
+    uint8_t attempts = 0;
     do {
         val1 = readSnRX_RSR(s);
         if (val1 != 0)
             val = readSnRX_RSR(s);
+        if (++attempts >= RTM_W5500_FSR_MAX_ATTEMPTS) break;
     }
     while (val != val1);
     return val;
@@ -198,12 +224,21 @@ uint16_t W5500Class::read(uint16_t _addr, uint8_t _cb, uint8_t *_buf, uint16_t _
     return _len;
 }
 
+// RTM patch: bound execCmdSn wait. Stock library spins forever on
+// readSnCR(s) clearing, which hangs the MCU if SPI ever returns nonzero
+// garbage. Cap with a wall-clock timeout; the caller's command may still
+// have executed on the W5500 -- we just don't block the MCU on it.
+#ifndef RTM_W5500_CMD_TIMEOUT_MS
+#define RTM_W5500_CMD_TIMEOUT_MS 20UL
+#endif
 void W5500Class::execCmdSn(SOCKET s, SockCMD _cmd) {
     // Send command to socket
     writeSnCR(s, _cmd);
-    // Wait for command to complete
-    while (readSnCR(s))
-    ;
+    // Wait for command to complete (bounded)
+    uint32_t startMs = millis();
+    while (readSnCR(s)) {
+        if ((uint32_t)(millis() - startMs) > RTM_W5500_CMD_TIMEOUT_MS) break;
+    }
 }
 
 

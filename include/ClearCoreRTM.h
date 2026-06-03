@@ -88,6 +88,9 @@ private:
     bool heartbeatSystemEnabled_{false};
     elapsedMillis heartbeatTmr_, xpbStaleTmr_;
     elapsedMillis linkRecoveryTmr_;     // debounces UDP socket reinit attempts
+    bool          linkDownActive_{false};
+    uint32_t      linkDownSinceMs_{0};
+    uint16_t      linkReinitCount_{0};
     /* ——— debug helpers ——— */
     char debugBuf_[150];
     inline void dbg(const char *s)                    { if (SerialPort) SerialPort.Send(s); }
@@ -135,6 +138,7 @@ private:
     bool        runActiveRemote_   = false;
     bool        resetActiveRemote_ = false;
     bool        runGateReleased_   = false; //!< RUN line (active-low) ignored until XPB grants start or we observe a post-boot high
+    bool        resetGateReleased_ = false; //!< RESET line ignored until switch returns high after boot/reset
     bool        latchedRunPending_ = false; //!< Latched RUN request awaiting protocol verification
     enum class RunTrigger : uint8_t { ManualEdge, LatchedAuto };
     uint32_t    swLastUpdateMs_    = 0;
@@ -330,6 +334,14 @@ private:
             return (uint8_t)rxBuf_[rxTail_];
         }
 
+        bool observerActive() const {
+    #if RTM_TEE_TO_PC
+            return pcObserverActive_();
+    #else
+            return false;
+    #endif
+        }
+
     private:
         EthernetUDP udp_;
         IPAddress   peerIp_{RtmNet::kXpbIp[0], RtmNet::kXpbIp[1],
@@ -347,23 +359,71 @@ private:
         static constexpr size_t kTxBufSize = 192;
         char     txBuf_[kTxBufSize]{};
         uint16_t txLen_{0};
+        uint32_t unicastFailCount_{0};
+        uint32_t unicastRecycleCount_{0};
+        uint16_t unicastFailStreak_{0};
+        bool     unicastLastOk_{true};
+        // After this many consecutive endPacket()==0 results we assume the
+        // ARP entry for peerIp_ has gone stale (or the W5500 ARP cache on the
+        // far side is wedged) and recycle the local UDP socket to force a
+        // fresh ARP probe on the next transmit. Tuned conservatively: at
+        // 100 Hz heartbeat that is ~50 ms of dropped unicast before we kick.
+        static constexpr uint16_t kUnicastFailRecycleThresh = 5;
 
         // RX ring buffer fed by pumpRx_(). Power-of-two size for cheap mod.
         static constexpr size_t kRxRingSize = 256;
         char     rxBuf_[kRxRingSize]{};
         uint16_t rxHead_{0};  // write index
         uint16_t rxTail_{0};  // read index
+#if RTM_TEE_TO_PC
+        static constexpr uint32_t kUcastDiagPeriodMs = 1000;
+        uint32_t nextUcastDiagMs_{0};
+#endif
 
         void flushTx_() {
             if (txLen_ == 0) return;
             udp_.beginPacket(peerIp_, RtmNet::kUdpPort);
             udp_.write((const uint8_t*)txBuf_, txLen_);
-            udp_.endPacket();
+            const bool unicastOk = (udp_.endPacket() == 1);
+            unicastLastOk_ = unicastOk;
+            if (!unicastOk) {
+                ++unicastFailCount_;
+                if (unicastFailStreak_ < 0xFFFF) ++unicastFailStreak_;
+                if (unicastFailStreak_ >= kUnicastFailRecycleThresh) {
+                    // Stale ARP / wedged socket recovery: tear down and rebind
+                    // the local UDP endpoint so the next beginPacket() issues
+                    // a fresh ARP request for peerIp_.
+                    udp_.stop();
+                    udp_.begin(RtmNet::kUdpPort);
+                    ++unicastRecycleCount_;
+                    unicastFailStreak_ = 0;
+                }
+            } else {
+                unicastFailStreak_ = 0;
+            }
 #if RTM_TEE_TO_PC
             if (pcObserverActive_()) {
                 udp_.beginPacket(pcTeeIp_, RtmNet::kObserverPort);
                 udp_.write((const uint8_t*)txBuf_, txLen_);
                 if (!udp_.endPacket()) pcObserverUntilMs_ = 0;
+
+                const uint32_t now = Milliseconds();
+                if ((int32_t)(now - nextUcastDiagMs_) >= 0) {
+                    char diag[64];
+                    int n = snprintf(diag, sizeof(diag),
+                                     "CCDBG;UCAST_FAIL=%lu;LAST=%u;RECYC=%lu\n",
+                                     (unsigned long)unicastFailCount_,
+                                     (unsigned)(unicastLastOk_ ? 1U : 0U),
+                                     (unsigned long)unicastRecycleCount_);
+                    if (n > 0) {
+                        size_t diagLen = (size_t)n;
+                        if (diagLen >= sizeof(diag)) diagLen = sizeof(diag) - 1;
+                        udp_.beginPacket(pcTeeIp_, RtmNet::kObserverPort);
+                        udp_.write((const uint8_t*)diag, diagLen);
+                        if (!udp_.endPacket()) pcObserverUntilMs_ = 0;
+                    }
+                    nextUcastDiagMs_ = now + kUcastDiagPeriodMs;
+                }
             }
 #endif
             txLen_ = 0;
@@ -378,6 +438,11 @@ private:
                     continue;
                 }
 #endif
+                if (!isPeerIp_(udp_.remoteIP())) {
+                    while (sz-- > 0) (void)udp_.read();
+                    sz = udp_.parsePacket();
+                    continue;
+                }
                 // Read up to sz bytes into the ring. Drop on overflow rather
                 // than block — framing layer handles dropped frames via
                 // ACK/REF retries.
@@ -402,7 +467,14 @@ private:
         bool pcObserverActive_() const {
             return (int32_t)(Milliseconds() - pcObserverUntilMs_) < 0;
         }
+#endif
 
+        bool isPeerIp_(const IPAddress &ip) const {
+            return ip[0] == RtmNet::kXpbIp[0] && ip[1] == RtmNet::kXpbIp[1] &&
+                   ip[2] == RtmNet::kXpbIp[2] && ip[3] == RtmNet::kXpbIp[3];
+        }
+
+#if RTM_TEE_TO_PC
         bool isPcIp_(const IPAddress &ip) const {
             return ip[0] == RtmNet::kPcIp[0] && ip[1] == RtmNet::kPcIp[1] &&
                    ip[2] == RtmNet::kPcIp[2] && ip[3] == RtmNet::kPcIp[3];

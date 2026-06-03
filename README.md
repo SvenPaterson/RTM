@@ -77,7 +77,10 @@ Document any resulting differences in motor tuning, acceleration limits, and saf
 
 ## Programming and Debugging
 
-* Firmware is built and uploaded via PlatformIO (`platformio.ini` defines `clearcore` and `XPB` environments). See [docs/PROJECT_HANDOFF.md](docs/PROJECT_HANDOFF.md) for build/upload commands.
+* Firmware is built and uploaded via PlatformIO (`platformio.ini` defines `clearcore`, `XPB`, `XPB_PROD_TRACE`, and `XPB_DEBUG` environments). See [docs/PROJECT_HANDOFF.md](docs/PROJECT_HANDOFF.md) for build/upload commands.
+* `XPB_DEBUG` is a dedicated W5500 sanity image. It builds only `xpb_debug.cpp`, parks all non-W5500 SPI chip-selects, configures static XPB IP, listens on UDP 8888, emits heartbeat lines to UDP 8889 once per second, and echoes inbound packets.
+* `XPB_DEBUG` serial output (`115200`) reports boot status, link transitions, RX packet summaries, and heartbeat counters so wiring and basic UDP transport can be validated independently of production protocol logic.
+* XPB production firmware now periodically re-announces `NOTICE;PROTO_READY` while waiting for CC `REQ:PROTO`, so a dropped startup notice does not leave the handoff silent.
 * Inter-board frames are passively captured by the host PC over UDP; the firmware tees outgoing traffic to the PC IP so a single bind sees both directions.
 * Evaluate adding in-system programming headers (SWD/JTAG) or external debug connectors during the PCB refinement phase to shorten iteration cycles.
 * Capture the exact PlatformIO environment, ClearCore firmware revisions, and bootloader versions used for release builds.

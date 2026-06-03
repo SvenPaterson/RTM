@@ -68,6 +68,9 @@ def _dump(frames: Iterable[Frame]) -> str:
 
 @pytest.mark.live_rig
 @pytest.mark.slow
+@pytest.mark.smoke
+@pytest.mark.full
+@pytest.mark.stateful
 def test_rst_pulse_reloads_protocol(monitor: Monitor, teensy: Teensy) -> None:
     """Teensy-driven RST pulse triggers full reload; verify on the wire."""
 

@@ -1,4 +1,0 @@
-# rig_trace started 2026-05-12T15:28:49.341
-[rig_trace] start 2026-05-12T15:28:49.341  cc=COM8 xpb=- udp=8888
-[+      1.6 ms] [NET] <listening on :8888>
-[+      2.3 ms] [CC ] <opened COM8 @ 9600>

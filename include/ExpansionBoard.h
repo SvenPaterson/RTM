@@ -23,6 +23,10 @@
 #include <Ethernet3.h>
 #include <EthernetUdp3.h>
 
+#ifndef XPB_PROTO_TRACE
+#define XPB_PROTO_TRACE 0
+#endif
+
 // === MCU-specific (guarded) ===
 #if defined(ARDUINO_ARCH_AVR)
   #include <avr/io.h>
@@ -79,6 +83,8 @@ private:
     bool          ccReady_ = false;
     bool          ccAnySeen_ = false;
     elapsedMillis sinceBoot;
+    uint8_t       quiesceSecsPending_{0};
+    bool          quiesceSent_{false};
     uint32_t estopUiMaskUntilMs_ = 0;       // While now < this, show "Resetting" instead of E-STOP.
     /// @brief If true, suppress the Resume? prompt after boot (XPB-only reboot).
 
@@ -112,6 +118,9 @@ private:
     uint16_t      hbSeq_ = 0;
 
     elapsedMillis linkRecoveryTmr_;     // debounces UDP socket reinit attempts
+    bool          linkDownActive_{false};
+    uint32_t      linkDownSinceMs_{0};
+    uint16_t      linkReinitCount_{0};
 
     bool  ccAlarmActive_ = false;
     char  ccAlarmMsg_[LCDDriver::kNumCols + 1] = {0};
@@ -309,12 +318,16 @@ private:
         Timeout        // our own timeout
     };
     ProtoTxState protoState_ = ProtoTxState::Idle;
+    const char *protoStateName_(ProtoTxState s) const;
+    void setProtoState_(ProtoTxState next, const char *reason);
     elapsedMillis sdRecoveryTmr_{0};   // non-blocking SD retry cadence
     elapsedMillis protoSince_{0};      
+    elapsedMillis protoReadyTmr_{0};
     uint16_t     lastProtoRef_ = 0;
     uint8_t      protoStepSent_ = 0;
     static constexpr uint16_t kProtoAckTimeoutMs_ = 1500;
     static constexpr uint16_t kProtoSilenceTimeoutMs = 3000;
+    static constexpr uint16_t kProtoReadyResendMs = 2000;
 
     // ---------- Preheat control ----------
     bool           preheatActive_{false};
@@ -378,11 +391,18 @@ private:
             udp_.begin(RtmNet::kUdpPort);
             txLen_ = 0;
             rxHead_ = rxTail_ = 0;
-            lastRxMs_ = millis();   // arm next stale window from now
         }
 
-        /** @brief Milliseconds since last successful UDP RX from any peer. */
+        /** @brief Milliseconds since last successful UDP RX from ClearCore peer. */
         uint32_t rxAgeMs() const { return millis() - lastRxMs_; }
+
+        bool observerActive() const {
+    #if RTM_TEE_TO_PC
+            return pcObserverActive_();
+    #else
+            return false;
+    #endif
+        }
 
         /** @brief Buffer until '\n', then ship one datagram per frame. */
         void serialSend(const char* data) override {
@@ -470,6 +490,7 @@ private:
 
         void flushTx_() {
             if (txLen_ == 0) return;
+
             udp_.beginPacket(peerIp_, RtmNet::kUdpPort);
             udp_.write((const uint8_t*)txBuf_, txLen_);
             udp_.endPacket();
@@ -491,7 +512,12 @@ private:
                     continue;
                 }
 #endif
-                lastRxMs_ = millis();   // any RX resets stale watchdog
+                if (!isPeerIp_(udp_.remoteIP())) {
+                    while (sz-- > 0) (void)udp_.read();
+                    sz = udp_.parsePacket();
+                    continue;
+                }
+                lastRxMs_ = millis();   // only ClearCore RX resets stale watchdog
                 while (sz > 0) {
                     uint8_t next = (uint8_t)((rxHead_ + 1) % kRxRingSize);
                     if (next == rxTail_) {
@@ -513,7 +539,14 @@ private:
         bool pcObserverActive_() const {
             return (int32_t)(millis() - pcObserverUntilMs_) < 0;
         }
+#endif
 
+        bool isPeerIp_(const IPAddress &ip) const {
+            return ip[0] == RtmNet::kCcIp[0] && ip[1] == RtmNet::kCcIp[1] &&
+                   ip[2] == RtmNet::kCcIp[2] && ip[3] == RtmNet::kCcIp[3];
+        }
+
+#if RTM_TEE_TO_PC
         bool isPcIp_(const IPAddress &ip) const {
             return ip[0] == RtmNet::kPcIp[0] && ip[1] == RtmNet::kPcIp[1] &&
                    ip[2] == RtmNet::kPcIp[2] && ip[3] == RtmNet::kPcIp[3];

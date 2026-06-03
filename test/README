@@ -1,15 +1,20 @@
 RTM Test Harness
 ================
 
+For the complete operator procedure, suite options, manual workflows, and
+troubleshooting guide, see ``docs/TEST_PROCEDURE.md``.
+
 The harness is a small pytest suite that passively listens to the rig's UDP
-traffic on the host PC. There is no firmware actuation surface — RUN/RESET
-must be driven from the front panel, and power is wall-switched.
+traffic on the host PC. Automated scenarios can drive RUN/RST through the
+Teensy rig controller. Controller power-cycle, SD protocol swaps, and thermal
+stimulus remain manual-assisted.
 
 Layout
 ------
 - ``test/rig/parser.py``       — wire frame → typed dataclass
 - ``test/rig/monitor.py``      — UDP listener thread + frame queue
 - ``test/rig/assertions.py``   — ``wait_for`` / ``expect`` helpers
+- ``test/rig/scenario.py``     — shared live-rig scenario helpers
 - ``test/scenarios/``          — pytest scenarios (one file per S-numbered case)
 - ``test/log/<YYYY>/<MM>/<DD>/<HHMMSS>_pytest.log`` — per-session log
 
@@ -33,16 +38,78 @@ From repo root:
 
 ::
 
-    python -m pytest test/scenarios/ -v
+    python -m pytest test/scenarios/ -v -m "not manual"
+
+  Smoke run:
+
+  ::
+
+    python -m pytest test/scenarios/ -v -m smoke
+
+  Manual-assisted runs need ``-s`` so prompts can read stdin:
+
+  ::
+
+    python -m pytest test/scenarios/test_cold_boot_protocol_upload.py -v -s
+
+  Run all manual-assisted scenarios (including any ``manual_power``,
+  ``manual_protocol``, and ``manual_thermal`` subgroup tests):
+
+  ::
+
+    python -m pytest test/scenarios/ -v -s -m "manual"
+
+  Run manual subgroup slices:
+
+  ::
+
+    python -m pytest test/scenarios/ -v -s -m "manual_power"
+    python -m pytest test/scenarios/ -v -s -m "manual_protocol"
+    python -m pytest test/scenarios/ -v -s -m "manual_thermal"
+
+  Manual protocol/thermal safety gate:
+
+  ::
+
+    During SD swap workflows, the harness now requires typed confirmation
+    tokens before reset-driven validation begins:
+      - protocol swap: type SWAPPED
+      - thermal preheat: type READY
+    This prevents false failures while the SD card is intentionally removed
+    or XPB is still rebooting.
+
+  Thermal scenario mode toggle:
+
+  ::
+
+    python -m pytest test/scenarios/test_manual_thermal_preheat.py -v -s --manual-thermal-mode body
+    python -m pytest test/scenarios/test_manual_thermal_preheat.py -v -s --manual-thermal-mode external
 
   Use ``--rig-port`` to override the observer capture port and
   ``--rig-firmware-port`` to override the board control/beacon port.
+  Smoke-marked scenarios run first during the full automated suite. By default,
+  a smoke failure or skip stops the session before later automated tests run;
+  pass ``--no-smoke-gate`` only when intentionally collecting more failures.
 
 Markers:
 
 - ``live_rig`` — requires the rig to be powered and on the network.
-- ``manual``   — requires operator action (e.g. press RUN/RESET).
+- ``smoke``    — short live-rig confidence path.
+- ``full``     — automated full-regression scenario.
+- ``stateful`` — mutates physical rig state and self-normalizes preconditions.
+- ``requires_hlfb_quick`` — expects the ``HLFB_QUICK`` protocol baseline.
+- ``manual``   — requires operator action.
+- ``manual_power`` — manual controller power-cycle or unplug/replug.
+- ``manual_protocol`` — manual SD protocol swap or edit.
+- ``manual_thermal`` — manual thermal stimulus or supervision.
 - ``slow``     — long-running scenarios.
+
+Current manual scenarios:
+
+- ``test_cold_boot_protocol_upload.py``
+- ``test_manual_power_loss_resume.py``
+- ``test_manual_protocol_swap.py``
+- ``test_manual_thermal_preheat.py``
 
 Skip the manual ones with ``-m "not manual"``.
 
@@ -50,6 +117,15 @@ Conventions
 -----------
 - Each test gets a fresh ``Monitor`` (function scope) — frame buffer and clock
   start at zero per test.
+- Stateful automated tests normalize the physical rig state before asserting
+  behavior. Collection order is for readable transcripts, not correctness.
 - Pass/fail is determined from observable UDP telemetry (``HB;STATE=…``,
   ``STAT;…``, ``NOTICE;…``, ``PR_*``) — never from internal firmware state.
+- ``test_protocol_upload.py`` is passive and order-tolerant: ``RUNNING``,
+  ``PAUSED``, or ``COMPLETED`` heartbeats count as proof that a protocol was
+  already loaded/executed. Use ``test_reset_reloads_protocol.py`` for the
+  deterministic reset-to-upload chain.
+- Reset-gate checks wait for both ``NOTICE;PROTO_RX=OK`` and a later ``IDLE``
+  heartbeat. ``PROTO_RX=OK`` can arrive several seconds before CC finishes
+  the post-reset ``BOOTING`` window.
 - On failure, dump the last N frames so the log file is enough to diagnose.

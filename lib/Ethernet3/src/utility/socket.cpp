@@ -6,8 +6,20 @@
  
 #include "utility/w5500.h"
 #include "utility/socket.h"
+#include <Arduino.h>
+
+// RTM patch: bound the busy-wait in sendUDP()/send() on SnIR::SEND_OK to a
+// wall-clock ceiling. Stock library spins forever if SPI returns garbage or
+// the W5500 never raises SEND_OK/TIMEOUT (e.g. ARP failure pre-cache).
+// Treat exceeding the wall-clock as a soft fail (return 0) so the caller can
+// retry instead of hanging the entire MCU. Default 60 ms covers normal ARP +
+// TX time at 10/100 Mbps with margin.
+#ifndef RTM_W5500_SEND_TIMEOUT_MS
+#define RTM_W5500_SEND_TIMEOUT_MS 60UL
+#endif
 
 static uint16_t local_port;
+
 
 /**
  * @brief	This Socket function initialize the channel in perticular mode, and set the port and wait for w5500 done it.
@@ -391,13 +403,21 @@ int startUDP(SOCKET s, uint8_t* addr, uint16_t port)
 int sendUDP(SOCKET s)
 {
   w5500.execCmdSn(s, Sock_SEND);
-		
+
   /* +2008.01 bj */
-  while ( (w5500.readSnIR(s) & SnIR::SEND_OK) != SnIR::SEND_OK ) 
+  /* RTM patch: cap the wait so a stuck SnIR can never hang the MCU. */
+  uint32_t rtmStartMs = millis();
+  while ( (w5500.readSnIR(s) & SnIR::SEND_OK) != SnIR::SEND_OK )
   {
     if (w5500.readSnIR(s) & SnIR::TIMEOUT)
     {
       /* +2008.01 [bj]: clear interrupt */
+      w5500.writeSnIR(s, (SnIR::SEND_OK|SnIR::TIMEOUT));
+      return 0;
+    }
+    if ((uint32_t)(millis() - rtmStartMs) > RTM_W5500_SEND_TIMEOUT_MS)
+    {
+      /* RTM: soft-fail and let the caller retry on the next tick. */
       w5500.writeSnIR(s, (SnIR::SEND_OK|SnIR::TIMEOUT));
       return 0;
     }

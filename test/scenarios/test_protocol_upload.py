@@ -8,10 +8,12 @@ a fresh cold boot autonomously. So this test is *passive*: it listens
 for ``OBSERVE_S`` seconds and renders a verdict based on what's on the
 wire.
 
-Two verdicts:
+Three verdicts:
 
     * **PROTOCOL LOADED** — at least one HB shows STEP > 1 or
       LOOP_TOT > 1, or a ``NOTICE;PROTO_RX=OK`` was seen in the window.
+        * **PROTOCOL ALREADY EXECUTED** — CC is already RUNNING, PAUSED, or
+            COMPLETED when this passive test runs later in the suite.
     * **EMPTY WEDGE** — all HBs show ``STEP=1 LOOP=1/1`` and no
       protocol-upload frames flew. This is the "never loaded" failure
       mode the user reported.
@@ -60,6 +62,7 @@ def _summarize_frames(frames: Iterable[Frame], limit: int = 12) -> str:
 
 
 @pytest.mark.live_rig
+@pytest.mark.full
 def test_protocol_actually_loaded(monitor: Monitor) -> None:
     """Passive observation: is a real protocol actually loaded on CC?"""
     monitor.clear()
@@ -105,6 +108,9 @@ def test_protocol_actually_loaded(monitor: Monitor) -> None:
     real_proto_hbs = [
         h for h in hbs if h.step > 1 or h.loop_total > 1 or h.loop_idx > 1
     ]
+    execution_state_hbs = [
+        h for h in hbs if h.state in ("RUNNING", "PAUSED", "COMPLETED")
+    ]
     proto_rx_ok = [
         f for f in cc_frames
         if isinstance(f, GenericFrame)
@@ -120,10 +126,22 @@ def test_protocol_actually_loaded(monitor: Monitor) -> None:
     )
     _log.info("HBs with STEP>1 or LOOP_TOT>1: %d / %d",
               len(real_proto_hbs), len(hbs))
+    _log.info("HBs in execution/completion states: %d / %d",
+              len(execution_state_hbs), len(hbs))
     _log.info("NOTICE;PROTO_RX=OK frames: %d", len(proto_rx_ok))
 
     if real_proto_hbs or proto_rx_ok:
         _log.info("VERDICT: PROTOCOL LOADED")
+        return
+
+    if execution_state_hbs:
+        loaded_hb = execution_state_hbs[-1]
+        _log.info(
+            "VERDICT: PROTOCOL ALREADY EXECUTED — observed STATE=%s "
+            "STEP=%d LOOP=%d/%d",
+            loaded_hb.state, loaded_hb.step, loaded_hb.loop_idx,
+            loaded_hb.loop_total,
+        )
         return
 
     # --- Empty wedge. Build a sharp diagnostic.

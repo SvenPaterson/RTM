@@ -71,6 +71,8 @@ def _dump(frames: Iterable[Frame]) -> str:
 
 @pytest.mark.live_rig
 @pytest.mark.slow
+@pytest.mark.full
+@pytest.mark.stateful
 def test_subthreshold_rst_pulses_are_cancelled(
     monitor: Monitor, teensy: Teensy
 ) -> None:
@@ -123,6 +125,11 @@ def test_subthreshold_rst_pulses_are_cancelled(
         if isinstance(f, GenericFrame) and f.kind == "CMD"
         and f.fields.get("RESET") == "EXEC"
     ]
+    cmd_cancel = [
+        f for f in cc
+        if isinstance(f, GenericFrame) and f.kind == "CMD"
+        and f.fields.get("RESET") == "CANCEL"
+    ]
     xpb_reset = [
         f for f in (cc + xpb)
         if isinstance(f, GenericFrame) and f.kind == "NOTICE"
@@ -144,6 +151,8 @@ def test_subthreshold_rst_pulses_are_cancelled(
     _log.info("  SW;RST=1 from XPB     : %d", len(sw_rst_edges))
     _log.info("  CMD;RESET=ARM         : %d  (operator-feedback ok)",
               len(cmd_arm))
+    _log.info("  CMD;RESET=CANCEL      : %d  (expected for sub-threshold)",
+              len(cmd_cancel))
     _log.info("  CMD;RESET=EXEC        : %d  (FORBIDDEN)", len(cmd_exec))
     _log.info("  NOTICE;XPB_RESET=...  : %d  (FORBIDDEN)", len(xpb_reset))
     _log.info("  REQ:PROTO             : %d  (FORBIDDEN)", len(req_proto))
@@ -186,9 +195,44 @@ def test_subthreshold_rst_pulses_are_cancelled(
             f"reset.\n  Transcript:\n  {_dump(snap)}"
         )
 
+    # Every ARM must cancel before the next ARM and before any EXEC.
+    reset_events = [
+        f for f in cc
+        if isinstance(f, GenericFrame) and f.kind == "CMD"
+        and f.fields.get("RESET") in {"ARM", "CANCEL", "EXEC"}
+    ]
+    pending_arm = None
+    for evt in reset_events:
+        marker = evt.fields.get("RESET")
+        if marker == "ARM":
+            if pending_arm is not None:
+                pytest.fail(
+                    "VERDICT: ARM_WITHOUT_CANCEL — saw CMD;RESET=ARM before "
+                    "the prior ARM was cancelled.\n"
+                    f"  Transcript:\n  {_dump(snap)}"
+                )
+            pending_arm = evt
+        elif marker == "EXEC" and pending_arm is not None:
+            pytest.fail(
+                "VERDICT: ARM_ESCALATED_TO_EXEC — sub-threshold ARM escalated "
+                "to EXEC before cancel.\n"
+                f"  Transcript:\n  {_dump(snap)}"
+            )
+        elif marker == "CANCEL" and pending_arm is not None:
+            pending_arm = None
+
+    if pending_arm is not None:
+        pytest.fail(
+            "VERDICT: MISSING_CANCEL — saw CMD;RESET=ARM with no matching "
+            "CMD;RESET=CANCEL in capture window.\n"
+            f"  Transcript:\n  {_dump(snap)}"
+        )
+
     # State sanity: CC must not have spuriously transitioned out of
     # IDLE/PAUSED into RUNNING/RESUME during the pulse train.
-    forbidden_states = {"RUNNING", "RESUME", "BOOT", "RESETREQUESTED"}
+    forbidden_states = {
+        "RUNNING", "RESUME", "BOOT", "BOOTING", "PROTO_LOADING",
+    }
     bad_state_hbs = [
         f for f in cc
         if isinstance(f, HbFrame) and f.state.upper() in forbidden_states

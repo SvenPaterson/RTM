@@ -20,6 +20,7 @@ import pytest
 
 from test.rig.monitor import Monitor
 from test.rig.parser import Frame, GenericFrame, HbFrame
+from test.rig.scenario import classify_reload, reload_verdict
 from test.rig.teensy import Teensy
 
 
@@ -58,61 +59,14 @@ def _classify_iteration(
     snap: List[Frame],
 ) -> Tuple[str, dict]:
     """Return (verdict, marker_counts) for a single iteration's snapshot."""
-    cc = [f for f in snap if f.src_ip == CC_IP]
-    xpb = [f for f in snap if f.src_ip == XPB_IP]
-
-    sw_rst = [
-        f for f in xpb
-        if isinstance(f, GenericFrame) and f.kind == "SW"
-        and f.fields.get("RST") == "1"
-    ]
-    cmd_exec = [
-        f for f in cc
-        if isinstance(f, GenericFrame) and f.kind == "CMD"
-        and f.fields.get("RESET") == "EXEC"
-    ]
-    req_proto = [f for f in cc if f.kind in ("REQ:PROTO", "REQ")]
-    pr_beg = [f for f in xpb if f.kind == "PR_BEG"]
-    pr_end = [f for f in xpb if f.kind == "PR_END"]
-    proto_rx_ok = [
-        f for f in cc
-        if isinstance(f, GenericFrame) and f.kind == "NOTICE"
-        and f.fields.get("PROTO_RX") == "OK"
-    ]
-    idle_hbs = [
-        f for f in cc
-        if isinstance(f, HbFrame) and f.state == "IDLE"
-    ]
-
-    counts = {
-        "SW;RST=1": len(sw_rst),
-        "CMD;RESET=EXEC": len(cmd_exec),
-        "REQ:PROTO": len(req_proto),
-        "PR_BEG": len(pr_beg),
-        "PR_END": len(pr_end),
-        "PROTO_RX=OK": len(proto_rx_ok),
-        "IDLE HBs": len(idle_hbs),
-    }
-
-    if not sw_rst:
-        return "NO_SW_RST", counts
-    if not cmd_exec:
-        return "STALL_NO_EXEC", counts
-    if not req_proto:
-        return "STALL_NO_REREQ", counts
-    if not pr_beg:
-        return "STALL_NO_PR_BEG", counts
-    if not pr_end:
-        return "STALL_NO_PR_END", counts
-    if not proto_rx_ok:
-        return "STALL_NO_PROTO_RX_OK", counts
-    if not idle_hbs:
-        return "STALL_NO_IDLE", counts
-    return "PASS", counts
+    result = classify_reload(snap)
+    return reload_verdict(result), dict(result.counts)
 
 
 @pytest.mark.live_rig
 @pytest.mark.slow
+@pytest.mark.full
+@pytest.mark.stateful
 def test_back_to_back_rst_pulses_each_reload(
     monitor: Monitor, teensy: Teensy
 ) -> None:
